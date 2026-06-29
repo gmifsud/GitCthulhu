@@ -6,7 +6,8 @@ members = [
     "keyring_adapter",
     "ssh_adapter",
     "auth_adapter",
-    "config_adapter"
+    "config_adapter",
+    "cache_adapter"
 ]
 resolver = "2"
 

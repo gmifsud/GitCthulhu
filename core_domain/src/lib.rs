@@ -2,8 +2,10 @@
 //! This crate contains the pure business logic and ports (interfaces).
 //! It has zero dependencies on any UI framework (iced) or Git implementation (gitoxide).
 
+use serde::{Serialize, Deserialize};
+
 /// Represents a Git commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commit {
     pub id: String,
     pub parent_ids: Vec<String>,
@@ -13,7 +15,7 @@ pub struct Commit {
 }
 
 /// Represents a node in the visual commit DAG
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DagNode {
     pub commit_id: String,
     pub lane: usize,
@@ -88,6 +90,7 @@ pub trait SshManager {
     fn get_default_key_path(&self) -> Result<String, DomainError>;
     fn resolve_subsystem_path(&self, path: &str) -> String;
     fn prepare_ssh_env(&self) -> Result<(String, String), DomainError>;
+    fn preflight_check(&self) -> Result<(), DomainError>;
 }
 
 /// State machine for Provider Authentication workflows
@@ -97,6 +100,18 @@ pub enum AuthState {
     AwaitingLoopback,
     TokenReceived(String), // The token or authorization code
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportState {
+    Healthy,
+    Degraded(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppPhase {
+    PreFlightValidation,
+    Ready,
 }
 
 /// Port for OAuth2 integration
@@ -131,6 +146,12 @@ pub trait ConfigStore {
         F: Fn(AppSettings) + Send + 'static;
 }
 
+/// Port for High-Performance DAG caching
+pub trait GraphCache {
+    fn get_dag(&self, cache_key: &str) -> Result<Option<Vec<DagNode>>, DomainError>;
+    fn store_dag(&self, cache_key: &str, dag: &[DagNode]) -> Result<(), DomainError>;
+}
+
 /// Commands triggered by the user via the UI.
 #[derive(Debug, Clone)]
 pub enum UserCommand {
@@ -141,6 +162,8 @@ pub enum UserCommand {
 /// Events emitted by the core domain to update the UI (View-Model).
 #[derive(Debug, Clone)]
 pub enum ViewEvent {
+    PreFlightCompleted,
+    PreFlightFailed(String),
     StatusUpdated(RepoStatus),
     LogUpdated(Vec<Commit>),
     BranchesUpdated(Vec<Branch>),
@@ -151,6 +174,8 @@ pub enum ViewEvent {
 
 /// Deterministic State Machine for the application.
 pub struct AppState {
+    pub phase: AppPhase,
+    pub transport_state: TransportState,
     pub current_status: Option<RepoStatus>,
     pub commits: Vec<Commit>,
     pub dag_nodes: Vec<DagNode>,
@@ -163,6 +188,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            phase: AppPhase::PreFlightValidation,
+            transport_state: TransportState::Healthy,
             current_status: None,
             commits: vec![],
             dag_nodes: vec![],
@@ -176,6 +203,13 @@ impl AppState {
     /// Process an event and transition state.
     pub fn apply_event(&mut self, event: ViewEvent) {
         match event {
+            ViewEvent::PreFlightCompleted => {
+                self.phase = AppPhase::Ready;
+                self.transport_state = TransportState::Healthy;
+            }
+            ViewEvent::PreFlightFailed(reason) => {
+                self.transport_state = TransportState::Degraded(reason);
+            }
             ViewEvent::StatusUpdated(status) => {
                 self.current_status = Some(status);
                 self.loading = false;

@@ -105,6 +105,37 @@ impl GitApp {
     fn view(&self) -> Element<Message> {
         let tokens = self.tokens;
 
+        if let core_domain::TransportState::Degraded(ref reason) = self.state.transport_state {
+            let modal_content = column![
+                text("DIAGNOSTIC PRE-FLIGHT FAILED")
+                    .size(24)
+                    .style(move |_| text::Style { color: Some(tokens.accent_primary) }),
+                text("SSH Capabilities Missing or Frozen.")
+                    .size(16)
+                    .style(move |_| text::Style { color: Some(tokens.text_primary) }),
+                text(reason)
+                    .size(14)
+                    .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+                button("Copy Remediation Command")
+                    .on_press(Message::RefreshRepository) // Mock action
+            ]
+            .spacing(20)
+            .padding(40);
+
+            return container(modal_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(Background::Color(tokens.bg_app)),
+                    text_color: Some(tokens.text_primary),
+                    border: Border::default(),
+                    shadow: Shadow::default(),
+                })
+                .into();
+        }
+
         // Custom style helpers replacing generic themes with strict tokens
         let sidebar_style = move |_theme: &Theme| container::Style {
             background: Some(Background::Color(tokens.bg_sidebar)),

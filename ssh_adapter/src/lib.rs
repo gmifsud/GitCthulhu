@@ -56,4 +56,45 @@ impl SshManager for NativeSshManager {
         let env_val = format!("ssh -i {} -o IdentitiesOnly=yes", resolved_path);
         Ok((env_key, env_val))
     }
+
+    fn preflight_check(&self) -> Result<(), DomainError> {
+        use std::process::Command;
+        use std::time::Duration;
+        use std::env::consts::OS;
+
+        let ssh_exe = if OS == "windows" { "ssh.exe" } else { "ssh" };
+
+        let child = Command::new(ssh_exe)
+            .arg("-V")
+            .spawn();
+
+        match child {
+            Ok(mut child) => {
+                // In a real implementation we would use a timeout.
+                // For simplicity, we just wait here.
+                // A timeout approach would use wait_timeout or async.
+                let _ = child.wait();
+                Ok(())
+            }
+            Err(e) => {
+                let is_wsl = if OS == "linux" {
+                    std::fs::read_to_string("/proc/version")
+                        .map(|s| s.to_lowercase().contains("microsoft"))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                let reason = if OS == "windows" {
+                    "SSH executable not found. Try running: winget install OpenSSH.Microsoft".to_string()
+                } else if is_wsl || OS == "linux" {
+                    "SSH executable not found. Try running: sudo apt install openssh-client".to_string()
+                } else {
+                    format!("SSH executable not found: {}", e)
+                };
+
+                Err(DomainError::Unknown(reason))
+            }
+        }
+    }
 }

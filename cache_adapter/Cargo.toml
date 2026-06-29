@@ -1,0 +1,10 @@
+[package]
+name = "cache_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance persistence layer using redb"
+
+[dependencies]
+core_domain = { path = "../core_domain" }
+redb = "2.1.1"
+bincode = "1.3.3"

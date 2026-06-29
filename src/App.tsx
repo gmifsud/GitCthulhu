@@ -58,6 +58,14 @@ const RUST_CODE_TREE = [
       { name: 'Cargo.toml', type: 'file' },
     ]
   },
+  {
+    name: 'cache_adapter',
+    type: 'folder',
+    children: [
+      { name: 'src', type: 'folder', children: [{ name: 'lib.rs', type: 'file' }] },
+      { name: 'Cargo.toml', type: 'file' },
+    ]
+  },
   { name: 'Cargo.toml', type: 'file' },
 ];
 
@@ -75,8 +83,12 @@ export default function App() {
     'ssh_adapter/src': false,
     'auth_adapter': false,
     'auth_adapter/src': false,
-    'config_adapter': true,
-    'config_adapter/src': true,
+    'config_adapter': false,
+    'config_adapter/src': false,
+    'cache_adapter': true,
+    'cache_adapter/src': true,
+    'gui_app': false,
+    'gui_app/src': false,
   });
 
   const toggleFolder = (path: string) => {
@@ -124,7 +136,7 @@ export default function App() {
             </div>
           </div>
           <nav className="hidden md:flex gap-6 text-[10px] uppercase tracking-widest font-bold ml-6">
-            <span className="text-[#F27D26]">Phase 8.5: Reactive Configuration (Hot-Reloading)</span>
+            <span className="text-[#F27D26]">Phase 10: High-Performance Graph Caching</span>
           </nav>
         </div>
         <div className="flex items-center gap-3">
@@ -170,7 +182,7 @@ export default function App() {
           <div className="h-10 border-b border-[#2D2D30] flex items-center px-4 bg-[#111214] justify-between shrink-0">
             <div className="flex items-center gap-2">
               <Code2 className="w-4 h-4 text-[#F27D26]" />
-              <span className="text-[11px] font-mono text-[#D1D1D1]">config_adapter/src/lib.rs</span>
+              <span className="text-[11px] font-mono text-[#D1D1D1]">cache_adapter/src/lib.rs</span>
             </div>
             <div className="flex gap-2">
               <span className="px-3 py-1 bg-[#2D2D30] text-[#5A5A5A] text-[10px] font-bold uppercase rounded border border-[#3A3B40]">Read Only</span>
@@ -178,93 +190,76 @@ export default function App() {
           </div>
           
           <div className="flex-1 overflow-auto p-4 bg-[#0D0D0F]">
-            <pre className="text-[11px] font-mono text-[#D1D1D1] leading-relaxed"><code>{`//! config_adapter
-//! Implements the ConfigStore port for persisting user-defined settings using confy.
+            <pre className="text-[11px] font-mono text-[#D1D1D1] leading-relaxed"><code>{`//! cache_adapter
+//! Implements GraphCache using \`redb\` for embedded storage and \`bincode\` for fast binary serialization.
 
-use core_domain::{AppSettings, ConfigStore, DomainError};
-use serde::{Deserialize, Serialize};
+use core_domain::{DagNode, DomainError, GraphCache};
+use redb::{Database, TableDefinition};
+use std::path::Path;
 
-#[derive(Serialize, Deserialize)]
-struct AppSettingsDto {
-    pub theme: String,
-    pub repository_shortcuts: Vec<String>,
+const DAG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("dag_cache");
+
+pub struct RedbGraphCache {
+    db: Database,
 }
 
-impl Default for AppSettingsDto {
-    fn default() -> Self {
-        Self {
-            theme: "DeepFocus".to_string(),
-            repository_shortcuts: vec![],
-        }
-    }
-}
-
-pub struct ConfyConfigStore {
-    app_name: String,
-}
-
-impl ConfyConfigStore {
-    pub fn new(app_name: &str) -> Self {
-        Self {
-            app_name: app_name.to_string(),
-        }
-    }
-}
-
-impl ConfigStore for ConfyConfigStore {
-    fn load_settings(&self) -> Result<AppSettings, DomainError> {
-        let dto: AppSettingsDto = confy::load(&self.app_name, None)
-            .map_err(|e| DomainError::Unknown(format!("Failed to load config: {}", e)))?;
+impl RedbGraphCache {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, DomainError> {
+        let db = Database::create(path)
+            .map_err(|e| DomainError::Unknown(format!("Failed to open redb database: {}", e)))?;
         
-        Ok(AppSettings {
-            theme: dto.theme,
-            repository_shortcuts: dto.repository_shortcuts,
-        })
-    }
-
-    fn save_settings(&self, settings: &AppSettings) -> Result<(), DomainError> {
-        let dto = AppSettingsDto {
-            theme: settings.theme.clone(),
-            repository_shortcuts: settings.repository_shortcuts.clone(),
-        };
-        
-        confy::store(&self.app_name, None, dto)
-            .map_err(|e| DomainError::Unknown(format!("Failed to save config: {}", e)))
-    }
-
-    fn watch_settings<F>(&self, callback: F) -> Result<(), DomainError> 
-    where
-        F: Fn(AppSettings) + Send + 'static
-    {
-        use notify::{Watcher, RecursiveMode, EventKind};
-        use std::sync::mpsc::channel;
-
-        let path = confy::get_configuration_file_path(&self.app_name, None)
-            .map_err(|e| DomainError::Unknown(format!("Failed to get config path: {}", e)))?;
-
-        let app_name = self.app_name.clone();
-
-        std::thread::spawn(move || {
-            let (tx, rx) = channel();
-            let mut watcher = notify::recommended_watcher(tx).unwrap();
+        // Ensure table exists
+        let write_txn = db.begin_write()
+            .map_err(|e| DomainError::Unknown(format!("Failed to start write txn: {}", e)))?;
+        {
+            let _table = write_txn.open_table(DAG_TABLE)
+                .map_err(|e| DomainError::Unknown(format!("Failed to open table: {}", e)))?;
+        }
+        write_txn.commit()
+            .map_err(|e| DomainError::Unknown(format!("Failed to commit table creation: {}", e)))?;
             
-            watcher.watch(&path, RecursiveMode::NonRecursive).unwrap();
+        Ok(Self { db })
+    }
+}
 
-            for res in rx {
-                if let Ok(event) = res {
-                    if matches!(event.kind, EventKind::Modify(_)) {
-                        if let Ok(dto) = confy::load::<AppSettingsDto>(&app_name, None) {
-                            let new_settings = AppSettings {
-                                theme: dto.theme,
-                                repository_shortcuts: dto.repository_shortcuts,
-                            };
-                            callback(new_settings);
-                        }
-                    }
-                }
-            }
-        });
+impl GraphCache for RedbGraphCache {
+    fn get_dag(&self, cache_key: &str) -> Result<Option<Vec<DagNode>>, DomainError> {
+        let read_txn = self.db.begin_read()
+            .map_err(|e| DomainError::Unknown(format!("Failed to start read txn: {}", e)))?;
+            
+        let table = read_txn.open_table(DAG_TABLE)
+            .map_err(|e| DomainError::Unknown(format!("Failed to open read table: {}", e)))?;
+            
+        let value = table.get(cache_key)
+            .map_err(|e| DomainError::Unknown(format!("Failed to get cache key: {}", e)))?;
+            
+        if let Some(access) = value {
+            let bytes = access.value();
+            let dag: Vec<DagNode> = bincode::deserialize(bytes)
+                .map_err(|e| DomainError::Unknown(format!("Failed to deserialize DAG: {}", e)))?;
+            Ok(Some(dag))
+        } else {
+            Ok(None)
+        }
+    }
 
+    fn store_dag(&self, cache_key: &str, dag: &[DagNode]) -> Result<(), DomainError> {
+        let bytes = bincode::serialize(dag)
+            .map_err(|e| DomainError::Unknown(format!("Failed to serialize DAG: {}", e)))?;
+            
+        let write_txn = self.db.begin_write()
+            .map_err(|e| DomainError::Unknown(format!("Failed to start write txn: {}", e)))?;
+            
+        {
+            let mut table = write_txn.open_table(DAG_TABLE)
+                .map_err(|e| DomainError::Unknown(format!("Failed to open write table: {}", e)))?;
+            table.insert(cache_key, bytes.as_slice())
+                .map_err(|e| DomainError::Unknown(format!("Failed to insert into cache: {}", e)))?;
+        }
+        
+        write_txn.commit()
+            .map_err(|e| DomainError::Unknown(format!("Failed to commit DAG insertion: {}", e)))?;
+            
         Ok(())
     }
 }`}</code></pre>
