@@ -1,0 +1,9 @@
+[package]
+name = "keyring_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Native OS secure credential management"
+
+[dependencies]
+core_domain = { path = "../core_domain" }
+keyring = "2.3.3" # Cross-platform native keyring access

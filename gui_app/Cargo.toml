@@ -1,0 +1,10 @@
+[package]
+name = "gui_app"
+version = "0.1.0"
+edition = "2021"
+description = "Iced-based GUI application"
+
+[dependencies]
+core_domain = { path = "../core_domain" }
+git_adapter = { path = "../git_adapter" }
+iced = "0.13" # Pure Rust reactive GUI

@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "core_domain",
+    "git_adapter",
+    "gui_app",
+    "keyring_adapter",
+    "ssh_adapter",
+    "auth_adapter",
+    "config_adapter"
+]
+resolver = "2"
+
+# Optimize for cross-platform release builds
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

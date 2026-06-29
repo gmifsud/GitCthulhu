@@ -1,0 +1,9 @@
+[package]
+name = "core_domain"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency core domain for the Git GUI"
+
+[dependencies]
+# Strictly zero dependencies on OS, UI, or specific Git implementations
+rayon = "1.10.0"

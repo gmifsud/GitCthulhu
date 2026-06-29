@@ -1,0 +1,13 @@
+[package]
+name = "git_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Gitoxide adapter for the core domain"
+
+[dependencies]
+core_domain = { path = "../core_domain" }
+gix = "0.66.0" # Pure Rust Git implementation
+tokio = { version = "1.37.0", features = ["rt", "macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3.10.1"

@@ -1,0 +1,9 @@
+[package]
+name = "ssh_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Native OS SSH key resolution and subsystem pathing"
+
+[dependencies]
+core_domain = { path = "../core_domain" }
+dirs = "5.0.1" # For finding home directory

@@ -1,0 +1,9 @@
+[package]
+name = "auth_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "OAuth and PAT workflows for cloud provider authentication"
+
+[dependencies]
+core_domain = { path = "../core_domain" }
+tiny_http = "0.12.0" # Lightweight HTTP server for loopback
