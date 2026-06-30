@@ -1,0 +1,8 @@
+[package]
+name = "test_support"
+version = "0.1.0"
+edition = "2021"
+description = "Shared test fakes — only ever used via [dev-dependencies]"
+
+[dependencies]
+core_domain = { path = "../core_domain" }

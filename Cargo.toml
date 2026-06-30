@@ -7,7 +7,8 @@ members = [
     "ssh_adapter",
     "auth_adapter",
     "config_adapter",
-    "cache_adapter"
+    "cache_adapter",
+    "test_support"
 ]
 resolver = "2"
 

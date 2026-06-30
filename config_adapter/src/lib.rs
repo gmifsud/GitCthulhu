@@ -20,7 +20,7 @@ impl Default for AppSettingsDto {
 }
 
 impl From<AppSettingsDto> for AppSettings {
-    fn From(dto: AppSettingsDto) -> Self {
+    fn from(dto: AppSettingsDto) -> Self {
         Self {
             theme: dto.theme,
             repository_shortcuts: dto.repository_shortcuts,
@@ -29,7 +29,7 @@ impl From<AppSettingsDto> for AppSettings {
 }
 
 impl From<&AppSettings> for AppSettingsDto {
-    fn From(domain: &AppSettings) -> Self {
+    fn from(domain: &AppSettings) -> Self {
         Self {
             theme: domain.theme.clone(),
             repository_shortcuts: domain.repository_shortcuts.clone(),
