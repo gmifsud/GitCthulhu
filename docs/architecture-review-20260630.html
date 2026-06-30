@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GitCthulhu — Architecture Review</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root{--accent:#F27D26;--bg:#0D0D0F;--card:#151619;--border:#2D2D30;--muted:#5A5A5A;}
+  body{background:var(--bg);color:#D1D1D1;font-family:'Segoe UI',system-ui,sans-serif;}
+  .mermaid svg{background:transparent!important;}
+  .badge-strong{background:#166534;color:#4ade80;border:1px solid #166534;}
+  .badge-worth{background:#854d0e;color:#fbbf24;border:1px solid #854d0e;}
+  .badge-speculative{background:#1e3a5f;color:#93c5fd;border:1px solid #1e3a5f;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:2rem;}
+  .card-header{border-bottom:1px solid var(--border);padding:1.25rem 1.5rem;}
+  .card-body{padding:1.5rem;}
+  .diagram-box{background:#0a0a0c;border:1px solid var(--border);border-radius:8px;padding:1.25rem;font-family:monospace;font-size:11px;line-height:1.7;}
+  code{background:#1a1b1e;padding:2px 6px;border-radius:4px;font-size:12px;font-family:monospace;}
+  table{border-collapse:collapse;width:100%;}
+  th{background:#1a1b1e;color:#D1D1D1;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:8px 12px;text-align:left;}
+  td{padding:8px 12px;border-bottom:1px solid var(--border);font-size:13px;}
+  tr:last-child td{border-bottom:none;}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;}
+  .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;}
+  .stat-card{background:#151619;border:1px solid var(--border);border-radius:8px;padding:1rem;}
+  .label-red{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#ef4444;margin-bottom:.5rem;}
+  .label-green{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#22c55e;margin-bottom:.5rem;}
+  .label-orange{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#F27D26;margin-bottom:.5rem;}
+  p{font-size:13px;line-height:1.7;margin:0 0 .75rem;}
+  ul{font-size:13px;line-height:1.8;margin:0;padding-left:1.25rem;}
+  .module-before{border:1px solid #ef4444;border-radius:4px;padding:4px 8px;background:#2a0505;font-size:10px;font-family:monospace;}
+  .module-after{border:1px solid #22c55e;border-radius:6px;padding:6px 10px;background:#051a0a;}
+  .benefits-box{background:#0a0a0c;border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;}
+</style>
+</head>
+<body>
+
+<header style="border-bottom:1px solid var(--border);background:#151619;">
+  <div style="max-width:1100px;margin:0 auto;padding:1.25rem 2rem;display:flex;align-items:center;justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="width:36px;height:36px;background:#F27D26;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#000;font-size:18px;">G</div>
+      <div>
+        <div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-.01em;">GitCthulhu</div>
+        <div style="font-size:11px;color:var(--muted);font-family:monospace;letter-spacing:.05em;">ARCHITECTURE REVIEW — PoC → Production</div>
+      </div>
+    </div>
+    <div style="font-family:monospace;font-size:11px;color:var(--muted);">2026-06-30</div>
+  </div>
+</header>
+
+<main style="max-width:1100px;margin:0 auto;padding:2rem;">
+
+<!-- SUMMARY BAR -->
+<div class="grid-4" style="margin-bottom:2.5rem;">
+  <div class="stat-card"><div style="font-size:28px;font-weight:800;color:#F27D26;">8</div><div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.05em;text-transform:uppercase;">Crates analysed</div></div>
+  <div class="stat-card"><div style="font-size:28px;font-weight:800;color:#ef4444;">3</div><div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.05em;text-transform:uppercase;">Strong candidates</div></div>
+  <div class="stat-card"><div style="font-size:28px;font-weight:800;color:#fbbf24;">3</div><div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.05em;text-transform:uppercase;">Worth exploring</div></div>
+  <div class="stat-card"><div style="font-size:28px;font-weight:800;color:#93c5fd;">1</div><div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.05em;text-transform:uppercase;">Speculative</div></div>
+</div>
+
+<!-- FRICTION MAP -->
+<div class="card" style="margin-bottom:2.5rem;">
+  <div class="card-header">
+    <h2 style="font-size:15px;color:#F27D26;text-transform:uppercase;letter-spacing:.08em;margin:0;">Friction Map — Current State</h2>
+  </div>
+  <div class="card-body">
+    <div class="mermaid">
+graph LR
+  subgraph DOMAIN ["core_domain — God Module"]
+    DM["Domain Models: Commit, Branch, DagNode"]
+    PORTS["Port Traits: GitRepository, CredentialStore..."]
+    SM["AppState — state machine"]
+    DAG["build_dag — algorithm stub"]
+    VC["ViewEvent / UserCommand"]
+  end
+  subgraph ADAPTERS ["Adapters"]
+    GA["git_adapter (stubs except open_repo)"]
+    AA["auth_adapter (all commented out)"]
+    CA["config_adapter (compile error: From vs from)"]
+    KA["keyring_adapter"]
+    SA["ssh_adapter"]
+    CHA["cache_adapter (never wired up)"]
+  end
+  subgraph GUI ["gui_app (iced)"]
+    GSTRUCT["GitApp with adapter: GitoxideAdapter"]
+    HARDCODE["hardcoded branches: main, feature/iced-ui"]
+  end
+  GSTRUCT -->|"direct concrete dep — bypasses port"| GA
+  GSTRUCT -->|"calls apply_event"| SM
+  SM -->|"calls store.save_token — side-effect in state"| KA
+  SM -->|"calls build_dag inline"| DAG
+  CHA -.->|"orphaned — never used"| SM
+  AA -.->|"all commented out"| SM
+  style DOMAIN fill:#1a0505,stroke:#ef4444,stroke-width:2px
+  style GSTRUCT fill:#1a0505,stroke:#ef4444
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE A -->
+<div class="card" id="A">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE A</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">Commit Graph Layout — from stub to deep module</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>core_domain/src/lib.rs</code> → new <code>graph_layout</code> crate</div>
+    </div>
+    <span class="badge-strong" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">⬆ Strong</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-2" style="margin-bottom:1.5rem;">
+      <div>
+        <div class="label-red">Problem</div>
+        <p>The commit graph layout algorithm is the core business value of GitCthulhu — it turns a flat list of git objects into a readable branching visualisation. Right now it is a <strong>shallow stub</strong>: three lines that assign <code>lane: index % 3</code>.</p>
+        <p>It lives inside <code>core_domain</code>, which claims "zero-dependency" in its description, but pulls in <code>rayon</code> for parallelism that never runs. The algorithm is invoked as a side effect inside <code>AppState::apply_event</code>, making it impossible to test without driving the full state machine.</p>
+        <p style="margin:0;">Deletion test: if you delete <code>build_dag</code> from <code>core_domain</code>, does complexity concentrate? <strong>Yes</strong> — the domain has no graph topology concern; only commits and parent pointers.</p>
+      </div>
+      <div>
+        <div class="label-green">Solution</div>
+        <p>Extract a <code>graph_layout</code> crate with a single deep interface:</p>
+        <div class="diagram-box" style="margin-bottom:.75rem;">
+          <span style="color:#93c5fd;">pub fn</span> <span style="color:#F27D26;">layout_graph</span>(<br>
+          &nbsp;&nbsp;commits: <span style="color:#93c5fd;">&amp;[</span>Commit<span style="color:#93c5fd;">]</span>,<br>
+          ) -&gt; Vec&lt;DagNode&gt;
+        </div>
+        <p>Pure function — no state, no side effects, no async. The algorithm (topological sort, graph colouring for lanes, edge routing) develops and verifies in isolation. <code>core_domain</code> removes <code>rayon</code> and the <code>build_dag</code> fn. <code>AppState</code> holds <code>dag_nodes</code> as a derived field set by the application layer after calling <code>layout_graph</code>.</p>
+      </div>
+    </div>
+    <div class="benefits-box">
+      <div class="label-orange">Benefits — Locality &amp; Leverage</div>
+      <ul>
+        <li><strong>Locality:</strong> All graph layout logic in one place. Reading it requires no understanding of the state machine.</li>
+        <li><strong>Leverage:</strong> A pure function is trivially fuzzable and property-testable — throw 10,000 commit graphs at it. Currently zero tests cover layout.</li>
+        <li><strong>Depth:</strong> The interface (<code>&amp;[Commit] → Vec&lt;DagNode&gt;</code>) hides topological sort, DFS, lane-colouring — complex implementation behind a minimal interface.</li>
+        <li><strong>Production unblock:</strong> The stub produces nonsensical lane assignments for any real repository. This is the most user-visible gap.</li>
+      </ul>
+    </div>
+    <div class="grid-2">
+      <div>
+        <div class="label-red" style="margin-bottom:.5rem;">BEFORE — shallow, entangled</div>
+        <div class="mermaid">
+graph TD
+  AS["AppState::apply_event()"]
+  BD["build_dag in core_domain\nindex % 3 for lanes\nrayon dependency"]
+  AS -->|"calls inline"| BD
+  style AS fill:#1a0505,stroke:#ef4444
+  style BD fill:#2a0505,stroke:#ef4444
+        </div>
+      </div>
+      <div>
+        <div class="label-green" style="margin-bottom:.5rem;">AFTER — deep, pure, testable</div>
+        <div class="mermaid">
+graph TD
+  GL["graph_layout crate\nlayout_graph(&amp;[Commit]) -> Vec&lt;DagNode&gt;\npure function, no state"]
+  CD2["core_domain\nmodels + ports only\nzero-dep: truly"]
+  APP["application layer\ncalls layout_graph,\nstores result in AppState"]
+  CD2 -->|"Commit, DagNode types"| GL
+  APP -->|"uses"| GL
+  APP -->|"updates"| CD2
+  style GL fill:#051a0a,stroke:#22c55e
+  style CD2 fill:#051a0a,stroke:#22c55e
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE B -->
+<div class="card" id="B">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE B</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">gui_app direct adapter coupling — honour the seam</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>gui_app/src/main.rs</code> + new compositor module</div>
+    </div>
+    <span class="badge-strong" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">⬆ Strong</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-2" style="margin-bottom:1.5rem;">
+      <div>
+        <div class="label-red">Problem</div>
+        <p><code>GitApp</code> holds <code>adapter: GitoxideAdapter</code> — a concrete type — not <code>Box&lt;dyn GitRepository&gt;</code>. The port exists. The seam is drawn. But the GUI bypasses it by importing <code>git_adapter</code> directly.</p>
+        <p style="margin:0;"><code>Default::default()</code> constructs the adapter with a hardwired path: <code>GitoxideAdapter::new(".")</code>. There is no way to open a different repository at runtime, no way to swap in a mock for tests, and no way to support multiple repositories. This is a <strong>hypothetical seam</strong> — one adapter exists, so the trait does no real work yet.</p>
+      </div>
+      <div>
+        <div class="label-green">Solution</div>
+        <p>Introduce a compositor module that constructs adapters and injects them through ports:</p>
+        <div class="diagram-box" style="margin-bottom:.75rem;">
+<span style="color:#93c5fd;">struct</span> GitApp {<br>
+&nbsp;&nbsp;repo: Box&lt;<span style="color:#93c5fd;">dyn</span> GitRepository&gt;,<br>
+&nbsp;&nbsp;creds: Box&lt;<span style="color:#93c5fd;">dyn</span> CredentialStore&gt;,<br>
+&nbsp;&nbsp;config: Box&lt;<span style="color:#93c5fd;">dyn</span> ConfigStore&gt;,<br>
+}
+        </div>
+        <p>The compositor (in <code>main.rs</code> or a <code>composer.rs</code>) wires <code>GitoxideAdapter</code>, <code>NativeKeyring</code>, <code>ConfyConfigStore</code> and passes them in. <code>gui_app</code>'s <code>Cargo.toml</code> drops its <code>git_adapter</code> dependency — it only knows about <code>core_domain</code> ports.</p>
+      </div>
+    </div>
+    <div class="benefits-box">
+      <div class="label-orange">Benefits — Locality &amp; Leverage</div>
+      <ul>
+        <li><strong>Testability:</strong> GUI logic can be tested with an in-memory <code>MockGitRepository</code> that returns canned commits. Right now, zero GUI tests are possible.</li>
+        <li><strong>Seam becomes real:</strong> When two adapters exist the trait does work. Currently it is speculative — one adapter = hypothetical seam.</li>
+        <li><strong>Runtime repo selection:</strong> Enables "File → Open Repository" by re-injecting a new adapter after construction.</li>
+        <li><strong>Depth:</strong> <code>gui_app</code> stops knowing about adapter construction. Leverage: all adapter wiring in one compositor.</li>
+      </ul>
+    </div>
+    <div class="grid-2">
+      <div>
+        <div class="label-red" style="margin-bottom:.5rem;">BEFORE — seam bypassed</div>
+        <div class="mermaid">
+graph TD
+  GUI["gui_app::GitApp"]
+  GA_CONCRETE["GitoxideAdapter::new(.)"]
+  PORT["GitRepository trait (unused in practice)"]
+  GUI -->|"holds concrete type"| GA_CONCRETE
+  PORT -.->|"never injected"| GUI
+  style GUI fill:#1a0505,stroke:#ef4444
+  style PORT fill:#2d2d30,stroke:#555
+        </div>
+      </div>
+      <div>
+        <div class="label-green" style="margin-bottom:.5rem;">AFTER — port honoured</div>
+        <div class="mermaid">
+graph TD
+  COMP["main.rs compositor\nwires all adapters"]
+  GUI2["gui_app::GitApp\nBox&lt;dyn GitRepository&gt;"]
+  GA2["git_adapter::GitoxideAdapter"]
+  PORT2["GitRepository trait"]
+  COMP -->|"constructs"| GA2
+  COMP -->|"injects via port"| GUI2
+  GA2 -->|"implements"| PORT2
+  GUI2 -->|"calls through"| PORT2
+  style GUI2 fill:#051a0a,stroke:#22c55e
+  style COMP fill:#051a0a,stroke:#22c55e
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE C -->
+<div class="card" id="C">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE C</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">AppState — decompose the God state machine</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>core_domain/src/lib.rs</code> lines 175–245</div>
+    </div>
+    <span class="badge-strong" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">⬆ Strong</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-2" style="margin-bottom:1.5rem;">
+      <div>
+        <div class="label-red">Problem</div>
+        <p><code>AppState</code> is one struct spanning: app lifecycle phases, repository session data, authentication flow, settings, config, repository path, and computed DAG geometry. Ten fields, one state machine.</p>
+        <p>Critical friction: <code>handle_token_received</code> calls <code>store.save_token()</code> — an OS keyring write — inside what should be a pure state transition. The state machine is impure. You cannot replay events in tests without wiring up a real keyring. This is the testability equivalent of doing a database write inside a domain model constructor.</p>
+      </div>
+      <div>
+        <div class="label-green">Solution</div>
+        <p>Separate into three focused types:</p>
+        <table style="margin-bottom:.75rem;">
+          <tr><th>Type</th><th>Responsibility</th></tr>
+          <tr><td><code>RepoSession</code></td><td>Commits, branches, diff, current branch</td></tr>
+          <tr><td><code>AuthFlow</code></td><td>OAuth/SSH state — pure transitions only</td></tr>
+          <tr><td><code>AppPhase</code></td><td>Loading / Ready / Error lifecycle</td></tr>
+        </table>
+        <p style="margin:0;">Side effects move to a command handler. <code>apply_event(state, event) → (State, Vec&lt;SideEffect&gt;)</code> — pure. The application runner executes side effects after each transition.</p>
+      </div>
+    </div>
+    <div class="benefits-box">
+      <div class="label-orange">Benefits</div>
+      <ul>
+        <li><strong>Purity:</strong> A pure state machine is trivially testable — feed it events, assert on output state. No keyring, no network required.</li>
+        <li><strong>Replay:</strong> Pure state + event log = reproducible crash reports and time-travel debugging.</li>
+        <li><strong>Locality:</strong> Auth state bugs live in <code>AuthFlow</code>. Repo display bugs in <code>RepoSession</code>. No cross-concern grep.</li>
+        <li><strong>Leverage:</strong> The <code>SideEffect</code> enum becomes a seam — mock it in tests, execute it in production.</li>
+      </ul>
+    </div>
+    <div class="grid-2">
+      <div>
+        <div class="label-red" style="margin-bottom:.5rem;">BEFORE — AppState mass (1 struct)</div>
+        <div class="diagram-box">
+          <div style="border:2px solid #ef4444;border-radius:8px;padding:8px;background:#1a0505;">
+            <div style="font-size:11px;font-weight:700;color:#ef4444;margin-bottom:6px;">AppState</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+              <div class="module-before">phase: AppPhase</div>
+              <div class="module-before">repo_path: String</div>
+              <div class="module-before">commits: Vec&lt;Commit&gt;</div>
+              <div class="module-before">branches: Vec&lt;Branch&gt;</div>
+              <div class="module-before">current_branch</div>
+              <div class="module-before">diff: Option&lt;Diff&gt;</div>
+              <div class="module-before">auth_url: String</div>
+              <div class="module-before">fetching_status</div>
+              <div class="module-before">settings: AppSettings</div>
+              <div class="module-before">dag_nodes: Vec&lt;DagNode&gt;</div>
+            </div>
+            <div style="margin-top:8px;font-size:10px;color:#ef4444;text-align:center;">apply_event() with side-effects ⚠️</div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="label-green" style="margin-bottom:.5rem;">AFTER — focused, composable types</div>
+        <div class="diagram-box">
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div class="module-after"><div style="font-size:10px;font-weight:700;color:#22c55e;">AppPhase</div><div style="font-size:10px;color:#888;">NotInitialized | Loading | Ready | Error</div></div>
+            <div class="module-after"><div style="font-size:10px;font-weight:700;color:#22c55e;">RepoSession</div><div style="font-size:10px;color:#888;">commits, branches, current_branch, diff</div></div>
+            <div class="module-after"><div style="font-size:10px;font-weight:700;color:#22c55e;">AuthFlow</div><div style="font-size:10px;color:#888;">Idle | AwaitingCode(url) | Complete | Failed</div></div>
+            <div style="border:1px solid #93c5fd;border-radius:6px;padding:6px 10px;background:#0a1020;">
+              <div style="font-size:10px;font-weight:700;color:#93c5fd;">apply_event(state, event) → (State, Vec&lt;SideEffect&gt;)</div>
+              <div style="font-size:10px;color:#888;">pure function — no I/O inside</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE D -->
+<div class="card" id="D">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE D</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">DomainError::Unknown(String) — error taxonomy erosion</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>core_domain/src/lib.rs</code> (DomainError enum) · all 6 adapters</div>
+    </div>
+    <span class="badge-worth" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">● Worth exploring</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-2" style="margin-bottom:1.5rem;">
+      <div>
+        <div class="label-red">Problem</div>
+        <p>Every adapter maps errors to <code>DomainError::Unknown(String)</code>. All 6 adapters do this. The error type has <code>NotFound</code> and <code>AuthenticationFailed</code> variants — the right shape — but the implementation never reaches them. They are effectively unreachable.</p>
+        <p style="margin:0;">The caller cannot distinguish a network timeout from a corrupt repository from a missing SSH key. Every error handler parses a string. The interface hides nothing — all information is in the opaque string. That is a shallow module: interface as complex as reaching into the implementation.</p>
+      </div>
+      <div>
+        <div class="label-green">Solution</div>
+        <p>Extend <code>DomainError</code> with production-grade variants and use them consistently:</p>
+        <div class="diagram-box">
+<span style="color:#93c5fd;">enum</span> DomainError {<br>
+&nbsp;&nbsp;NotFound(String),<br>
+&nbsp;&nbsp;AuthenticationFailed,<br>
+&nbsp;&nbsp;<span style="color:#F27D26;">AuthExpired { provider: String },</span><br>
+&nbsp;&nbsp;<span style="color:#F27D26;">NetworkTimeout { url: String },</span><br>
+&nbsp;&nbsp;<span style="color:#F27D26;">RepositoryCorrupt { path: String },</span><br>
+&nbsp;&nbsp;<span style="color:#F27D26;">SshKeyNotFound { tried: Vec&lt;String&gt; },</span><br>
+&nbsp;&nbsp;<span style="color:#F27D26;">PermissionDenied { resource: String },</span><br>
+&nbsp;&nbsp;Unknown(String), <span style="color:#5a5a5a;">// last resort only</span><br>
+}
+        </div>
+      </div>
+    </div>
+    <div class="benefits-box">
+      <div class="label-orange">Benefits</div>
+      <ul>
+        <li><strong>Leverage:</strong> The GUI handles <code>AuthExpired</code> by showing a re-auth prompt, <code>NetworkTimeout</code> with retry logic — no string parsing required.</li>
+        <li><strong>Tests:</strong> Assert <code>matches!(result, Err(DomainError::SshKeyNotFound { .. }))</code> — far more robust than asserting on an error string.</li>
+        <li><strong>Locality:</strong> Each error variant signals exactly what happened. No cross-module grep for error strings in logs.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE E -->
+<div class="card" id="E">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE E</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">GitRepository port — fetch seam leaks auth strategy</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>core_domain/src/lib.rs</code> (GitRepository trait) · <code>git_adapter/src/lib.rs</code></div>
+    </div>
+    <span class="badge-worth" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">● Worth exploring</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-2" style="margin-bottom:1.5rem;">
+      <div>
+        <div class="label-red">Problem</div>
+        <p>The <code>GitRepository</code> port has two separate fetch methods:</p>
+        <div class="diagram-box" style="margin-bottom:.75rem;">
+<span style="color:#F27D26;">fn</span> fetch(&amp;<span style="color:#93c5fd;">self</span>, store: &amp;<span style="color:#93c5fd;">dyn</span> CredentialStore)<br>
+<span style="color:#F27D26;">fn</span> fetch_ssh(&amp;<span style="color:#93c5fd;">self</span>, ssh: &amp;<span style="color:#93c5fd;">dyn</span> SshManager)
+        </div>
+        <p style="margin:0;">The port knows that HTTPS uses tokens and SSH uses key files. That is transport-layer knowledge inside an abstract interface. A caller must inspect the remote URL to decide which method to call. The seam leaks the auth protocol upward.</p>
+      </div>
+      <div>
+        <div class="label-green">Solution</div>
+        <p>Introduce a <code>GitCredential</code> enum that captures auth strategy without naming the transport:</p>
+        <div class="diagram-box">
+<span style="color:#93c5fd;">enum</span> GitCredential {<br>
+&nbsp;&nbsp;Token(<span style="color:#fbbf24;">String</span>),<br>
+&nbsp;&nbsp;SshKey { path: <span style="color:#fbbf24;">String</span> },<br>
+&nbsp;&nbsp;Anonymous,<br>
+}<br><br>
+<span style="color:#93c5fd;">trait</span> GitRepository {<br>
+&nbsp;&nbsp;<span style="color:#F27D26;">fn</span> fetch(&amp;<span style="color:#93c5fd;">self</span>, cred: GitCredential);<br>
+}
+        </div>
+        <p style="margin:0;">The adapter resolves which git transport to use internally. The port stays clean. Interface shrinks from 2 methods + 2 dependency parameters to 1 method + 1 value.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE F -->
+<div class="card" id="F">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE F</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">SshManager port — four concerns, one interface</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>core_domain/src/lib.rs</code> · <code>ssh_adapter/src/lib.rs</code></div>
+    </div>
+    <span class="badge-worth" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">● Worth exploring</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-2" style="margin-bottom:1.5rem;">
+      <div>
+        <div class="label-red">Problem</div>
+        <p><code>SshManager</code> is a wide port with 4 methods mixing distinct concerns:</p>
+        <ul style="margin-bottom:.75rem;">
+          <li><code>get_default_key_path</code> — key discovery (FS operation)</li>
+          <li><code>resolve_subsystem_path</code> — WSL2 path translation (env concern)</li>
+          <li><code>prepare_ssh_env</code> — env var construction (combines the above)</li>
+          <li><code>preflight_check</code> — health check (spawns a process)</li>
+        </ul>
+        <p style="margin:0;">The port's caller only ever needs <code>prepare_ssh_env</code> result. The other three are the adapter's internal implementation steps exposed as a port interface — the opposite of information hiding. The interface is nearly as complex as the implementation. Deletion test: delete <code>get_default_key_path</code> from the port. Complexity concentrates in the adapter. That is the correct direction.</p>
+      </div>
+      <div>
+        <div class="label-green">Solution</div>
+        <p>Narrow the port to what callers actually need:</p>
+        <div class="diagram-box" style="margin-bottom:.75rem;">
+<span style="color:#93c5fd;">trait</span> SshManager {<br>
+&nbsp;&nbsp;<span style="color:#F27D26;">fn</span> resolve_credential()<br>
+&nbsp;&nbsp;&nbsp;&nbsp;-&gt; Result&lt;GitCredential, DomainError&gt;;<br>
+&nbsp;&nbsp;<span style="color:#F27D26;">fn</span> preflight_check()<br>
+&nbsp;&nbsp;&nbsp;&nbsp;-&gt; Result&lt;(), DomainError&gt;;<br>
+}
+        </div>
+        <p style="margin:0;"><code>get_default_key_path</code>, <code>resolve_subsystem_path</code>, and <code>prepare_ssh_env</code> become private methods on <code>NativeSshManager</code>. Port interface shrinks by 50%. Combined with Candidate E, <code>SshManager</code> may be eliminated entirely — <code>NativeSshManager::resolve_credential()</code> returns a <code>GitCredential::SshKey</code>, handled by <code>git_adapter</code> directly.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CANDIDATE G -->
+<div class="card" id="G">
+  <div class="card-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
+    <div>
+      <div style="font-size:11px;font-family:monospace;color:var(--muted);margin-bottom:4px;">CANDIDATE G</div>
+      <h2 style="font-size:20px;color:#fff;margin:0 0 4px;">React src/ web preview — clarify or remove</h2>
+      <div style="font-size:13px;color:var(--muted);">Files: <code>src/App.tsx</code> · <code>src/main.tsx</code> · <code>README.md</code></div>
+    </div>
+    <span class="badge-speculative" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap;flex-shrink:0;">◇ Speculative</span>
+  </div>
+  <div class="card-body">
+    <p>The <code>src/</code> directory is a React/Vite app that shows a file-tree demo — it was the "sandboxed web preview" from the Google AI Studio prototype session. The project's <code>README.md</code> is also the AI Studio template, not documentation. The real application is the iced GUI in <code>gui_app/</code>.</p>
+    <div style="background:#1a0e00;border:1px solid #F27D26;border-radius:6px;padding:.75rem 1rem;margin-bottom:1rem;">
+      <div style="font-size:11px;font-weight:700;color:#F27D26;margin-bottom:4px;">⚠ Framework decision required before production</div>
+      <p style="margin:0;font-size:12px;line-height:1.6;">Is GitCthulhu a Tauri app (Rust + web frontend) or a native iced app? The current structure implies iced. If that is the answer, <code>src/</code> is dead weight and should be removed, and the <code>README.md</code> replaced. If Tauri is the target, the architecture reversal is significant — <code>gui_app</code> becomes the Tauri backend and <code>src/</code> becomes the real UI.</p>
+    </div>
+    <p style="margin:0;">Listed here to make the ambiguity explicit. Not worth spending architectural energy on until the framework question is settled.</p>
+  </div>
+</div>
+
+<!-- TOP RECOMMENDATION -->
+<div style="background:linear-gradient(135deg,#1a0e00,#151619);border:2px solid #F27D26;border-radius:12px;padding:2rem;margin-top:1rem;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:1.25rem;">
+    <div style="width:32px;height:32px;background:#F27D26;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#000;font-size:14px;">★</div>
+    <h2 style="font-size:18px;color:#fff;margin:0;">Top Recommendation: Start with Candidate B</h2>
+  </div>
+  <p><strong>Honour the seam in <code>gui_app</code> first</strong> — inject adapters through ports rather than constructing them directly. This is the keystone change because every other fix lands in a better position once the dependency graph is clean. It converts a hypothetical seam into a real one.</p>
+  <p>With Candidate B in place, you can test the GUI without a real git repository. That gives you a stable test harness to land Candidate C (pure state machine) and Candidate A (graph layout algorithm) without regressing.</p>
+  <p>Recommended order:</p>
+  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:1.5rem;">
+    <div style="display:flex;align-items:center;gap:10px;background:#0a0a0c;border-radius:6px;padding:10px 14px;">
+      <span style="background:#F27D26;color:#000;font-weight:800;font-size:11px;border-radius:4px;padding:2px 8px;">1st</span>
+      <span style="font-size:13px;"><strong>B — gui_app dependency inversion</strong> — foundation for all testing; converts the hypothetical seam to a real one</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;background:#0a0a0c;border-radius:6px;padding:10px 14px;">
+      <span style="background:#854d0e;color:#fbbf24;font-weight:800;font-size:11px;border-radius:4px;padding:2px 8px;">2nd</span>
+      <span style="font-size:13px;"><strong>C — AppState decomposition</strong> — pure state machine unlocks replay and property tests</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;background:#0a0a0c;border-radius:6px;padding:10px 14px;">
+      <span style="background:#854d0e;color:#fbbf24;font-weight:800;font-size:11px;border-radius:4px;padding:2px 8px;">3rd</span>
+      <span style="font-size:13px;"><strong>A — graph_layout module</strong> — the core business algorithm, now testable in isolation; this is where the product value is</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;background:#0a0a0c;border-radius:6px;padding:10px 14px;">
+      <span style="background:#1e3a5f;color:#93c5fd;font-weight:800;font-size:11px;border-radius:4px;padding:2px 8px;">4+</span>
+      <span style="font-size:13px;"><strong>D, E, F</strong> — error taxonomy and port surgery, done incrementally as real adapter logic is implemented</span>
+    </div>
+  </div>
+  <div style="padding:1rem;background:#0a0a0c;border-radius:6px;border:1px solid var(--border);">
+    <div class="label-orange" style="margin-bottom:4px;">FIRST MISSING PIECE</div>
+    <p style="margin:0;">All adapters are stubs except <code>keyring_adapter</code> and partially <code>config_adapter</code> (which has a compile error). <code>git_adapter</code> returns empty vecs for every method except <code>open_repo</code>. The architecture changes above will not produce a working app until real git operations are implemented in <code>git_adapter</code>. Candidate B should run in parallel with implementing <code>status()</code>, <code>log()</code>, and <code>branches()</code> in the git adapter.</p>
+  </div>
+</div>
+
+</main>
+
+<footer style="border-top:1px solid var(--border);background:#151619;padding:1.25rem 2rem;margin-top:3rem;">
+  <div style="max-width:1100px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;">
+    <span style="font-family:monospace;font-size:11px;color:var(--muted);">Generated 2026-06-30 · Copilot Architecture Review</span>
+    <span style="font-family:monospace;font-size:11px;color:var(--muted);">gmifsud/GitCthulhu · PoC → Production</span>
+  </div>
+</footer>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    background: '#0D0D0F',
+    primaryColor: '#1a1b1e',
+    primaryTextColor: '#D1D1D1',
+    lineColor: '#5A5A5A',
+    edgeLabelBackground: '#151619',
+    clusterBkg: '#111214',
+    titleColor: '#D1D1D1'
+  }
+});
+</script>
+</body>
+</html>
