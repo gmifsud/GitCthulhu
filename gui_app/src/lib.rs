@@ -8,8 +8,12 @@ use std::thread;
 
 use core_domain::{AppSettings, AppState, DomainError, GitRepository, RepoStatus, TransportState, ViewEvent};
 use iced::futures::channel::oneshot;
-use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Background, Border, Color, Element, Length, Shadow, Task, Theme};
+use iced::widget::text::Wrapping;
+use iced::widget::{button, canvas, column, container, row, scrollable, text};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Task, Theme};
+
+mod commit_graph;
+use commit_graph::{graph_rows, graph_width, GraphCell, ROW_HEIGHT};
 
 /// A repository adapter that can be shared with background loads.
 type SharedRepository = Arc<dyn GitRepository + Send + Sync>;
@@ -328,35 +332,48 @@ impl GitApp {
             }
         }
 
-        let left_sidebar = container(branch_column)
+        let left_sidebar = container(scrollable(branch_column))
             .style(sidebar_style.clone())
             .width(Length::Fixed(200.0))
             .height(Length::Fill);
 
         // ── Center pane: commit graph ─────────────────────────────────────────
-        let mut commit_list = column![
+        // Rows have a fixed height and single-line, clipped text so graph segments join up.
+        let single_line = |value: &str, width: Length| {
+            container(text(value.to_string()).wrapping(Wrapping::None)).width(width).clip(true)
+        };
+        let shown_nodes = &self.state.dag_nodes[..self.state.dag_nodes.len().min(COMMIT_PAGE_SIZE)];
+        let rows = graph_rows(shown_nodes);
+        let lanes_width = Length::Fixed(graph_width(&rows));
+
+        let mut commit_rows = column![];
+        for (node, graph_row) in shown_nodes.iter().zip(rows) {
+            let Some(commit) = self.state.commits.iter().find(|c| c.id == node.commit_id) else {
+                continue;
+            };
+            commit_rows = commit_rows.push(
+                row![
+                    canvas(GraphCell(graph_row)).width(lanes_width).height(Length::Fixed(ROW_HEIGHT)),
+                    single_line(&commit.id[..7], Length::Fixed(80.0)),
+                    single_line(&commit.message, Length::Fill),
+                    single_line(&commit.author, Length::Fixed(140.0)),
+                ]
+                .spacing(10)
+                .height(Length::Fixed(ROW_HEIGHT))
+                .align_y(Alignment::Center),
+            );
+        }
+
+        let commit_list = column![
             text("Commit Graph (Virtualized)")
                 .size(20)
                 .style(move |_| text::Style { color: Some(tokens.text_primary) }),
             button("Refresh").on_press(Message::RefreshRepository),
             text(if self.state.loading { "Loading..." } else { "Up to date." })
                 .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+            commit_rows,
         ]
         .spacing(15);
-
-        for node in self.state.dag_nodes.iter().take(COMMIT_PAGE_SIZE) {
-            if let Some(commit) = self.state.commits.iter().find(|c| c.id == node.commit_id) {
-                commit_list = commit_list.push(
-                    row![
-                        text(format!("Lane {}", node.lane)).width(Length::Fixed(60.0)),
-                        text(&commit.id[..7]).width(Length::Fixed(80.0)),
-                        text(&commit.message).width(Length::Fill),
-                        text(&commit.author).width(Length::Fixed(120.0)),
-                    ]
-                    .spacing(10),
-                );
-            }
-        }
 
         let center_pane = container(scrollable(commit_list.padding(20)))
             .style(app_style)

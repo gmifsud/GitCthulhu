@@ -99,7 +99,7 @@ Item 2 is half closed: `RefreshRepository` now runs `load_repository` on a worke
 4. Grill **Candidate C** (`AppState` decomposition) next.
 5. ~~Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls~~ — done for `RefreshRepository`; `CheckoutBranch` and `OpenRepository` remain.
 6. ~~Implement `status`, `log` and `branches` in `git_adapter` with gix~~ — done; the app now shows real branches and history. The right-hand panel (now "Changes") lists staged, unstaged and untracked files from `RepoStatus`.
-7. **Candidate A — done as a module.** `build_dag` now does real lane assignment (git `--graph` style: lanes converge, freed lanes are reused, merges open lanes) in `core_domain/src/graph_layout.rs`; the `index % 3` stub and the `rayon` dependency are gone. Kept inside `core_domain` rather than a new crate — revisit alongside Candidate C. The view still prints lane numbers; drawing the graph is the next visual step.
+7. **Candidate A — done as a module.** `build_dag` now does real lane assignment (git `--graph` style: lanes converge, freed lanes are reused, merges open lanes) in `core_domain/src/graph_layout.rs`; the `index % 3` stub and the `rayon` dependency are gone. Kept inside `core_domain` rather than a new crate — revisit alongside Candidate C. The graph is now drawn (lane lines, merge/branch diagonals, coloured dots) by a canvas per row in `gui_app/src/commit_graph.rs`; commit rows are fixed-height and single-line so the segments join. The Branches sidebar scrolls.
 
 ## Picking the session back up
 

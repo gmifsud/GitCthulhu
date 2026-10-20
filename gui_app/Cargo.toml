@@ -11,7 +11,7 @@ path = "src/lib.rs"
 # No adapter crates here: concrete adapters are wired by the `app` crate.
 [dependencies]
 core_domain = { path = "../core_domain" }
-iced = "0.13" # Pure Rust reactive GUI
+iced = { version = "0.13", features = ["canvas"] } # Pure Rust reactive GUI; canvas draws the commit graph
 
 [dev-dependencies]
 test_support = { path = "../test_support" }
