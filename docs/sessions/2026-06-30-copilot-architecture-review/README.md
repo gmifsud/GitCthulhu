@@ -98,7 +98,7 @@ Item 2 is half closed: `RefreshRepository` now runs `load_repository` on a worke
 3. Write an ADR recording the five Candidate B decisions.
 4. Grill **Candidate C** (`AppState` decomposition) next.
 5. ~~Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls~~ — done for `RefreshRepository`; `CheckoutBranch` and `OpenRepository` remain.
-6. Implement `status`, `log` and `branches` in `git_adapter` with gix so the refreshed view shows real data.
+6. ~~Implement `status`, `log` and `branches` in `git_adapter` with gix~~ — done; the app now shows real branches and history. Still placeholders in the view: commit lanes (`build_dag` stub, Candidate A) and the "Staged Changes" panel, which doesn't read `RepoStatus` yet.
 
 ## Picking the session back up
 
