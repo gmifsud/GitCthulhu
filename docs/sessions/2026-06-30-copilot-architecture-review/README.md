@@ -89,7 +89,7 @@ Items 1, 3 and 5 above are closed:
 - **`FakeGitRepository` is in use.** `gui_app` has a synchronous `load_repository(&dyn GitRepository) -> Vec<ViewEvent>` that reports status, log and branches independently. Eight tests cover it on success, single-failure and repo-missing paths, the fake → events → `AppState` chain, and `update()` state transitions.
 - **Verified on this machine** with Rust 1.99.1 (MSVC): workspace builds, all tests pass.
 
-Item 2 still stands: `load_repository` isn't called from `RefreshRepository` yet (async wiring, next step 5).
+Item 2 is half closed: `RefreshRepository` now runs `load_repository` on a worker thread via `Task::perform`, and the app loads the repository as soon as the window opens. Overlapping refreshes are ignored, and a crashed adapter is reported as an error rather than leaving the view stuck on "Loading…". The adapter is now shared as `Arc<dyn GitRepository + Send + Sync>`. **The view will still be empty against a real repo**, because `git_adapter`'s `status`, `log` and `branches` are stubs that return empty lists.
 
 ## Next steps (Copilot's list, in its order)
 
@@ -97,7 +97,8 @@ Item 2 still stands: `load_repository` isn't called from `RefreshRepository` yet
 2. Run `domain-modeling` to name the new terms (compositor, adapter port, welcome screen) and start `CONTEXT.md`.
 3. Write an ADR recording the five Candidate B decisions.
 4. Grill **Candidate C** (`AppState` decomposition) next.
-5. Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls — `RefreshRepository` should run `load_repository`.
+5. ~~Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls~~ — done for `RefreshRepository`; `CheckoutBranch` and `OpenRepository` remain.
+6. Implement `status`, `log` and `branches` in `git_adapter` with gix so the refreshed view shows real data.
 
 ## Picking the session back up
 

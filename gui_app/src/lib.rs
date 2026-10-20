@@ -2,9 +2,17 @@
 //! Zero dependency on any adapter crate: Cargo.toml lists none, so the compiler enforces it.
 //! Adapters are wired by the `app` crate (the composition root).
 
-use core_domain::{AppSettings, AppState, GitRepository, TransportState, ViewEvent};
+use std::future::Future;
+use std::sync::Arc;
+use std::thread;
+
+use core_domain::{AppSettings, AppState, DomainError, GitRepository, TransportState, ViewEvent};
+use iced::futures::channel::oneshot;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Task, Theme};
+
+/// A repository adapter that can be shared with background loads.
+type SharedRepository = Arc<dyn GitRepository + Send + Sync>;
 
 // ── Design tokens ────────────────────────────────────────────────────────────
 
@@ -54,8 +62,6 @@ const COMMIT_PAGE_SIZE: usize = 50;
 ///
 /// Synchronous by design (Candidate B, decision 4): the caller chooses where it runs.
 /// Each call is reported independently, so one failure never hides another result.
-// TODO: [DEBT] Call from RefreshRepository via Task::perform once spawn_blocking is wired
-#[cfg_attr(not(test), allow(dead_code))]
 fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
     vec![
         match repo.status() {
@@ -73,14 +79,31 @@ fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
     ]
 }
 
+/// Run [`load_repository`] on a dedicated thread so blocking Git I/O never stalls
+/// the UI or iced's executor. If the thread dies, the load is reported as an error.
+fn load_repository_in_background(repo: SharedRepository) -> impl Future<Output = Vec<ViewEvent>> {
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        // A dropped receiver means the app has gone away; nothing left to notify.
+        let _ = sender.send(load_repository(repo.as_ref()));
+    });
+    async move {
+        receiver.await.unwrap_or_else(|_| {
+            vec![ViewEvent::ErrorOccurred(DomainError::Unknown(
+                "repository load was interrupted".to_string(),
+            ))]
+        })
+    }
+}
+
 // ── Public entry points ───────────────────────────────────────────────────────
 
-/// Run with a live repository adapter.
-pub fn run(repo: Box<dyn GitRepository + Send>) -> iced::Result {
+/// Run with a live repository adapter; the repository is loaded as soon as the window opens.
+pub fn run(repo: Box<dyn GitRepository + Send + Sync>) -> iced::Result {
     iced::application("GitCthulhu", GitApp::update, GitApp::view)
         .theme(|_| Theme::Dark)
         .subscription(GitApp::subscription)
-        .run_with(move || (GitApp::with_repo(repo), Task::none()))
+        .run_with(move || (GitApp::with_repo(Arc::from(repo)), Task::done(Message::RefreshRepository)))
 }
 
 /// Run without a repository (welcome / repo picker screen).
@@ -96,7 +119,7 @@ pub fn run_welcome() -> iced::Result {
 struct GitApp {
     state: AppState,
     /// `None` = welcome / repo picker; `Some` = active repository view.
-    adapter: Option<Box<dyn GitRepository + Send>>,
+    adapter: Option<SharedRepository>,
     tokens: DesignTokens,
 }
 
@@ -106,6 +129,8 @@ enum Message {
     RefreshRepository,
     CheckoutBranch(String),
     DomainEvent(ViewEvent),
+    /// Results of a background [`load_repository`] run.
+    RepositoryLoaded(Vec<ViewEvent>),
     ConfigReloaded(AppSettings),
     /// Triggered from the welcome screen. Path will be populated by a file-picker dialog.
     // TODO: [DEBT] Wire a native file-picker and replace this stub
@@ -113,7 +138,7 @@ enum Message {
 }
 
 impl GitApp {
-    fn with_repo(repo: Box<dyn GitRepository + Send>) -> Self {
+    fn with_repo(repo: SharedRepository) -> Self {
         Self {
             state: AppState::new(),
             adapter: Some(repo),
@@ -136,8 +161,20 @@ impl GitApp {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::RefreshRepository => {
+                // Nothing to load on the welcome screen; one load at a time otherwise.
+                let Some(repo) = self.adapter.clone() else {
+                    return Task::none();
+                };
+                if self.state.loading {
+                    return Task::none();
+                }
                 self.state.loading = true;
-                // TODO: [DEBT] Wire spawn_blocking + GitRepository::status / log / branches
+                Task::perform(load_repository_in_background(repo), Message::RepositoryLoaded)
+            }
+            Message::RepositoryLoaded(events) => {
+                for event in events {
+                    self.state.apply_event(event);
+                }
                 Task::none()
             }
             Message::CheckoutBranch(_branch_name) => {
@@ -398,14 +435,60 @@ mod tests {
             .all(|e| matches!(e, ViewEvent::ErrorOccurred(DomainError::RepositoryNotFound))));
     }
 
+    // ── Background load ───────────────────────────────────────────────────────
+
+    /// An adapter whose first call panics, standing in for a crashed Git backend.
+    struct PanickingRepository;
+
+    impl GitRepository for PanickingRepository {
+        fn status(&self) -> Result<core_domain::RepoStatus, DomainError> {
+            panic!("simulated adapter crash")
+        }
+        fn log(&self, _max_count: Option<usize>) -> Result<Vec<Commit>, DomainError> {
+            unreachable!("status panics first")
+        }
+        fn branches(&self) -> Result<Vec<Branch>, DomainError> {
+            unreachable!("status panics first")
+        }
+        fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn fetch(&self, _store: &dyn core_domain::CredentialStore) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn fetch_ssh(&self, _ssh_manager: &dyn core_domain::SshManager) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+    }
+
     #[test]
-    fn loaded_events_populate_app_state() {
-        let mut app = GitApp::with_repo(Box::new(populated_repo()));
+    fn background_load_returns_the_same_events() {
+        let events = iced::futures::executor::block_on(load_repository_in_background(Arc::new(
+            populated_repo(),
+        )));
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[1], ViewEvent::LogUpdated(c) if c.len() == 2));
+        assert!(matches!(&events[2], ViewEvent::BranchesUpdated(b) if b.len() == 2));
+    }
+
+    #[test]
+    fn background_load_reports_a_crashed_adapter_as_an_error() {
+        let events =
+            iced::futures::executor::block_on(load_repository_in_background(Arc::new(PanickingRepository)));
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ViewEvent::ErrorOccurred(DomainError::Unknown(_))));
+    }
+
+    // ── GitApp ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn repository_loaded_populates_app_state() {
+        let mut app = GitApp::with_repo(Arc::new(populated_repo()));
         let _ = app.update(Message::RefreshRepository);
 
-        for event in load_repository(app.adapter.as_deref().expect("repo view has an adapter")) {
-            let _ = app.update(Message::DomainEvent(event));
-        }
+        let _ = app.update(Message::RepositoryLoaded(load_repository(&populated_repo())));
 
         assert!(!app.state.loading);
         assert!(app.state.current_status.is_some());
@@ -414,11 +497,9 @@ mod tests {
         assert_eq!(app.state.branches, vec![branch("main", true), branch("feature/x", false)]);
     }
 
-    // ── GitApp ────────────────────────────────────────────────────────────────
-
     #[test]
     fn with_repo_opens_the_repository_view() {
-        let app = GitApp::with_repo(Box::new(FakeGitRepository::ok()));
+        let app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         assert!(app.adapter.is_some());
     }
 
@@ -430,9 +511,16 @@ mod tests {
 
     #[test]
     fn refresh_marks_state_as_loading() {
-        let mut app = GitApp::with_repo(Box::new(FakeGitRepository::ok()));
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::RefreshRepository);
         assert!(app.state.loading);
+    }
+
+    #[test]
+    fn refresh_on_the_welcome_screen_does_nothing() {
+        let mut app = GitApp::welcome();
+        let _ = app.update(Message::RefreshRepository);
+        assert!(!app.state.loading);
     }
 
     #[test]
