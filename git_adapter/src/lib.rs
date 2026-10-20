@@ -14,6 +14,35 @@ use gix::status::index_worktree::iter::Summary;
 use gix::status::plumbing::index_as_worktree::traits::{FastEq, SubmoduleStatus};
 use gix::status::plumbing::index_as_worktree_with_renames::{Entry as StatusEntry, VisitEntry};
 
+/// The git executable, used only for porcelain operations gix 0.66 can't perform safely.
+const GIT_EXECUTABLE: &str = "git";
+
+/// Run `git -C <repo_path> <args>`, returning git's own error text on failure.
+fn run_git(repo_path: &str, args: &[&str]) -> Result<(), DomainError> {
+    let mut command = std::process::Command::new(GIT_EXECUTABLE);
+    command
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command.output().map_err(|error| {
+        DomainError::Unknown(format!("could not run {GIT_EXECUTABLE}: {error}"))
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(DomainError::Unknown(String::from_utf8_lossy(&output.stderr).trim().to_string()))
+    }
+}
+
 /// Map any gix error that has no specific domain meaning.
 fn unknown(error: impl Display) -> DomainError {
     DomainError::Unknown(error.to_string())
@@ -253,10 +282,18 @@ impl GitRepository for GitoxideAdapter {
         Ok(branches)
     }
 
-    fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
-        let _repo = self.open_repo()?;
-        // Map gix checkout operation...
-        Ok(())
+    /// Switch to a local branch with `git switch`.
+    ///
+    /// gix 0.66 keeps the checkout options a correct worktree update needs (filters,
+    /// attributes, line endings) private, so this delegates to git, which also refuses
+    /// to overwrite uncommitted changes. `--no-guess` stops a remote branch name from
+    /// silently creating a new local tracking branch.
+    fn checkout_branch(&self, branch_name: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if branch_name.is_empty() || branch_name.starts_with('-') {
+            return Err(DomainError::Unknown(format!("invalid branch name: {branch_name:?}")));
+        }
+        run_git(&self.repo_path, &["switch", "--no-guess", branch_name])
     }
 
     fn fetch(&self, store: &dyn CredentialStore) -> Result<(), DomainError> {
@@ -332,6 +369,12 @@ mod tests {
         fn new() -> Self {
             let dir = tempfile::tempdir().expect("create temp dir");
             let repo = gix::init(dir.path()).expect("init repository");
+            // Pin line-ending conversion so a global `core.autocrlf` can't change results.
+            let config = repo.git_dir().join("config");
+            let mut contents = std::fs::read_to_string(&config).expect("read repo config");
+            contents.push_str("[core]\n\tautocrlf = false\n");
+            std::fs::write(&config, contents).expect("write repo config");
+            let repo = gix::open(dir.path()).expect("reopen with pinned config");
             Self { _dir: dir, repo }
         }
 
@@ -388,6 +431,45 @@ mod tests {
 
         fn write_file(&self, name: &str, content: &str) {
             std::fs::write(self.workdir().join(name), content).expect("write worktree file");
+        }
+
+        /// Commit `files` onto `reference` (not HEAD) with an explicit parent.
+        fn commit_to(&self, reference: &str, message: &str, files: &[(&str, &str)], parent: gix::ObjectId) -> gix::ObjectId {
+            let tree = self.write_tree(files);
+            let signature = gix::actor::Signature {
+                name: "Test Author".into(),
+                email: "author@example.com".into(),
+                time: gix::date::Time::new(BASE_TIME + 3600, 0),
+            };
+            self.repo
+                .commit_as(signature.to_ref(), signature.to_ref(), reference, message, tree, [parent])
+                .expect("commit to reference")
+                .detach()
+        }
+
+        /// The branch HEAD points at, read fresh from disk (git may have changed it).
+        fn current_branch(&self) -> String {
+            gix::open(self.workdir()).expect("reopen").head_name().unwrap().expect("on a branch").shorten().to_string()
+        }
+
+        fn read_file(&self, name: &str) -> Option<String> {
+            std::fs::read_to_string(self.workdir().join(name)).ok()
+        }
+
+        /// A repository on its default branch with `a.txt`, plus a `feature` branch that
+        /// changes `a.txt` and adds `b.txt`; the worktree is a clean checkout of HEAD.
+        fn with_feature_branch() -> Self {
+            let fixture = Self::new();
+            let files = [("a.txt", "a on main\n")];
+            let base = fixture.commit("initial", &files, 0);
+            fixture.stage_and_write(&files);
+            fixture.commit_to(
+                "refs/heads/feature",
+                "feature work",
+                &[("a.txt", "a on feature\n"), ("b.txt", "b\n")],
+                base,
+            );
+            fixture
         }
 
         fn reference(&self, name: &str, target: gix::ObjectId) {
@@ -543,6 +625,64 @@ mod tests {
         assert_eq!(status.staged_files, vec!["a.txt"]);
         assert_eq!(status.unstaged_files, vec!["a.txt"]);
         assert_eq!(status.untracked_files, vec!["new.txt"]);
+    }
+
+    // ── checkout_branch ───────────────────────────────────────────────────────
+    //
+    // These run the real `git switch`, so they need git on PATH.
+
+    #[test]
+    fn checkout_switches_branch_and_updates_the_worktree() {
+        let fixture = TestRepo::with_feature_branch();
+        let adapter = fixture.adapter();
+
+        adapter.checkout_branch("feature").expect("checkout");
+
+        assert_eq!(fixture.current_branch(), "feature");
+        assert_eq!(fixture.read_file("a.txt").as_deref(), Some("a on feature\n"));
+        assert_eq!(fixture.read_file("b.txt").as_deref(), Some("b\n"));
+        assert_eq!(adapter.status(), Ok(RepoStatus { staged_files: vec![], unstaged_files: vec![], untracked_files: vec![] }));
+    }
+
+    #[test]
+    fn checkout_refuses_to_overwrite_local_changes() {
+        let fixture = TestRepo::with_feature_branch();
+        let main = fixture.head_branch();
+        fixture.write_file("a.txt", "uncommitted edit\n");
+
+        let result = fixture.adapter().checkout_branch("feature");
+
+        assert!(matches!(result, Err(DomainError::Unknown(ref message)) if !message.is_empty()), "{result:?}");
+        assert_eq!(fixture.current_branch(), main);
+        assert_eq!(fixture.read_file("a.txt").as_deref(), Some("uncommitted edit\n"));
+    }
+
+    #[test]
+    fn checkout_of_unknown_branch_fails() {
+        let fixture = TestRepo::with_feature_branch();
+        assert!(fixture.adapter().checkout_branch("no-such-branch").is_err());
+    }
+
+    #[test]
+    fn checkout_rejects_names_that_look_like_options() {
+        let fixture = TestRepo::with_feature_branch();
+        let main = fixture.head_branch();
+
+        for name in ["", "-f", "--orphan=x"] {
+            assert!(fixture.adapter().checkout_branch(name).is_err(), "{name:?} should be rejected");
+        }
+        assert_eq!(fixture.current_branch(), main);
+    }
+
+    #[test]
+    fn checkout_never_creates_a_branch_from_a_remote() {
+        let fixture = TestRepo::with_feature_branch();
+        let tip = fixture.repo.head_id().unwrap().detach();
+        fixture.reference("refs/remotes/origin/topic", tip);
+
+        assert!(fixture.adapter().checkout_branch("topic").is_err());
+        let reopened = gix::open(fixture.workdir()).expect("reopen");
+        assert!(reopened.try_find_reference("refs/heads/topic").unwrap().is_none());
     }
 
     #[test]

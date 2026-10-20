@@ -97,7 +97,7 @@ Item 2 is half closed: `RefreshRepository` now runs `load_repository` on a worke
 2. Run `domain-modeling` to name the new terms (compositor, adapter port, welcome screen) and start `CONTEXT.md`.
 3. Write an ADR recording the five Candidate B decisions.
 4. Grill **Candidate C** (`AppState` decomposition) next.
-5. ~~Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls~~ — done for `RefreshRepository`; `CheckoutBranch` and `OpenRepository` remain.
+5. ~~Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls~~ — done for `RefreshRepository` and `CheckoutBranch` (clicking a local branch switches to it, then refreshes; failures such as uncommitted changes show git's message). Checkout runs `git switch --no-guess` because gix 0.66 keeps correct checkout options private, so git must be on PATH. `OpenRepository` remains.
 6. ~~Implement `status`, `log` and `branches` in `git_adapter` with gix~~ — done; the app now shows real branches and history. The right-hand panel (now "Changes") lists staged, unstaged and untracked files from `RepoStatus`.
 7. **Candidate A — done as a module.** `build_dag` now does real lane assignment (git `--graph` style: lanes converge, freed lanes are reused, merges open lanes) in `core_domain/src/graph_layout.rs`; the `index % 3` stub and the `rayon` dependency are gone. Kept inside `core_domain` rather than a new crate — revisit alongside Candidate C. The graph is now drawn (lane lines, merge/branch diagonals, coloured dots) by a canvas per row in `gui_app/src/commit_graph.rs`; commit rows are fixed-height and single-line so the segments join. The Branches sidebar scrolls.
 

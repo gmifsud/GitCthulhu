@@ -105,20 +105,43 @@ fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
     ]
 }
 
-/// Run [`load_repository`] on a dedicated thread so blocking Git I/O never stalls
-/// the UI or iced's executor. If the thread dies, the load is reported as an error.
-fn load_repository_in_background(repo: SharedRepository) -> impl Future<Output = Vec<ViewEvent>> {
+/// Run blocking Git work on a dedicated thread so it never stalls the UI or iced's
+/// executor. If the thread dies before finishing, `interrupted` supplies the result.
+fn in_background<T: Send + 'static>(
+    job: impl FnOnce() -> T + Send + 'static,
+    interrupted: impl FnOnce() -> T,
+) -> impl Future<Output = T> {
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
         // A dropped receiver means the app has gone away; nothing left to notify.
-        let _ = sender.send(load_repository(repo.as_ref()));
+        let _ = sender.send(job());
     });
-    async move {
-        receiver.await.unwrap_or_else(|_| {
-            vec![ViewEvent::ErrorOccurred(DomainError::Unknown(
-                "repository load was interrupted".to_string(),
-            ))]
-        })
+    async move { receiver.await.unwrap_or_else(|_| interrupted()) }
+}
+
+/// [`load_repository`] off the UI thread.
+fn load_repository_in_background(repo: SharedRepository) -> impl Future<Output = Vec<ViewEvent>> {
+    in_background(
+        move || load_repository(repo.as_ref()),
+        || vec![ViewEvent::ErrorOccurred(DomainError::Unknown("repository load was interrupted".to_string()))],
+    )
+}
+
+/// [`GitRepository::checkout_branch`] off the UI thread.
+fn checkout_in_background(repo: SharedRepository, branch: String) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.checkout_branch(&branch),
+        || Err(DomainError::Unknown("checkout was interrupted".to_string())),
+    )
+}
+
+/// Text shown to the user for a failed repository operation.
+fn error_message(error: &DomainError) -> String {
+    match error {
+        DomainError::RepositoryNotFound => "Not a Git repository.".to_string(),
+        DomainError::AccessDenied => "Access denied.".to_string(),
+        DomainError::AuthenticationFailed => "Authentication failed.".to_string(),
+        DomainError::Unknown(message) => message.clone(),
     }
 }
 
@@ -146,6 +169,8 @@ struct GitApp {
     state: AppState,
     /// `None` = welcome / repo picker; `Some` = active repository view.
     adapter: Option<SharedRepository>,
+    /// The most recent failure, shown until the next operation starts.
+    error: Option<String>,
     tokens: DesignTokens,
 }
 
@@ -157,6 +182,8 @@ enum Message {
     DomainEvent(ViewEvent),
     /// Results of a background [`load_repository`] run.
     RepositoryLoaded(Vec<ViewEvent>),
+    /// Result of a background checkout started by [`Message::CheckoutBranch`].
+    CheckoutFinished(Result<(), DomainError>),
     ConfigReloaded(AppSettings),
     /// Triggered from the welcome screen. Path will be populated by a file-picker dialog.
     // TODO: [DEBT] Wire a native file-picker and replace this stub
@@ -168,6 +195,7 @@ impl GitApp {
         Self {
             state: AppState::new(),
             adapter: Some(repo),
+            error: None,
             tokens: DesignTokens::deep_focus(),
         }
     }
@@ -176,6 +204,7 @@ impl GitApp {
         Self {
             state: AppState::new(),
             adapter: None,
+            error: None,
             tokens: DesignTokens::deep_focus(),
         }
     }
@@ -195,17 +224,39 @@ impl GitApp {
                     return Task::none();
                 }
                 self.state.loading = true;
+                self.error = None;
                 Task::perform(load_repository_in_background(repo), Message::RepositoryLoaded)
             }
             Message::RepositoryLoaded(events) => {
                 for event in events {
+                    if let ViewEvent::ErrorOccurred(error) = &event {
+                        self.error.get_or_insert_with(|| error_message(error));
+                    }
                     self.state.apply_event(event);
                 }
                 Task::none()
             }
-            Message::CheckoutBranch(_branch_name) => {
-                // TODO: [DEBT] Wire spawn_blocking + GitRepository::checkout_branch
-                Task::none()
+            Message::CheckoutBranch(branch) => {
+                // Same rules as refresh: needs a repository, one operation at a time.
+                let Some(repo) = self.adapter.clone() else {
+                    return Task::none();
+                };
+                if self.state.loading {
+                    return Task::none();
+                }
+                self.state.loading = true;
+                self.error = None;
+                Task::perform(checkout_in_background(repo, branch), Message::CheckoutFinished)
+            }
+            Message::CheckoutFinished(result) => {
+                self.state.loading = false;
+                match result {
+                    Ok(()) => Task::done(Message::RefreshRepository),
+                    Err(error) => {
+                        self.error = Some(error_message(&error));
+                        Task::none()
+                    }
+                }
             }
             Message::DomainEvent(event) => {
                 self.state.apply_event(event);
@@ -325,9 +376,10 @@ impl GitApp {
             );
         } else {
             for branch in &self.state.branches {
+                // Only local branches can be checked out; remote ones render disabled.
                 branch_column = branch_column.push(
                     button(branch.name.as_str())
-                        .on_press(Message::CheckoutBranch(branch.name.clone())),
+                        .on_press_maybe((!branch.is_remote).then(|| Message::CheckoutBranch(branch.name.clone()))),
                 );
             }
         }
@@ -369,8 +421,11 @@ impl GitApp {
                 .size(20)
                 .style(move |_| text::Style { color: Some(tokens.text_primary) }),
             button("Refresh").on_press(Message::RefreshRepository),
-            text(if self.state.loading { "Loading..." } else { "Up to date." })
-                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+            match &self.error {
+                Some(error) => text(error.clone()).style(move |_| text::Style { color: Some(tokens.accent_primary) }),
+                None => text(if self.state.loading { "Loading..." } else { "Up to date." })
+                    .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+            },
             commit_rows,
         ]
         .spacing(15);
@@ -619,6 +674,92 @@ mod tests {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::RefreshRepository);
         assert!(!app.state.loading);
+    }
+
+    #[test]
+    fn refresh_errors_are_shown() {
+        let missing = FakeGitRepository {
+            status_result: Err(DomainError::RepositoryNotFound),
+            ..FakeGitRepository::ok()
+        };
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+
+        let _ = app.update(Message::RepositoryLoaded(load_repository(&missing)));
+
+        assert_eq!(app.error.as_deref(), Some("Not a Git repository."));
+    }
+
+    // ── Checkout ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn checkout_on_the_welcome_screen_does_nothing() {
+        let mut app = GitApp::welcome();
+        let _ = app.update(Message::CheckoutBranch("main".to_string()));
+        assert!(!app.state.loading);
+    }
+
+    #[test]
+    fn checkout_starts_loading_and_clears_the_last_error() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.error = Some("previous failure".to_string());
+
+        let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+
+        assert!(app.state.loading);
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn checkout_is_ignored_while_another_operation_runs() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.state.loading = true;
+        app.error = Some("still showing".to_string());
+
+        let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+
+        // Starting would have cleared the error, so it is still there.
+        assert_eq!(app.error.as_deref(), Some("still showing"));
+    }
+
+    #[test]
+    fn successful_checkout_stops_loading_without_an_error() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.state.loading = true;
+
+        let _ = app.update(Message::CheckoutFinished(Ok(())));
+
+        assert!(!app.state.loading);
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn failed_checkout_shows_why() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.state.loading = true;
+        let reason = "error: Your local changes would be overwritten by checkout".to_string();
+
+        let _ = app.update(Message::CheckoutFinished(Err(DomainError::Unknown(reason.clone()))));
+
+        assert!(!app.state.loading);
+        assert_eq!(app.error, Some(reason));
+    }
+
+    #[test]
+    fn background_checkout_returns_the_adapter_result() {
+        let refusing = FakeGitRepository {
+            checkout_result: Err(DomainError::AccessDenied),
+            ..FakeGitRepository::ok()
+        };
+
+        let ok = iced::futures::executor::block_on(checkout_in_background(
+            Arc::new(FakeGitRepository::ok()),
+            "feature".to_string(),
+        ));
+        let refused =
+            iced::futures::executor::block_on(checkout_in_background(Arc::new(refusing), "feature".to_string()));
+
+        assert_eq!(ok, Ok(()));
+        assert_eq!(refused, Err(DomainError::AccessDenied));
     }
 
     #[test]
