@@ -1,0 +1,14 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+description = "Composition root — wires concrete adapters into the gui_app library"
+
+[[bin]]
+name = "git_cthulhu"
+path = "src/main.rs"
+
+[dependencies]
+gui_app = { path = "../gui_app" }
+git_adapter = { path = "../git_adapter" }
+iced = "0.13" # Only for the `iced::Result` returned by main

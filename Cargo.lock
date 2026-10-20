@@ -109,6 +109,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "app"
+version = "0.1.0"
+dependencies = [
+ "git_adapter",
+ "gui_app",
+ "iced",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2559,7 +2568,6 @@ name = "gui_app"
 version = "0.1.0"
 dependencies = [
  "core_domain",
- "git_adapter",
  "iced",
  "test_support",
 ]

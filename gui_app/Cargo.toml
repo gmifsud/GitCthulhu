@@ -8,13 +8,9 @@ description = "Iced-based GUI application"
 name = "gui_app"
 path = "src/lib.rs"
 
-[[bin]]
-name = "git_cthulhu"
-path = "src/main.rs"
-
+# No adapter crates here: concrete adapters are wired by the `app` crate.
 [dependencies]
 core_domain = { path = "../core_domain" }
-git_adapter = { path = "../git_adapter" }
 iced = "0.13" # Pure Rust reactive GUI
 
 [dev-dependencies]

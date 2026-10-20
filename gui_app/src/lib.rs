@@ -1,6 +1,6 @@
 //! gui_app — pure GUI library.
-//! Zero dependency on any adapter crate at the source level.
-//! Adapters are wired by the [[bin]] compositor in `main.rs`.
+//! Zero dependency on any adapter crate: Cargo.toml lists none, so the compiler enforces it.
+//! Adapters are wired by the `app` crate (the composition root).
 
 use core_domain::{AppSettings, AppState, GitRepository, TransportState, ViewEvent};
 use iced::widget::{button, column, container, row, scrollable, text};
@@ -43,6 +43,34 @@ fn hex_color(hex: u32) -> Color {
         ((hex >> 8) & 0xFF) as f32 / 255.0,
         (hex & 0xFF) as f32 / 255.0,
     )
+}
+
+/// Number of commits requested from the repository and rendered in the graph pane.
+const COMMIT_PAGE_SIZE: usize = 50;
+
+// ── Repository loading ────────────────────────────────────────────────────────
+
+/// Read the repository through the port and translate each result into a [`ViewEvent`].
+///
+/// Synchronous by design (Candidate B, decision 4): the caller chooses where it runs.
+/// Each call is reported independently, so one failure never hides another result.
+// TODO: [DEBT] Call from RefreshRepository via Task::perform once spawn_blocking is wired
+#[cfg_attr(not(test), allow(dead_code))]
+fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
+    vec![
+        match repo.status() {
+            Ok(status) => ViewEvent::StatusUpdated(status),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
+        match repo.log(Some(COMMIT_PAGE_SIZE)) {
+            Ok(commits) => ViewEvent::LogUpdated(commits),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
+        match repo.branches() {
+            Ok(branches) => ViewEvent::BranchesUpdated(branches),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
+    ]
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────
@@ -257,7 +285,7 @@ impl GitApp {
         ]
         .spacing(15);
 
-        for node in self.state.dag_nodes.iter().take(50) {
+        for node in self.state.dag_nodes.iter().take(COMMIT_PAGE_SIZE) {
             if let Some(commit) = self.state.commits.iter().find(|c| c.id == node.commit_id) {
                 commit_list = commit_list.push(
                     row![
@@ -296,5 +324,127 @@ impl GitApp {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_domain::{Branch, Commit, DomainError};
+    use test_support::FakeGitRepository;
+
+    fn commit(id: &str) -> Commit {
+        Commit {
+            id: id.to_string(),
+            parent_ids: vec![],
+            author: "Test Author".to_string(),
+            message: format!("commit {id}"),
+            timestamp: 0,
+        }
+    }
+
+    fn branch(name: &str, is_head: bool) -> Branch {
+        Branch { name: name.to_string(), is_remote: false, is_head }
+    }
+
+    fn populated_repo() -> FakeGitRepository {
+        FakeGitRepository {
+            log_result: Ok(vec![commit("aaaaaaa1"), commit("bbbbbbb2")]),
+            branches_result: Ok(vec![branch("main", true), branch("feature/x", false)]),
+            ..FakeGitRepository::ok()
+        }
+    }
+
+    // ── load_repository ───────────────────────────────────────────────────────
+
+    #[test]
+    fn load_repository_reports_status_log_and_branches_in_order() {
+        let events = load_repository(&populated_repo());
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], ViewEvent::StatusUpdated(_)));
+        assert!(matches!(&events[1], ViewEvent::LogUpdated(c) if c.len() == 2 && c[0].id == "aaaaaaa1"));
+        assert!(matches!(&events[2], ViewEvent::BranchesUpdated(b) if b.len() == 2 && b[0].is_head));
+    }
+
+    #[test]
+    fn load_repository_keeps_other_results_when_one_call_fails() {
+        let repo = FakeGitRepository {
+            branches_result: Err(DomainError::AccessDenied),
+            ..populated_repo()
+        };
+
+        let events = load_repository(&repo);
+
+        assert!(matches!(&events[0], ViewEvent::StatusUpdated(_)));
+        assert!(matches!(&events[1], ViewEvent::LogUpdated(c) if c.len() == 2));
+        assert!(matches!(&events[2], ViewEvent::ErrorOccurred(DomainError::AccessDenied)));
+    }
+
+    #[test]
+    fn load_repository_reports_missing_repository_for_every_call() {
+        let repo = FakeGitRepository {
+            status_result: Err(DomainError::RepositoryNotFound),
+            log_result: Err(DomainError::RepositoryNotFound),
+            branches_result: Err(DomainError::RepositoryNotFound),
+            ..FakeGitRepository::ok()
+        };
+
+        let events = load_repository(&repo);
+
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .all(|e| matches!(e, ViewEvent::ErrorOccurred(DomainError::RepositoryNotFound))));
+    }
+
+    #[test]
+    fn loaded_events_populate_app_state() {
+        let mut app = GitApp::with_repo(Box::new(populated_repo()));
+        let _ = app.update(Message::RefreshRepository);
+
+        for event in load_repository(app.adapter.as_deref().expect("repo view has an adapter")) {
+            let _ = app.update(Message::DomainEvent(event));
+        }
+
+        assert!(!app.state.loading);
+        assert!(app.state.current_status.is_some());
+        assert_eq!(app.state.commits.len(), 2);
+        assert_eq!(app.state.dag_nodes.len(), 2);
+        assert_eq!(app.state.branches, vec![branch("main", true), branch("feature/x", false)]);
+    }
+
+    // ── GitApp ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn with_repo_opens_the_repository_view() {
+        let app = GitApp::with_repo(Box::new(FakeGitRepository::ok()));
+        assert!(app.adapter.is_some());
+    }
+
+    #[test]
+    fn welcome_has_no_repository() {
+        let app = GitApp::welcome();
+        assert!(app.adapter.is_none());
+    }
+
+    #[test]
+    fn refresh_marks_state_as_loading() {
+        let mut app = GitApp::with_repo(Box::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::RefreshRepository);
+        assert!(app.state.loading);
+    }
+
+    #[test]
+    fn config_reload_replaces_settings() {
+        let mut app = GitApp::welcome();
+        let settings = AppSettings {
+            theme: "Light".to_string(),
+            repository_shortcuts: vec!["D:/Repos/GitCthulhu".to_string()],
+        };
+
+        let _ = app.update(Message::ConfigReloaded(settings.clone()));
+
+        assert_eq!(app.state.settings, settings);
     }
 }

@@ -81,13 +81,23 @@ Shape of the result: `GitApp.adapter: Option<Box<dyn GitRepository + Send>>` (`N
 4. **`Cargo.lock` is now committed** (6,600 lines). That's the right call for a binary, but worth knowing.
 5. **Not re-verified on this machine.** The build was green on the old laptop; Rust (`cargo`) isn't installed here yet.
 
+### Follow-up — 20 October 2026
+
+Items 1, 3 and 5 above are closed:
+
+- **Isolation is now compiler-enforced.** The binary moved to a new `app` crate (the composition root), which builds `git_cthulhu` and depends on `gui_app` + `git_adapter`. `gui_app` is library-only and its `Cargo.toml` lists no adapter crates; `cargo tree -p gui_app` shows no `git_adapter` or `gix`. This replaces decision 3 (lib + bin in one crate), which couldn't coexist with decision 2.
+- **`FakeGitRepository` is in use.** `gui_app` has a synchronous `load_repository(&dyn GitRepository) -> Vec<ViewEvent>` that reports status, log and branches independently. Eight tests cover it on success, single-failure and repo-missing paths, the fake → events → `AppState` chain, and `update()` state transitions.
+- **Verified on this machine** with Rust 1.99.1 (MSVC): workspace builds, all tests pass.
+
+Item 2 still stands: `load_repository` isn't called from `RefreshRepository` yet (async wiring, next step 5).
+
 ## Next steps (Copilot's list, in its order)
 
 1. Open a PR for `gmifsud-architecture-review` → `main`.
 2. Run `domain-modeling` to name the new terms (compositor, adapter port, welcome screen) and start `CONTEXT.md`.
 3. Write an ADR recording the five Candidate B decisions.
 4. Grill **Candidate C** (`AppState` decomposition) next.
-5. Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls.
+5. Replace the `Task::none()` stubs with real `Task::perform` / `spawn_blocking` calls — `RefreshRepository` should run `load_repository`.
 
 ## Picking the session back up
 
