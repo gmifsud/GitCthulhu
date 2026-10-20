@@ -19,30 +19,11 @@ pub struct Commit {
 pub struct DagNode {
     pub commit_id: String,
     pub lane: usize,
-    pub connections: Vec<(String, usize)>, // connected to (commit_id, lane)
+    pub connections: Vec<(String, usize)>, // one (parent_id, lane the edge runs down) per parent
 }
 
-/// Helper function to build a DAG from a list of commits in parallel
-pub fn build_dag(commits: &[Commit]) -> Vec<DagNode> {
-    use rayon::prelude::*;
-    
-    // In a real implementation, this would perform a topological sort
-    // and assign lanes using graph traversal. For large repositories,
-    // rayon is used to parallelize the lane assignment and geometry calculations.
-    
-    // Simulating a parallel map over commits for geometric lane assignment
-    commits
-        .par_iter()
-        .enumerate()
-        .map(|(index, commit)| {
-            DagNode {
-                commit_id: commit.id.clone(),
-                lane: index % 3, // simplified lane assignment
-                connections: vec![],
-            }
-        })
-        .collect()
-}
+mod graph_layout;
+pub use graph_layout::build_dag;
 
 /// Represents a Git branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
