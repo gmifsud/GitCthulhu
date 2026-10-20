@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::thread;
 
-use core_domain::{AppSettings, AppState, DomainError, GitRepository, TransportState, ViewEvent};
+use core_domain::{AppSettings, AppState, DomainError, GitRepository, RepoStatus, TransportState, ViewEvent};
 use iced::futures::channel::oneshot;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Task, Theme};
@@ -55,6 +55,28 @@ fn hex_color(hex: u32) -> Color {
 
 /// Number of commits requested from the repository and rendered in the graph pane.
 const COMMIT_PAGE_SIZE: usize = 50;
+
+// ── Changes panel ─────────────────────────────────────────────────────────────
+
+/// One group of changed files in the changes panel.
+#[derive(Debug, PartialEq)]
+struct ChangeSection<'a> {
+    title: &'static str,
+    files: &'a [String],
+}
+
+/// The non-empty groups of `status`, in the order `git status` prints them.
+fn change_sections(status: &RepoStatus) -> Vec<ChangeSection<'_>> {
+    [
+        ("Staged", &status.staged_files),
+        ("Unstaged", &status.unstaged_files),
+        ("Untracked", &status.untracked_files),
+    ]
+    .into_iter()
+    .filter(|(_, files)| !files.is_empty())
+    .map(|(title, files)| ChangeSection { title, files: files.as_slice() })
+    .collect()
+}
 
 // ── Repository loading ────────────────────────────────────────────────────────
 
@@ -341,21 +363,44 @@ impl GitApp {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        // ── Right sidebar: staged changes ─────────────────────────────────────
-        let right_sidebar = container(
-            column![
-                text("Staged Changes")
-                    .size(16)
-                    .style(move |_| text::Style { color: Some(tokens.accent_primary) }),
-                text("0 files ready to commit")
-                    .style(move |_| text::Style { color: Some(tokens.text_muted) }),
-            ]
-            .spacing(10)
-            .padding(10),
-        )
-        .style(sidebar_style)
-        .width(Length::Fixed(250.0))
-        .height(Length::Fill);
+        // ── Right sidebar: working-tree changes ───────────────────────────────
+        let muted_note = move |note: &'static str| {
+            text(note).style(move |_| text::Style { color: Some(tokens.text_muted) })
+        };
+        let mut changes_column = column![
+            text("Changes").size(16).style(move |_| text::Style { color: Some(tokens.accent_primary) }),
+        ]
+        .spacing(10)
+        .padding(10);
+
+        match &self.state.current_status {
+            None => changes_column = changes_column.push(muted_note("Not loaded yet")),
+            Some(status) => {
+                let sections = change_sections(status);
+                if sections.is_empty() {
+                    changes_column = changes_column.push(muted_note("Working tree clean"));
+                }
+                for section in sections {
+                    let mut files = column![text(format!("{} ({})", section.title, section.files.len()))
+                        .size(14)
+                        .style(move |_| text::Style { color: Some(tokens.text_primary) })]
+                    .spacing(4);
+                    for file in section.files {
+                        files = files.push(
+                            text(file.as_str())
+                                .size(13)
+                                .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+                        );
+                    }
+                    changes_column = changes_column.push(files);
+                }
+            }
+        }
+
+        let right_sidebar = container(scrollable(changes_column))
+            .style(sidebar_style)
+            .width(Length::Fixed(250.0))
+            .height(Length::Fill);
 
         container(row![left_sidebar, center_pane, right_sidebar])
             .width(Length::Fill)
@@ -433,6 +478,42 @@ mod tests {
         assert!(events
             .iter()
             .all(|e| matches!(e, ViewEvent::ErrorOccurred(DomainError::RepositoryNotFound))));
+    }
+
+    // ── change_sections ───────────────────────────────────────────────────────
+
+    fn repo_status(staged: &[&str], unstaged: &[&str], untracked: &[&str]) -> RepoStatus {
+        let owned = |files: &[&str]| files.iter().map(|f| f.to_string()).collect();
+        RepoStatus { staged_files: owned(staged), unstaged_files: owned(unstaged), untracked_files: owned(untracked) }
+    }
+
+    #[test]
+    fn clean_status_has_no_sections() {
+        assert!(change_sections(&repo_status(&[], &[], &[])).is_empty());
+    }
+
+    #[test]
+    fn sections_follow_git_status_order() {
+        let status = repo_status(&["a.rs"], &["b.rs"], &["c.rs"]);
+
+        let titles: Vec<_> = change_sections(&status).iter().map(|s| s.title).collect();
+
+        assert_eq!(titles, vec!["Staged", "Unstaged", "Untracked"]);
+    }
+
+    #[test]
+    fn empty_groups_are_left_out() {
+        let status = repo_status(&["a.rs"], &[], &["c.rs", "d.rs"]);
+
+        let sections = change_sections(&status);
+
+        assert_eq!(
+            sections,
+            vec![
+                ChangeSection { title: "Staged", files: &status.staged_files },
+                ChangeSection { title: "Untracked", files: &status.untracked_files },
+            ]
+        );
     }
 
     // ── Background load ───────────────────────────────────────────────────────
