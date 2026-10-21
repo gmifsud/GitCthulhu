@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitCthulhu</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=Fragment+Mono&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --app: #0d0d0f;
+      --rail: #111214;
+      --chrome: #151619;
+      --raised: #1a1b1e;
+      --chip: #232429;
+      --ink: #ffffff;
+      --text: #d1d1d1;
+      --quiet: #8a8a8a;
+      --muted: #5a5a5a;
+      --line: #2d2d30;
+      --chip-line: #3a3b40;
+      --orange: #f27d26;
+      --added: #7dcea0;
+      --removed: #e07a7a;
+      --ui-font: "Familjen Grotesk", "Segoe UI", sans-serif;
+      --ui-size: 14px;
+      --mono: "Fragment Mono", ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--app);
+      color: var(--text);
+      font-family: var(--ui-font);
+      font-size: var(--ui-size);
+      line-height: 1.35;
+    }
+    button, input, select { font: inherit; color: inherit; }
+    button { background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--orange);
+      outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+    }
+
+    .app { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 18px;
+      padding: 10px 16px 8px;
+      background: var(--chrome);
+      flex-shrink: 0;
+    }
+    .mark { font-weight: 700; color: var(--ink); letter-spacing: -0.02em; }
+    .branch { font-weight: 700; color: var(--orange); }
+    .track { color: var(--quiet); }
+
+    .ribbon {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 48px;
+      padding: 6px 12px;
+      background: var(--chrome);
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .context {
+      color: var(--orange);
+      font-weight: 600;
+      width: 11rem;
+      flex-shrink: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cmds { display: flex; gap: 6px; flex-wrap: wrap; }
+    .cmd {
+      border: 1px solid var(--chip-line);
+      background: var(--chip);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 4px;
+    }
+    .cmd:hover:not(:disabled) { border-color: var(--orange); color: var(--ink); }
+    .cmd:disabled { color: var(--muted); border-color: var(--line); cursor: default; }
+    .cmd.primary:not(:disabled) {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: #1a1208;
+      font-weight: 700;
+    }
+    .settings { margin-left: auto; }
+
+    .body { flex: 1; display: flex; min-height: 0; }
+    .refs {
+      width: 196px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--line);
+      padding: 8px;
+      overflow: auto;
+      background: var(--rail);
+    }
+    .refs button, .refs .remote {
+      display: block;
+      width: 100%;
+      padding: 5px 8px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .refs button[aria-pressed="true"], .refs .remote[aria-pressed="true"] {
+      background: var(--raised);
+      box-shadow: inset 2px 0 0 var(--orange);
+      color: var(--ink);
+    }
+    .refs .remote { color: var(--quiet); }
+
+    .history { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .log { flex: 1; overflow: auto; }
+    .commit {
+      display: grid;
+      grid-template-columns: 56px 4.8rem 1fr 9rem 2.6rem;
+      align-items: center;
+      width: 100%;
+      min-height: 32px;
+      padding: 0 12px 0 8px;
+      gap: 8px;
+      color: var(--text);
+    }
+    .commit[aria-pressed="true"], .commit:hover { background: var(--raised); }
+    .lanes { width: 56px; height: 32px; position: relative; }
+    .line {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--quiet);
+    }
+    .line.l0 { left: 8px; }
+    .line.l1 { left: 36px; }
+    .line.stop { bottom: 16px; }
+    .join {
+      position: absolute;
+      left: 8px;
+      top: 16px;
+      width: 28px;
+      height: 1px;
+      background: var(--quiet);
+    }
+    .node {
+      position: absolute;
+      top: 11px;
+      width: 9px;
+      height: 9px;
+      border: 1.5px solid var(--text);
+      border-radius: 50%;
+      background: var(--app);
+      z-index: 1;
+    }
+    .node.l0 { left: 4px; }
+    .node.l1 { left: 32px; }
+    .node.head { background: var(--orange); border-color: var(--orange); }
+    .hash, .when, .who, .file .name, .patch {
+      font-family: var(--mono);
+      font-size: 0.86em;
+    }
+    .hash, .when, .who { color: var(--quiet); }
+    .who, .subject, .file .name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .patch {
+      border-top: 1px solid var(--line);
+      padding: 10px 16px 12px 64px;
+      line-height: 1.55;
+      background: var(--rail);
+      color: var(--text);
+    }
+    .patch .path { color: var(--quiet); margin-bottom: 4px; }
+    .patch .add { color: var(--added); }
+    .patch .del { color: var(--removed); }
+    .patch[hidden] { display: none; }
+
+    .work { border-top: 1px solid var(--line); flex-shrink: 0; background: var(--app); }
+    .files { padding: 6px 8px; }
+    .file {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      width: 100%;
+      min-height: 30px;
+      padding: 0 8px;
+      color: var(--text);
+    }
+    .file[aria-pressed="true"], .file:hover { background: var(--raised); }
+    .kind { color: var(--quiet); }
+    .kind.added { color: var(--added); }
+    .kind.staged { color: var(--orange); }
+    .compose { padding: 4px 16px 10px; }
+    .compose input {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      padding: 8px 2px;
+      color: var(--ink);
+    }
+    .compose input::placeholder { color: var(--muted); }
+
+    dialog {
+      border: 1px solid var(--line);
+      background: var(--chrome);
+      color: var(--text);
+      padding: 0;
+      width: min(420px, calc(100% - 32px));
+    }
+    dialog::backdrop { background: rgba(0, 0, 0, 0.62); }
+    dialog form { padding: 20px 22px 16px; }
+    dialog h2 { margin: 0 0 16px; font-size: 1.15rem; color: var(--ink); font-weight: 700; }
+    dialog h3 { margin: 0 0 12px; font-size: 1rem; color: var(--orange); font-weight: 600; }
+    label { display: block; margin: 0 0 12px; color: var(--text); }
+    label span { display: block; margin-bottom: 4px; color: var(--quiet); }
+    select {
+      width: 100%;
+      background: var(--chip);
+      border: 1px solid var(--chip-line);
+      color: var(--ink);
+      padding: 7px 8px;
+    }
+    .size {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    input[type="range"] { flex: 1; accent-color: var(--orange); }
+    .dialog-close {
+      margin-top: 8px;
+      border: 1px solid var(--orange);
+      background: var(--orange);
+      color: #1a1208;
+      font-weight: 700;
+      padding: 6px 14px;
+    }
+
+    @media (max-width: 760px) {
+      .body { flex-direction: column; }
+      .refs {
+        width: auto;
+        display: flex;
+        gap: 4px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .refs button, .refs .remote { width: auto; }
+      .commit { grid-template-columns: 56px 4.2rem 1fr 2.4rem; }
+      .who { display: none; }
+      .context { width: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="mark">GitCthulhu</div>
+      <div class="branch" id="branch-name">dev</div>
+      <div class="track">2 ahead, 1 behind origin/dev</div>
+    </header>
+    <div class="ribbon" role="toolbar" aria-label="Commands">
+      <div class="context" id="context">Branch</div>
+      <div class="cmds" id="cmds"></div>
+      <button class="cmd settings" type="button" id="open-settings">Settings</button>
+    </div>
+
+    <div class="body">
+      <nav class="refs" id="refs" aria-label="Branches"></nav>
+      <section class="history" aria-label="History">
+        <div class="log" id="log"></div>
+        <div class="patch" id="patch" hidden></div>
+      </section>
+    </div>
+
+    <section class="work" aria-label="Changes">
+      <div class="files" id="files"></div>
+      <form class="compose" id="compose">
+        <input id="message" name="message" autocomplete="off" placeholder="Commit message" aria-label="Commit message" />
+      </form>
+    </section>
+  </div>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <h2>Settings</h2>
+      <h3>Appearance</h3>
+      <label>
+        <span>Font</span>
+        <select id="font">
+          <option value='"Familjen Grotesk", "Segoe UI", sans-serif'>Familjen Grotesk</option>
+          <option value='"Segoe UI", sans-serif'>Segoe UI</option>
+          <option value='"Fragment Mono", ui-monospace, monospace'>Fragment Mono</option>
+        </select>
+      </label>
+      <label>
+        <span>Size</span>
+        <div class="size">
+          <input id="size" type="range" min="12" max="18" step="1" value="14" />
+          <span id="size-readout">14</span>
+        </div>
+      </label>
+      <button class="dialog-close" value="close">Close</button>
+    </form>
+  </dialog>
+
+  <script>
+    const branches = [
+      { name: "dev", current: true },
+      { name: "main", current: false },
+      { name: "gmifsud-architecture-review", current: false }
+    ];
+    const remotes = ["origin/dev", "origin/gmifsud-architecture-review"];
+    const files = [
+      { path: "gui_app/src/view.rs", kind: "staged" },
+      { path: "git_adapter/src/status.rs", kind: "modified" },
+      { path: "gui_app/src/tracking.rs", kind: "added" }
+    ];
+    const commits = [
+      { id: "1558f59", subject: "Check out a branch by clicking it in the sidebar", who: "Gregory Mifsud", when: "2d", head: true, node: 0, lines: [0], patch: ["gui_app/src/view.rs", " fn checkout(name) {", "-    // remote names were buttons", "+    if branch.is_remote { return; }", "     switch_to(name)"] },
+      { id: "04d7b7a", subject: "Draw the commit graph and scroll the branch list", who: "Gregory Mifsud", when: "3d", node: 0, lines: [0, 1] },
+      { id: "e01d079", subject: "Assign a lane to each parent", who: "Gregory Mifsud", when: "4d", node: 1, lines: [0, 1] },
+      { id: "8e85fb3", subject: "Show the working tree in the changes list", who: "Gregory Mifsud", when: "5d", node: 0, lines: [0, 1], join: true, stop: [1] },
+      { id: "98b95d0", subject: "Read status, log and branches with gix", who: "Gregory Mifsud", when: "6d", node: 0, lines: [0], end: true }
+    ];
+
+    const refs = document.getElementById("refs");
+    const log = document.getElementById("log");
+    const filesEl = document.getElementById("files");
+    const patch = document.getElementById("patch");
+    const contextEl = document.getElementById("context");
+    const cmdsEl = document.getElementById("cmds");
+    const message = document.getElementById("message");
+    let context = { kind: "branch", name: "dev", current: true };
+
+    function lanes(commit) {
+      const lines = commit.lines.map((lane) => {
+        const stop = commit.end || (commit.stop || []).includes(lane);
+        return `<span class="line l${lane}${stop ? " stop" : ""}"></span>`;
+      }).join("");
+      const join = commit.join ? `<span class="join"></span>` : "";
+      return `<div class="lanes" aria-hidden="true">${lines}${join}<span class="node l${commit.node}${commit.head ? " head" : ""}"></span></div>`;
+    }
+
+    refs.innerHTML = branches.map((branch) => `
+      <button type="button" data-branch="${branch.name}" aria-pressed="${branch.current ? "true" : "false"}">${branch.name}</button>
+    `).join("") + remotes.map((name) => `
+      <button class="remote" type="button" data-remote="${name}" aria-pressed="false">${name}</button>
+    `).join("");
+
+    log.innerHTML = commits.map((commit, index) => `
+      <button class="commit" type="button" data-index="${index}" aria-pressed="false">
+        ${lanes(commit)}
+        <span class="hash">${commit.id}</span>
+        <span class="subject">${commit.subject}</span>
+        <span class="who">${commit.who}</span>
+        <span class="when">${commit.when}</span>
+      </button>
+    `).join("");
+
+    filesEl.innerHTML = files.map((file, index) => `
+      <button class="file" type="button" data-file="${index}" aria-pressed="false">
+        <span class="name">${file.path}</span>
+        <span class="kind ${file.kind}">${file.kind}</span>
+      </button>
+    `).join("");
+
+    function clearPressed(selector) {
+      for (const node of document.querySelectorAll(selector)) node.setAttribute("aria-pressed", "false");
+    }
+
+    function command(label, options = {}) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "cmd" + (options.primary ? " primary" : "");
+      button.textContent = label;
+      button.disabled = Boolean(options.disabled);
+      return button;
+    }
+
+    function renderRibbon() {
+      cmdsEl.replaceChildren();
+      if (context.kind === "branch") {
+        contextEl.textContent = "Branch";
+        cmdsEl.append(
+          command("Checkout", { disabled: context.current }),
+          command("Fetch"),
+          command("Pull"),
+          command("Push")
+        );
+      } else if (context.kind === "remote") {
+        contextEl.textContent = "Remote";
+        cmdsEl.append(command("Checkout", { disabled: true }));
+      } else if (context.kind === "commit") {
+        contextEl.textContent = context.id;
+      } else {
+        contextEl.textContent = "Changes";
+        const file = files[context.index];
+        cmdsEl.append(
+          command(file.kind === "staged" ? "Unstage" : "Stage"),
+          command("Commit", { primary: true, disabled: message.value.trim() === "" })
+        );
+      }
+    }
+
+    function showPatch(commit) {
+      if (!commit || !commit.patch) {
+        patch.hidden = true;
+        return;
+      }
+      const [path, ...lines] = commit.patch;
+      patch.hidden = false;
+      patch.innerHTML = `<div class="path">${path}</div>` + lines.map((line) => {
+        const kind = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "";
+        return `<div class="${kind}">${line.replace(/</g, "&lt;")}</div>`;
+      }).join("");
+    }
+
+    refs.addEventListener("click", (event) => {
+      const branch = event.target.closest("[data-branch]");
+      const remote = event.target.closest("[data-remote]");
+      if (!branch && !remote) return;
+      clearPressed("#refs button");
+      clearPressed(".commit");
+      clearPressed(".file");
+      showPatch(null);
+      if (branch) {
+        branch.setAttribute("aria-pressed", "true");
+        const found = branches.find((item) => item.name === branch.dataset.branch);
+        context = { kind: "branch", name: found.name, current: found.current };
+      } else {
+        remote.setAttribute("aria-pressed", "true");
+        context = { kind: "remote", name: remote.dataset.remote };
+      }
+      renderRibbon();
+    });
+
+    log.addEventListener("click", (event) => {
+      const row = event.target.closest(".commit");
+      if (!row) return;
+      clearPressed(".commit");
+      clearPressed("#refs button");
+      clearPressed(".file");
+      row.setAttribute("aria-pressed", "true");
+      const commit = commits[Number(row.dataset.index)];
+      context = { kind: "commit", id: commit.id };
+      showPatch(commit);
+      renderRibbon();
+    });
+
+    filesEl.addEventListener("click", (event) => {
+      const row = event.target.closest(".file");
+      if (!row) return;
+      clearPressed(".file");
+      clearPressed(".commit");
+      clearPressed("#refs button");
+      row.setAttribute("aria-pressed", "true");
+      showPatch(null);
+      context = { kind: "file", index: Number(row.dataset.file) };
+      renderRibbon();
+    });
+
+    message.addEventListener("input", renderRibbon);
+    document.getElementById("compose").addEventListener("submit", (event) => event.preventDefault());
+
+    const settings = document.getElementById("settings");
+    const font = document.getElementById("font");
+    const size = document.getElementById("size");
+    const readout = document.getElementById("size-readout");
+    function applyType() {
+      document.documentElement.style.setProperty("--ui-font", font.value);
+      document.documentElement.style.setProperty("--ui-size", size.value + "px");
+      readout.textContent = size.value;
+    }
+    font.addEventListener("change", applyType);
+    size.addEventListener("input", applyType);
+    document.getElementById("open-settings").addEventListener("click", () => settings.showModal());
+
+    renderRibbon();
+  </script>
+</body>
+</html>
