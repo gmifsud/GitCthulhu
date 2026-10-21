@@ -2,9 +2,7 @@
 //! Shared test fakes for all adapter crates.
 //! Add as `[dev-dependencies]` only — never in `[dependencies]`.
 
-use core_domain::{
-    Branch, Commit, CredentialStore, DomainError, GitRepository, RepoStatus, SshManager,
-};
+use core_domain::{Branch, Commit, DomainError, GitRepository, RepoStatus};
 
 /// Pre-configured fake that implements [`GitRepository`].
 ///
@@ -16,8 +14,12 @@ pub struct FakeGitRepository {
     pub log_result: Result<Vec<Commit>, DomainError>,
     pub branches_result: Result<Vec<Branch>, DomainError>,
     pub checkout_result: Result<(), DomainError>,
+    pub stage_result: Result<(), DomainError>,
+    pub unstage_result: Result<(), DomainError>,
+    pub commit_result: Result<(), DomainError>,
     pub fetch_result: Result<(), DomainError>,
-    pub fetch_ssh_result: Result<(), DomainError>,
+    pub push_result: Result<(), DomainError>,
+    pub pull_result: Result<(), DomainError>,
 }
 
 impl FakeGitRepository {
@@ -28,12 +30,17 @@ impl FakeGitRepository {
                 staged_files: vec![],
                 unstaged_files: vec![],
                 untracked_files: vec![],
+                tracking: None,
             }),
             log_result: Ok(vec![]),
             branches_result: Ok(vec![]),
             checkout_result: Ok(()),
+            stage_result: Ok(()),
+            unstage_result: Ok(()),
+            commit_result: Ok(()),
             fetch_result: Ok(()),
-            fetch_ssh_result: Ok(()),
+            push_result: Ok(()),
+            pull_result: Ok(()),
         }
     }
 }
@@ -55,11 +62,27 @@ impl GitRepository for FakeGitRepository {
         self.checkout_result.clone()
     }
 
-    fn fetch(&self, _store: &dyn CredentialStore) -> Result<(), DomainError> {
+    fn stage_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
+        self.stage_result.clone()
+    }
+
+    fn unstage_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
+        self.unstage_result.clone()
+    }
+
+    fn commit(&self, _message: &str) -> Result<(), DomainError> {
+        self.commit_result.clone()
+    }
+
+    fn fetch(&self) -> Result<(), DomainError> {
         self.fetch_result.clone()
     }
 
-    fn fetch_ssh(&self, _ssh_manager: &dyn SshManager) -> Result<(), DomainError> {
-        self.fetch_ssh_result.clone()
+    fn push(&self) -> Result<(), DomainError> {
+        self.push_result.clone()
+    }
+
+    fn pull(&self) -> Result<(), DomainError> {
+        self.pull_result.clone()
     }
 }

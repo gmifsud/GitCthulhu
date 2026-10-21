@@ -96,7 +96,10 @@ mod tests {
 
     /// `(commit_id, lane)` for every node, for compact assertions.
     fn lanes(nodes: &[DagNode]) -> Vec<(&str, usize)> {
-        nodes.iter().map(|n| (n.commit_id.as_str(), n.lane)).collect()
+        nodes
+            .iter()
+            .map(|n| (n.commit_id.as_str(), n.lane))
+            .collect()
     }
 
     fn connections<'a>(nodes: &'a [DagNode], id: &str) -> Vec<(&'a str, usize)> {
@@ -117,7 +120,11 @@ mod tests {
 
     #[test]
     fn linear_history_stays_in_one_lane() {
-        let nodes = build_dag(&[commit("c3", &["c2"]), commit("c2", &["c1"]), commit("c1", &[])]);
+        let nodes = build_dag(&[
+            commit("c3", &["c2"]),
+            commit("c2", &["c1"]),
+            commit("c1", &[]),
+        ]);
 
         assert_eq!(lanes(&nodes), vec![("c3", 0), ("c2", 0), ("c1", 0)]);
         assert_eq!(connections(&nodes, "c3"), vec![("c2", 0)]);
@@ -134,14 +141,21 @@ mod tests {
             commit("base", &[]),
         ]);
 
-        assert_eq!(lanes(&nodes), vec![("M", 0), ("A", 0), ("B", 1), ("base", 0)]);
+        assert_eq!(
+            lanes(&nodes),
+            vec![("M", 0), ("A", 0), ("B", 1), ("base", 0)]
+        );
         assert_eq!(connections(&nodes, "M"), vec![("A", 0), ("B", 1)]);
         assert_eq!(connections(&nodes, "B"), vec![("base", 1)]);
     }
 
     #[test]
     fn unmerged_branch_tips_get_separate_lanes() {
-        let nodes = build_dag(&[commit("T1", &["base"]), commit("T2", &["base"]), commit("base", &[])]);
+        let nodes = build_dag(&[
+            commit("T1", &["base"]),
+            commit("T2", &["base"]),
+            commit("base", &[]),
+        ]);
 
         assert_eq!(lanes(&nodes), vec![("T1", 0), ("T2", 1), ("base", 0)]);
     }
@@ -162,7 +176,15 @@ mod tests {
 
         assert_eq!(
             lanes(&nodes),
-            vec![("T1", 0), ("T2", 1), ("T3", 2), ("X", 0), ("T4", 1), ("Y", 0), ("Z", 2)]
+            vec![
+                ("T1", 0),
+                ("T2", 1),
+                ("T3", 2),
+                ("X", 0),
+                ("T4", 1),
+                ("Y", 0),
+                ("Z", 2)
+            ]
         );
     }
 

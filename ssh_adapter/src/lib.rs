@@ -3,7 +3,6 @@
 //! and subsystem path mapping (e.g. WSL2).
 
 use core_domain::{DomainError, SshManager};
-use std::path::PathBuf;
 
 pub struct NativeSshManager {
     // We could store env context here if needed
@@ -28,9 +27,15 @@ impl SshManager for NativeSshManager {
                 return Ok(rsa.to_string_lossy().to_string());
             }
             // fallback
-            Ok(home.join(".ssh").join("id_rsa").to_string_lossy().to_string())
+            Ok(home
+                .join(".ssh")
+                .join("id_rsa")
+                .to_string_lossy()
+                .to_string())
         } else {
-            Err(DomainError::Unknown("Could not find home directory".to_string()))
+            Err(DomainError::Unknown(
+                "Could not find home directory".to_string(),
+            ))
         }
     }
 
@@ -50,7 +55,7 @@ impl SshManager for NativeSshManager {
     fn prepare_ssh_env(&self) -> Result<(String, String), DomainError> {
         let key_path = self.get_default_key_path()?;
         let resolved_path = self.resolve_subsystem_path(&key_path);
-        
+
         // Return (Environment Variable Key, Environment Variable Value)
         let env_key = "GIT_SSH_COMMAND".to_string();
         let env_val = format!("ssh -i {} -o IdentitiesOnly=yes", resolved_path);
@@ -58,15 +63,12 @@ impl SshManager for NativeSshManager {
     }
 
     fn preflight_check(&self) -> Result<(), DomainError> {
-        use std::process::Command;
-        use std::time::Duration;
         use std::env::consts::OS;
+        use std::process::Command;
 
         let ssh_exe = if OS == "windows" { "ssh.exe" } else { "ssh" };
 
-        let child = Command::new(ssh_exe)
-            .arg("-V")
-            .spawn();
+        let child = Command::new(ssh_exe).arg("-V").spawn();
 
         match child {
             Ok(mut child) => {
@@ -86,9 +88,11 @@ impl SshManager for NativeSshManager {
                 };
 
                 let reason = if OS == "windows" {
-                    "SSH executable not found. Try running: winget install OpenSSH.Microsoft".to_string()
+                    "SSH executable not found. Try running: winget install OpenSSH.Microsoft"
+                        .to_string()
                 } else if is_wsl || OS == "linux" {
-                    "SSH executable not found. Try running: sudo apt install openssh-client".to_string()
+                    "SSH executable not found. Try running: sudo apt install openssh-client"
+                        .to_string()
                 } else {
                     format!("SSH executable not found: {}", e)
                 };

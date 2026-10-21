@@ -1,20 +1,19 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# GitCthulhu
 
-# Run and deploy your AI Studio app
+Desktop Git client. The window is iced. Repository operations go through the `GitRepository` port in `core_domain`, and `git_adapter` implements that port.
 
-This contains everything you need to run your app locally.
+## Run
 
-View your app in AI Studio: https://ai.studio/apps/a521efd7-acc7-4452-b338-852775d39aec
+Rust, and `git` on `PATH`.
 
-## Run Locally
+```
+cargo run -p app -- <path-to-repo>
+```
 
-**Prerequisites:**  Node.js
+With no path, the window reopens the last repository when that folder is still a repository. Otherwise it opens on the welcome screen.
 
+## Test
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```
+cargo test --workspace
+```

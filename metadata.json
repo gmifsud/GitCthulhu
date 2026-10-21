@@ -1,6 +1,0 @@
-{
-  "name": "GitCthulhu",
-  "description": "Hexagonal architecture Rust workspace for a GitKraken analogue.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

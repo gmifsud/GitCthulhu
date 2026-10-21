@@ -7,7 +7,7 @@ use core_domain::DagNode;
 use iced::widget::canvas;
 use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 
-use crate::hex_color;
+use crate::theme::hex_color;
 
 /// Height of one commit row. Rows are single-line so graph segments meet exactly.
 pub(crate) const ROW_HEIGHT: f32 = 28.0;
@@ -64,7 +64,12 @@ pub(crate) fn graph_rows(nodes: &[DagNode]) -> Vec<GraphRow> {
                 expected.pop();
             }
 
-            GraphRow { lane: node.lane, incoming, passing, outgoing }
+            GraphRow {
+                lane: node.lane,
+                incoming,
+                passing,
+                outgoing,
+            }
         })
         .collect()
 }
@@ -73,7 +78,13 @@ pub(crate) fn graph_rows(nodes: &[DagNode]) -> Vec<GraphRow> {
 pub(crate) fn graph_width(rows: &[GraphRow]) -> f32 {
     let lanes = rows
         .iter()
-        .flat_map(|row| row.incoming.iter().chain(&row.passing).chain(&row.outgoing).chain([&row.lane]))
+        .flat_map(|row| {
+            row.incoming
+                .iter()
+                .chain(&row.passing)
+                .chain(&row.outgoing)
+                .chain([&row.lane])
+        })
         .max()
         .map_or(0, |widest| widest + 1);
     lanes as f32 * LANE_SPACING
@@ -108,12 +119,18 @@ impl<Message> canvas::Program<Message> for GraphCell {
         let mut segment = |from: Point, to: Point, lane: usize| {
             frame.stroke(
                 &canvas::Path::line(from, to),
-                canvas::Stroke::default().with_color(lane_colour(lane)).with_width(LINE_WIDTH),
+                canvas::Stroke::default()
+                    .with_color(lane_colour(lane))
+                    .with_width(LINE_WIDTH),
             );
         };
 
         for &lane in &row.passing {
-            segment(Point::new(lane_x(lane), 0.0), Point::new(lane_x(lane), bottom), lane);
+            segment(
+                Point::new(lane_x(lane), 0.0),
+                Point::new(lane_x(lane), bottom),
+                lane,
+            );
         }
         for &lane in &row.incoming {
             segment(Point::new(lane_x(lane), 0.0), dot, lane);
@@ -121,7 +138,10 @@ impl<Message> canvas::Program<Message> for GraphCell {
         for &lane in &row.outgoing {
             segment(dot, Point::new(lane_x(lane), bottom), lane);
         }
-        frame.fill(&canvas::Path::circle(dot, DOT_RADIUS), lane_colour(row.lane));
+        frame.fill(
+            &canvas::Path::circle(dot, DOT_RADIUS),
+            lane_colour(row.lane),
+        );
 
         vec![frame.into_geometry()]
     }
@@ -153,11 +173,19 @@ mod tests {
 
     #[test]
     fn linear_history_is_one_continuous_lane() {
-        let nodes = build_dag(&[commit("c3", &["c2"]), commit("c2", &["c1"]), commit("c1", &[])]);
+        let nodes = build_dag(&[
+            commit("c3", &["c2"]),
+            commit("c2", &["c1"]),
+            commit("c1", &[]),
+        ]);
 
         assert_eq!(
             graph_rows(&nodes),
-            vec![row(0, &[], &[], &[0]), row(0, &[0], &[], &[0]), row(0, &[0], &[], &[])]
+            vec![
+                row(0, &[], &[], &[0]),
+                row(0, &[0], &[], &[0]),
+                row(0, &[0], &[], &[])
+            ]
         );
     }
 
@@ -183,7 +211,11 @@ mod tests {
 
     #[test]
     fn branch_tip_starts_without_an_incoming_line() {
-        let nodes = build_dag(&[commit("T1", &["base"]), commit("T2", &["base"]), commit("base", &[])]);
+        let nodes = build_dag(&[
+            commit("T1", &["base"]),
+            commit("T2", &["base"]),
+            commit("base", &[]),
+        ]);
 
         let rows = graph_rows(&nodes);
 
@@ -192,7 +224,12 @@ mod tests {
 
     #[test]
     fn width_covers_the_widest_lane() {
-        let nodes = build_dag(&[commit("M", &["A", "B", "C"]), commit("A", &[]), commit("B", &[]), commit("C", &[])]);
+        let nodes = build_dag(&[
+            commit("M", &["A", "B", "C"]),
+            commit("A", &[]),
+            commit("B", &[]),
+            commit("C", &[]),
+        ]);
 
         assert_eq!(graph_width(&graph_rows(&nodes)), 3.0 * LANE_SPACING);
         assert_eq!(graph_width(&[]), 0.0);

@@ -11,4 +11,6 @@ path = "src/main.rs"
 [dependencies]
 gui_app = { path = "../gui_app" }
 git_adapter = { path = "../git_adapter" }
+config_adapter = { path = "../config_adapter" }
+core_domain = { path = "../core_domain" }
 iced = "0.13" # Only for the `iced::Result` returned by main

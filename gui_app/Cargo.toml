@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 core_domain = { path = "../core_domain" }
 iced = { version = "0.13", features = ["canvas"] } # Pure Rust reactive GUI; canvas draws the commit graph
+rfd = "0.17.2"
 
 [dev-dependencies]
 test_support = { path = "../test_support" }
