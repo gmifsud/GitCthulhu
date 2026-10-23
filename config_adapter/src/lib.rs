@@ -11,6 +11,19 @@ struct AppSettingsDto {
     /// Absent in settings written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_repo_path: Option<String>,
+    /// Absent in settings written before Appearance existed.
+    #[serde(default = "default_ui_font")]
+    pub ui_font: String,
+    #[serde(default = "default_ui_size")]
+    pub ui_size: u8,
+}
+
+fn default_ui_font() -> String {
+    AppSettings::DEFAULT_UI_FONT.to_string()
+}
+
+fn default_ui_size() -> u8 {
+    AppSettings::DEFAULT_UI_SIZE
 }
 
 impl Default for AppSettingsDto {
@@ -19,6 +32,8 @@ impl Default for AppSettingsDto {
             theme: "DeepFocus".to_string(),
             repository_shortcuts: vec![],
             last_repo_path: None,
+            ui_font: default_ui_font(),
+            ui_size: default_ui_size(),
         }
     }
 }
@@ -29,6 +44,8 @@ impl From<AppSettingsDto> for AppSettings {
             theme: dto.theme,
             repository_shortcuts: dto.repository_shortcuts,
             last_repo_path: dto.last_repo_path,
+            ui_font: dto.ui_font,
+            ui_size: dto.ui_size,
         }
     }
 }
@@ -39,6 +56,8 @@ impl From<&AppSettings> for AppSettingsDto {
             theme: domain.theme.clone(),
             repository_shortcuts: domain.repository_shortcuts.clone(),
             last_repo_path: domain.last_repo_path.clone(),
+            ui_font: domain.ui_font.clone(),
+            ui_size: domain.ui_size,
         }
     }
 }
@@ -158,6 +177,8 @@ mod tests {
             assert_eq!(settings.theme, "DeepFocus");
             assert_eq!(settings.repository_shortcuts, vec!["one".to_string()]);
             assert_eq!(settings.last_repo_path, None);
+            assert_eq!(settings.ui_font, AppSettings::DEFAULT_UI_FONT);
+            assert_eq!(settings.ui_size, AppSettings::DEFAULT_UI_SIZE);
         });
     }
 }

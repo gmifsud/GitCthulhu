@@ -87,6 +87,8 @@ mod tests {
             theme: "DeepFocus".to_string(),
             repository_shortcuts: vec!["one".to_string()],
             last_repo_path: path.map(str::to_string),
+            ui_font: AppSettings::DEFAULT_UI_FONT.to_string(),
+            ui_size: AppSettings::DEFAULT_UI_SIZE,
         }
     }
 
