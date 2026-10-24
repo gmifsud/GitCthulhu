@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitCthulhu — graph and dock wireframe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:ital,wght@0,400;0,500;0,600;0,700&family=Fragment+Mono&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --app: #0d0d0f;
+      --rail: #111214;
+      --chrome: #151619;
+      --raised: #1a1b1e;
+      --chip: #232429;
+      --ink: #ffffff;
+      --text: #d1d1d1;
+      --quiet: #8a8a8a;
+      --muted: #5a5a5a;
+      --line: #2d2d30;
+      --chip-line: #3a3b40;
+      --orange: #f27d26;
+      --orange-ink: #1a1208;
+      --lane-1: #8d84b5;
+      --added: #7dcea0;
+      --removed: #e07a7a;
+      --ui: "Familjen Grotesk", "Segoe UI", sans-serif;
+      --mono: "Fragment Mono", ui-monospace, monospace;
+      --dock: 440px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--app);
+      color: var(--text);
+      font-family: var(--ui);
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    button, select { font: inherit; color: inherit; }
+    button { background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+    button:focus-visible, select:focus-visible, input:focus-visible {
+      outline: 2px solid var(--orange);
+      outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+    }
+
+    .app {
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 8px 14px;
+      background: var(--chrome);
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .identity { min-width: 0; }
+    .mark {
+      font-weight: 700;
+      color: var(--ink);
+      letter-spacing: -0.03em;
+      font-size: 15px;
+    }
+    .path {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--quiet);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 42rem;
+    }
+    .top-gap { flex: 1; }
+    .tracking { color: var(--quiet); }
+    .tracking strong { color: var(--orange); font-weight: 600; }
+
+    .chip, .cmd, .mode, .toggle {
+      border: 1px solid var(--chip-line);
+      background: var(--chip);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 4px 10px;
+      white-space: nowrap;
+    }
+    .chip[aria-pressed="true"] {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: var(--orange-ink);
+      font-weight: 700;
+    }
+    .chip.remote { color: var(--quiet); }
+    .chip.remote[aria-pressed="true"] { color: var(--orange-ink); }
+
+    .context {
+      color: var(--orange);
+      font-weight: 600;
+      max-width: 8rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .commands { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; flex-basis: 100%; }
+    .cmd { border-radius: 4px; padding: 5px 10px; }
+    .cmd:hover:not(:disabled), .chip:hover:not([aria-pressed="true"]), .mode:hover, .toggle:hover {
+      border-color: var(--orange);
+      color: var(--ink);
+    }
+    .cmd:disabled { color: var(--muted); border-color: var(--line); cursor: default; }
+    .cmd.primary:not(:disabled) {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: var(--orange-ink);
+      font-weight: 700;
+    }
+
+    .stage { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+    .stage.stacked { flex-direction: column; }
+    .graph-pane {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--app);
+    }
+    .graph-head {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--rail);
+      flex-shrink: 0;
+    }
+    .branch-button {
+      border: 1px solid var(--chip-line);
+      background: var(--chip);
+      color: var(--orange);
+      font-weight: 700;
+      border-radius: 4px;
+      padding: 5px 10px;
+    }
+    .branch-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 12px;
+      width: min(320px, 80vw);
+      background: var(--chrome);
+      border: 1px solid var(--line);
+      z-index: 4;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .branch-menu[hidden] { display: none; }
+    .branch-menu input {
+      width: 100%;
+      background: var(--app);
+      border: 1px solid var(--chip-line);
+      color: var(--ink);
+      padding: 7px 8px;
+      font: inherit;
+      margin-bottom: 4px;
+    }
+    .branch-item { display: block; width: 100%; padding: 6px 8px; color: var(--text); }
+    .branch-item[aria-current="true"] { color: var(--orange); font-weight: 700; }
+    .branch-item:disabled { color: var(--muted); cursor: default; }
+    .branch-item:hover:not(:disabled) { background: var(--raised); }
+    .graph { flex: 1; min-height: 80px; overflow: auto; background: var(--app); position: relative; }
+    .lane-sheet { position: absolute; left: 8px; top: 0; pointer-events: none; }
+
+    .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      height: 44px;
+      padding: 0 14px 0 84px;
+      color: var(--text);
+    }
+    .row[aria-pressed="true"] { background: var(--raised); }
+    .row:hover { background: var(--raised); }
+    .subject {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .row[aria-pressed="true"] .subject { color: var(--ink); }
+    .labels { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle; }
+    .pill {
+      display: inline-block;
+      border: 1px solid var(--chip-line);
+      background: var(--chip);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .pill.here { border-color: var(--orange); color: var(--orange); }
+    .when, .hash {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--quiet);
+    }
+    .hash { width: 4.6rem; text-align: right; }
+    .lanes { width: 72px; height: 44px; display: block; }
+
+    .splitter {
+      flex-shrink: 0;
+      background: var(--line);
+    }
+    .stage:not(.stacked) .splitter { width: 6px; height: auto; cursor: col-resize; }
+    .stage.stacked .splitter { width: auto; height: 6px; cursor: row-resize; }
+    .splitter:hover, .splitter:focus-visible { background: var(--orange); }
+
+    .dock {
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--rail);
+      flex-shrink: 0;
+    }
+    .stage:not(.stacked) .dock { width: var(--dock); height: auto; }
+    .stage.stacked .dock { width: auto; height: var(--dock); }
+    .dock.collapsed .dock-body { display: none; }
+    .stage:not(.stacked) .dock.collapsed { width: 48px; }
+    .stage.stacked .dock.collapsed { height: 40px; width: auto; }
+    .stage:not(.stacked) .dock.collapsed .dock-head > :not(#hide-dock) { display: none; }
+    .dock-head {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+      min-height: 40px;
+    }
+    .commit-title { padding: 12px 14px 0; color: var(--ink); font-weight: 600; }
+    .commit-meta {
+      padding: 2px 14px 8px;
+      color: var(--quiet);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .patch {
+      margin: 0;
+      padding: 8px 14px 16px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--text);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .patch .add { color: var(--added); }
+    .patch .del { color: var(--removed); }
+    .mode[aria-pressed="true"], .toggle[aria-pressed="true"] {
+      border-color: var(--orange);
+      color: var(--ink);
+    }
+    .dock-gap { flex: 1; }
+    .stat { color: var(--quiet); }
+    .stat b { font-weight: 600; }
+    .stat .up { color: var(--added); }
+    .stat .down { color: var(--removed); }
+    select {
+      background: var(--chip);
+      border: 1px solid var(--chip-line);
+      border-radius: 4px;
+      padding: 4px 8px;
+    }
+
+    .dock-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+    .range { border-bottom: 1px solid var(--line); }
+    .file, .range-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
+      gap: 12px;
+      align-items: center;
+      width: 100%;
+      padding: 6px 14px;
+      color: var(--text);
+    }
+    .range-row { grid-template-columns: 4.6rem minmax(0, 1fr) auto; }
+    .file[aria-pressed="true"], .range-row[aria-pressed="true"] { background: var(--raised); }
+    .file:hover, .range-row:hover { background: var(--raised); }
+    .name, .range-row .who {
+      font-family: var(--mono);
+      font-size: 12.5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .add { color: var(--added); font-variant-numeric: tabular-nums; }
+    .del { color: var(--removed); font-variant-numeric: tabular-nums; }
+    .kind { color: var(--quiet); width: 1.2rem; text-align: right; }
+    .group {
+      padding: 8px 14px 2px;
+      color: var(--quiet);
+    }
+    .dir { color: var(--quiet); }
+    .indent-1 { padding-left: 28px; }
+    .indent-2 { padding-left: 44px; }
+    .indent-3 { padding-left: 60px; }
+
+    @media (max-width: 760px) {
+      .when { display: none; }
+      .path { max-width: 14rem; }
+      .stage, .stage.stacked { flex-direction: column; }
+      .stage .dock, .stage.stacked .dock { width: auto; height: var(--dock); }
+      .stage .splitter, .stage.stacked .splitter { width: auto; height: 6px; cursor: row-resize; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="identity">
+        <div class="mark">GitCthulhu</div>
+        <div class="path">D:\Repos\GitCthulhu</div>
+      </div>
+      <div class="top-gap"></div>
+      <div class="tracking" id="tracking"></div>
+      <button class="toggle" type="button" id="layout-side" aria-pressed="true">Side by side</button>
+      <button class="toggle" type="button" id="layout-stack" aria-pressed="false">Stacked</button>
+      <button class="cmd" type="button">Open…</button>
+    </header>
+
+    <div class="stage" id="stage">
+      <section class="graph-pane">
+        <div class="graph-head">
+          <button class="branch-button" type="button" id="branch-button" aria-expanded="false" aria-controls="branch-menu">dev</button>
+          <div class="branch-menu" id="branch-menu" hidden>
+            <input id="branch-search" type="search" placeholder="Switch branch…" aria-label="Switch branch" />
+            <div id="branch-list"></div>
+          </div>
+        </div>
+        <div class="graph" id="graph" role="listbox" aria-label="History"></div>
+      </section>
+      <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the history and the detail" tabindex="0"></div>
+      <section class="dock" id="dock" aria-label="Changes">
+        <div class="dock-head">
+          <button class="mode" type="button" id="mode-work" aria-pressed="true">Working tree</button>
+          <button class="mode" type="button" id="mode-compare">Compare</button>
+          <span id="compare-tools" hidden>
+            <select aria-label="Left reference"><option>dev</option><option>main</option></select>
+            <select aria-label="Right reference"><option>origin/dev</option><option>main</option></select>
+            <span class="stat">Ahead <b class="up">2</b></span>
+            <span class="stat">Behind <b>0</b></span>
+          </span>
+          <span id="tree-tools">
+            <button class="toggle" type="button" id="as-list" aria-pressed="true">List</button>
+            <button class="toggle" type="button" id="as-tree">Tree</button>
+          </span>
+          <div class="dock-gap"></div>
+          <button class="cmd" type="button" id="hide-dock">Hide</button>
+          <div class="commands" id="ribbon"></div>
+        </div>
+        <div class="dock-body" id="dock-body"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const laneColor = ["#f27d26", "#8d84b5"];
+    const laneX = [16, 36];
+
+    const commits = [
+      {
+        id: "wip",
+        wip: true,
+        message: "Working changes",
+        hash: "",
+        time: "",
+        labels: [],
+        lines: [{ lane: 0, y1: 22, y2: 44 }],
+        node: 0
+      },
+      {
+        id: "11f6db4",
+        message: "Parse unified diffs so one hunk can be applied again.",
+        hash: "11f6db4",
+        time: "18m",
+        labels: [],
+        lines: [{ lane: 0, y1: 0, y2: 44 }],
+        node: 0,
+        files: [{ path: "git_adapter/src/diff.rs", add: 312, del: 0, status: "A" }],
+        patch: [
+          "diff --git a/git_adapter/src/diff.rs b/git_adapter/src/diff.rs",
+          "@@ -0,0 +1,3 @@",
+          "+pub(crate) fn parse_patches(text: &str) -> Vec<Patch> {",
+          "+    text.split('\\n')",
+          "+}"
+        ]
+      },
+      {
+        id: "a91c0e2",
+        message: "Show the open folder, and let the columns collapse.",
+        hash: "a91c0e2",
+        time: "2h",
+        labels: [],
+        lines: [{ lane: 0, y1: 0, y2: 44 }],
+        node: 0,
+        files: [
+          { path: "gui_app/src/view/header.rs", add: 22, del: 4, status: "M" },
+          { path: "gui_app/src/layout.rs", add: 80, del: 0, status: "A" }
+        ]
+      },
+      {
+        id: "c4e91aa",
+        message: "Try the comparison dock under the graph.",
+        hash: "c4e91aa",
+        time: "3h",
+        labels: ["feature/panes"],
+        lines: [
+          { lane: 0, y1: 0, y2: 44 },
+          { lane: 1, y1: 22, y2: 44 }
+        ],
+        node: 1,
+        files: [{ path: "docs/design/graph-dock-wireframe.html", add: 40, del: 0, status: "A" }]
+      },
+      {
+        id: "45b0dcc",
+        message: "Record the dark context-ribbon window design.",
+        hash: "45b0dcc",
+        time: "1d",
+        labels: ["origin/dev"],
+        lines: [{ lane: 0, y1: 0, y2: 44 }],
+        elbow: true,
+        node: 0,
+        files: [{ path: "docs/design/git-window.html", add: 120, del: 40, status: "M" }]
+      },
+      {
+        id: "7300741",
+        message: "Make GitCthulhu a working iced Git client.",
+        hash: "7300741",
+        time: "2d",
+        labels: [],
+        lines: [{ lane: 0, y1: 0, y2: 44 }],
+        node: 0,
+        files: [{ path: "gui_app/src/lib.rs", add: 60, del: 10, status: "M" }]
+      },
+      {
+        id: "1558f59",
+        message: "Check out a branch by clicking it.",
+        hash: "1558f59",
+        time: "3d",
+        labels: ["main"],
+        lines: [{ lane: 0, y1: 0, y2: 22 }],
+        node: 0,
+        files: [{ path: "gui_app/src/view/refs.rs", add: 30, del: 8, status: "M" }]
+      },
+      {
+        id: "04d7b7a",
+        message: "Draw the commit graph and make the branch list scrollable.",
+        hash: "04d7b7a",
+        time: "4d",
+        labels: [],
+        node: 0,
+        files: [{ path: "gui_app/src/view/history.rs", add: 40, del: 6, status: "M" }]
+      },
+      {
+        id: "e01d079",
+        message: "Assign real commit graph lanes.",
+        hash: "e01d079",
+        time: "4d",
+        labels: [],
+        node: 0,
+        files: [{ path: "gui_app/src/commit_graph.rs", add: 90, del: 20, status: "M" }]
+      },
+      {
+        id: "8e85fb3",
+        message: "Show real working-tree status in the changes list.",
+        hash: "8e85fb3",
+        time: "5d",
+        labels: [],
+        node: 0,
+        files: [{ path: "gui_app/src/view/changes.rs", add: 50, del: 12, status: "M" }]
+      },
+      {
+        id: "98b95d0",
+        message: "Read status, log and branches from the repository.",
+        hash: "98b95d0",
+        time: "6d",
+        labels: [],
+        node: 0,
+        files: [{ path: "git_adapter/src/lib.rs", add: 140, del: 0, status: "A" }]
+      }
+    ];
+
+    const workFiles = [
+      { path: "gui_app/src/app.rs", add: 86, del: 12, status: "M", place: "Staged" },
+      { path: "gui_app/src/view/header.rs", add: 18, del: 4, status: "M", place: "Unstaged" },
+      { path: "gui_app/src/layout.rs", add: 64, del: 0, status: "A", place: "Unstaged" },
+      { path: "CONTEXT.md", add: 14, del: 3, status: "M", place: "Unstaged" }
+    ];
+
+    const ahead = [commits[1], commits[2]];
+
+    const ribbons = {
+      work: ["Stage all", "Unstage all", "Discard", ["Commit", true]],
+      commit: ["Cherry-pick", "Reset"],
+      branch: ["Checkout", "Merge", "Rebase"],
+      remote: [["Checkout", false]],
+      current: ["Fetch", "Pull", "Push", "Stash", "Create", "Rename"]
+    };
+
+    const ribbonNames = {
+      work: "Changes",
+      commit: "",
+      branch: "Branch",
+      remote: "Remote",
+      current: "dev"
+    };
+
+    let mode = "work";
+    let asTree = false;
+    let selectedId = "wip";
+    let checkedOut = "dev";
+    let ribbonKey = "current";
+    const branchList = [
+      { name: "dev", remote: false },
+      { name: "feature/panes", remote: false },
+      { name: "main", remote: false },
+      { name: "origin/dev", remote: true },
+      { name: "origin/main", remote: true }
+    ];
+
+    const graph = document.getElementById("graph");
+    const ribbon = document.getElementById("ribbon");
+    const dockBody = document.getElementById("dock-body");
+    const dock = document.getElementById("dock");
+
+    function svgEl(name) {
+      return document.createElementNS("http://www.w3.org/2000/svg", name);
+    }
+
+    function stroke(x1, y1, x2, y2, lane) {
+      const line = svgEl("line");
+      line.setAttribute("x1", x1);
+      line.setAttribute("y1", y1);
+      line.setAttribute("x2", x2);
+      line.setAttribute("y2", y2);
+      line.setAttribute("stroke", laneColor[lane]);
+      line.setAttribute("stroke-width", "1.5");
+      return line;
+    }
+
+    function renderGraph() {
+      graph.replaceChildren();
+      const rowH = 44;
+      const yAt = (index) => index * rowH + 22;
+      const sheet = svgEl("svg");
+      sheet.setAttribute("class", "lane-sheet");
+      sheet.setAttribute("width", "72");
+      sheet.setAttribute("height", String(commits.length * rowH));
+      sheet.setAttribute("aria-hidden", "true");
+      const feature = commits.findIndex((row) => row.id === "c4e91aa");
+      const branchPoint = commits.findIndex((row) => row.id === "45b0dcc");
+      sheet.appendChild(stroke(laneX[0], yAt(0), laneX[0], yAt(commits.length - 1), 0));
+      sheet.appendChild(stroke(laneX[1], yAt(feature), laneX[1], yAt(branchPoint), 1));
+      sheet.appendChild(stroke(laneX[1], yAt(branchPoint), laneX[0], yAt(branchPoint), 1));
+      commits.forEach((row, index) => {
+        const circle = svgEl("circle");
+        circle.setAttribute("cx", laneX[row.node]);
+        circle.setAttribute("cy", yAt(index));
+        circle.setAttribute("r", row.wip ? "5.5" : "4.5");
+        circle.setAttribute("fill", row.wip ? "#0d0d0f" : laneColor[row.node]);
+        circle.setAttribute("stroke", laneColor[row.node]);
+        circle.setAttribute("stroke-width", "1.5");
+        sheet.appendChild(circle);
+      });
+      graph.appendChild(sheet);
+      for (const row of commits) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "row";
+        button.setAttribute("role", "option");
+        button.setAttribute("aria-pressed", String(row.id === selectedId));
+        const subject = document.createElement("span");
+        subject.className = "subject";
+        subject.textContent = row.message;
+        const labels = row.wip ? [checkedOut] : row.labels;
+        if (labels.length) {
+          const holder = document.createElement("span");
+          holder.className = "labels";
+          for (const label of labels) {
+            const pill = document.createElement("span");
+            pill.className = label === checkedOut ? "pill here" : "pill";
+            pill.textContent = label;
+            holder.appendChild(pill);
+          }
+          subject.appendChild(holder);
+        }
+        button.appendChild(subject);
+        const when = document.createElement("span");
+        when.className = "when";
+        when.textContent = row.time;
+        const hash = document.createElement("span");
+        hash.className = "hash";
+        hash.textContent = row.hash;
+        button.append(when, hash);
+        button.addEventListener("click", () => selectCommit(row.id));
+        graph.appendChild(button);
+      }
+    }
+
+    function renderRibbon() {
+      const key = ribbonKey;
+      ribbon.replaceChildren();
+      const context = document.createElement("div");
+      context.className = "context";
+      context.textContent = key === "commit"
+        ? selectedId.slice(0, 7)
+        : key === "current"
+          ? checkedOut
+          : ribbonNames[key];
+      ribbon.appendChild(context);
+      for (const item of ribbons[key]) {
+        const [label, enabled] = Array.isArray(item) ? item : [item, true];
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = label === "Commit" ? "cmd primary" : "cmd";
+        button.textContent = label;
+        button.disabled = !enabled || (label === "Commit");
+        ribbon.appendChild(button);
+      }
+    }
+
+    function fileButton(file, indent) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "file" + (indent ? " indent-" + indent : "");
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = file.path;
+      const add = document.createElement("span");
+      add.className = "add";
+      add.textContent = file.add ? "+" + file.add : "";
+      const del = document.createElement("span");
+      del.className = "del";
+      del.textContent = file.del ? "−" + file.del : "";
+      const kind = document.createElement("span");
+      kind.className = "kind";
+      kind.textContent = file.status;
+      button.append(name, add, del, kind);
+      button.addEventListener("click", () => {
+        for (const other of dockBody.querySelectorAll(".file")) other.setAttribute("aria-pressed", "false");
+        button.setAttribute("aria-pressed", "true");
+      });
+      return button;
+    }
+
+    function groupLabel(text) {
+      const div = document.createElement("div");
+      div.className = "group";
+      div.textContent = text;
+      return div;
+    }
+
+    function renderTree(files) {
+      const root = { dirs: new Map(), files: [] };
+      for (const file of files) {
+        const parts = file.path.split("/");
+        let node = root;
+        for (const part of parts.slice(0, -1)) {
+          if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+          node = node.dirs.get(part);
+        }
+        node.files.push(file);
+      }
+      const wrap = document.createElement("div");
+      wrap.className = "files";
+      const walk = (node, depth) => {
+        for (const [name, child] of node.dirs) {
+          const row = document.createElement("div");
+          row.className = "file dir";
+          row.style.paddingLeft = (14 + depth * 16) + "px";
+          row.textContent = name;
+          wrap.appendChild(row);
+          walk(child, depth + 1);
+        }
+        for (const file of node.files) {
+          const button = fileButton({ ...file, path: file.path.split("/").pop() });
+          button.style.paddingLeft = (14 + depth * 16) + "px";
+          wrap.appendChild(button);
+        }
+      };
+      walk(root, 0);
+      return wrap;
+    }
+
+    function renderFiles(files, grouped) {
+      if (asTree) return renderTree(files);
+      const wrap = document.createElement("div");
+      wrap.className = "files";
+      const places = grouped ? ["Staged", "Unstaged"] : [null];
+      for (const place of places) {
+        const subset = place ? files.filter((file) => file.place === place) : files;
+        if (!subset.length) continue;
+        if (place) wrap.appendChild(groupLabel(place));
+        for (const file of subset) wrap.appendChild(fileButton(file));
+      }
+      return wrap;
+    }
+
+    function renderDock() {
+      document.getElementById("mode-work").setAttribute("aria-pressed", String(mode === "work"));
+      document.getElementById("mode-compare").setAttribute("aria-pressed", String(mode === "compare"));
+      document.getElementById("compare-tools").hidden = mode !== "compare";
+      document.getElementById("tree-tools").hidden = false;
+      document.getElementById("as-list").setAttribute("aria-pressed", String(!asTree));
+      document.getElementById("as-tree").setAttribute("aria-pressed", String(asTree));
+      dockBody.replaceChildren();
+
+      if (mode === "compare") {
+        const range = document.createElement("div");
+        range.className = "range";
+        for (const row of ahead) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "range-row";
+          const hash = document.createElement("span");
+          hash.className = "hash";
+          hash.textContent = row.hash;
+          const message = document.createElement("span");
+          message.className = "subject";
+          message.textContent = row.message;
+          const when = document.createElement("span");
+          when.className = "when";
+          when.textContent = row.time;
+          button.append(hash, message, when);
+          button.addEventListener("click", () => selectCommit(row.id));
+          range.appendChild(button);
+        }
+        dockBody.appendChild(range);
+        const files = ahead.flatMap((row) => row.files || []);
+        dockBody.appendChild(renderFiles(files, false));
+        return;
+      }
+
+      if (mode === "commit") {
+        const row = commits.find((item) => item.id === selectedId);
+        const title = document.createElement("div");
+        title.className = "commit-title";
+        title.textContent = row.message;
+        const meta = document.createElement("div");
+        meta.className = "commit-meta";
+        meta.textContent = [row.hash, row.time].filter(Boolean).join("   ");
+        dockBody.append(title, meta, renderFiles(row.files || [], false));
+        if (row.patch) {
+          const patch = document.createElement("pre");
+          patch.className = "patch";
+          for (const line of row.patch) {
+            const span = document.createElement("div");
+            span.textContent = line;
+            if (line.startsWith("+")) span.className = "add";
+            if (line.startsWith("-")) span.className = "del";
+            patch.appendChild(span);
+          }
+          dockBody.appendChild(patch);
+        }
+        return;
+      }
+
+      dockBody.appendChild(renderFiles(workFiles, true));
+    }
+
+    function selectCommit(id) {
+      selectedId = id;
+      const row = commits.find((item) => item.id === id);
+      if (row.wip) {
+        mode = "work";
+        ribbonKey = "current";
+      } else {
+        mode = "commit";
+        ribbonKey = "commit";
+      }
+      renderGraph();
+      renderRibbon();
+      renderDock();
+    }
+
+    document.getElementById("mode-work").addEventListener("click", () => {
+      mode = "work";
+      selectedId = "wip";
+      ribbonKey = "current";
+      renderGraph();
+      renderRibbon();
+      renderDock();
+    });
+    document.getElementById("mode-compare").addEventListener("click", () => {
+      mode = "compare";
+      ribbonKey = "current";
+      renderRibbon();
+      renderDock();
+    });
+    document.getElementById("as-list").addEventListener("click", () => {
+      asTree = false;
+      renderDock();
+    });
+    document.getElementById("as-tree").addEventListener("click", () => {
+      asTree = true;
+      renderDock();
+    });
+    document.getElementById("hide-dock").addEventListener("click", () => {
+      const hidden = dock.classList.toggle("collapsed");
+      document.getElementById("hide-dock").textContent = hidden ? "Show" : "Hide";
+    });
+
+    const stage = document.getElementById("stage");
+    const branchButton = document.getElementById("branch-button");
+    const branchMenu = document.getElementById("branch-menu");
+    const branchSearch = document.getElementById("branch-search");
+    const branchItems = document.getElementById("branch-list");
+    const tracking = document.getElementById("tracking");
+
+    function renderTracking() {
+      tracking.replaceChildren();
+      tracking.append(checkedOut + " is ");
+      const ahead = document.createElement("strong");
+      ahead.textContent = "2 ahead";
+      tracking.append(ahead, ", 0 behind origin/dev");
+    }
+
+    function closeBranches() {
+      branchMenu.hidden = true;
+      branchButton.setAttribute("aria-expanded", "false");
+    }
+
+    function renderBranches() {
+      const query = branchSearch.value.trim().toLowerCase();
+      branchItems.replaceChildren();
+      for (const branch of branchList) {
+        if (query && !branch.name.toLowerCase().includes(query)) continue;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "branch-item";
+        button.textContent = branch.remote ? branch.name + "  remote" : branch.name;
+        button.disabled = branch.remote;
+        if (branch.name === checkedOut) button.setAttribute("aria-current", "true");
+        button.addEventListener("click", () => {
+          checkedOut = branch.name;
+          closeBranches();
+          branchButton.textContent = checkedOut;
+          if (mode !== "commit") ribbonKey = "current";
+          renderTracking();
+          renderGraph();
+          renderRibbon();
+        });
+        branchItems.appendChild(button);
+      }
+    }
+
+    branchButton.addEventListener("click", () => {
+      const open = branchMenu.hidden;
+      branchMenu.hidden = !open;
+      branchButton.setAttribute("aria-expanded", String(open));
+      if (open) {
+        branchSearch.value = "";
+        renderBranches();
+        branchSearch.focus();
+      }
+    });
+    branchSearch.addEventListener("input", renderBranches);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeBranches();
+    });
+    document.addEventListener("click", (event) => {
+      if (!branchMenu.hidden && !branchMenu.contains(event.target) && event.target !== branchButton) {
+        closeBranches();
+      }
+    });
+
+    function setLayout(stacked) {
+      stage.classList.toggle("stacked", stacked);
+      splitter.setAttribute("aria-orientation", stacked ? "horizontal" : "vertical");
+      document.documentElement.style.setProperty("--dock", stacked ? "280px" : "440px");
+      document.getElementById("layout-side").setAttribute("aria-pressed", String(!stacked));
+      document.getElementById("layout-stack").setAttribute("aria-pressed", String(stacked));
+    }
+    document.getElementById("layout-side").addEventListener("click", () => setLayout(false));
+    document.getElementById("layout-stack").addEventListener("click", () => setLayout(true));
+
+    const splitter = document.getElementById("splitter");
+    splitter.addEventListener("pointerdown", (event) => {
+      splitter.setPointerCapture(event.pointerId);
+      const move = (next) => {
+        const rect = stage.getBoundingClientRect();
+        const stacked = stage.classList.contains("stacked") || window.matchMedia("(max-width: 760px)").matches;
+        const size = stacked
+          ? Math.min(Math.max(rect.bottom - next.clientY, 120), rect.height - 80)
+          : Math.min(Math.max(rect.right - next.clientX, 280), rect.width - 240);
+        dock.classList.remove("collapsed");
+        document.getElementById("hide-dock").textContent = "Hide";
+        document.documentElement.style.setProperty("--dock", size + "px");
+      };
+      const onMove = (next) => move(next);
+      const onUp = () => {
+        splitter.removeEventListener("pointermove", onMove);
+        splitter.removeEventListener("pointerup", onUp);
+      };
+      splitter.addEventListener("pointermove", onMove);
+      splitter.addEventListener("pointerup", onUp);
+    });
+
+    renderTracking();
+    renderGraph();
+    renderRibbon();
+    renderDock();
+  </script>
+</body>
+</html>

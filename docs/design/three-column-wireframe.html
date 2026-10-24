@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitCthulhu — three-column window wireframe</title>
+  <style>
+    :root {
+      --app: #0d0d0f;
+      --rail: #111214;
+      --chrome: #151619;
+      --raised: #1a1b1e;
+      --chip: #232429;
+      --ink: #ffffff;
+      --text: #d1d1d1;
+      --quiet: #8a8a8a;
+      --muted: #5a5a5a;
+      --line: #2d2d30;
+      --chip-line: #3a3b40;
+      --orange: #f27d26;
+      --orange-ink: #1a1208;
+      --added: #7dcea0;
+      --added-bg: rgba(125, 206, 160, 0.12);
+      --added-word: rgba(125, 206, 160, 0.35);
+      --removed: #e07a7a;
+      --removed-bg: rgba(224, 122, 122, 0.12);
+      --removed-word: rgba(224, 122, 122, 0.4);
+      --lane-0: #f27d26;
+      --lane-1: #3b82f6;
+      --lane-2: #22c55e;
+      --lane-3: #a855f7;
+      --ui: "Segoe UI", system-ui, sans-serif;
+      --mono: "Cascadia Mono", "Fragment Mono", ui-monospace, monospace;
+      --files: 220px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--app);
+      color: var(--text);
+      font-family: var(--ui);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    button, select, input { font: inherit; color: inherit; }
+    button { background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+    button:focus-visible, select:focus-visible, input:focus-visible {
+      outline: 2px solid var(--orange);
+      outline-offset: 1px;
+    }
+
+    .app { height: 100%; display: flex; flex-direction: column; }
+
+    /* ---------- top bar (replaces header + ribbon) ---------- */
+    .top {
+      display: grid;
+      grid-template-columns: 1fr minmax(280px, 520px) 1fr;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 12px;
+      background: var(--chrome);
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+      height: 40px;
+    }
+    .top .left, .top .right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .top .right { justify-content: flex-end; }
+    .mark { font-weight: 700; color: var(--ink); letter-spacing: -0.02em; }
+    .path {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--quiet);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 22rem;
+    }
+    .search {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--app);
+      border: 1px solid var(--chip-line);
+      border-radius: 6px;
+      padding: 4px 10px;
+      color: var(--quiet);
+    }
+    .search input { flex: 1; background: none; border: 0; color: var(--ink); min-width: 0; }
+    .search input::placeholder { color: var(--muted); }
+    .search kbd {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      border: 1px solid var(--chip-line);
+      border-radius: 3px;
+      padding: 0 5px;
+      color: var(--muted);
+    }
+
+    .chip, .cmd, .tab, .toggle {
+      border: 1px solid var(--chip-line);
+      background: var(--chip);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 3px 9px;
+      white-space: nowrap;
+      font-size: 12.5px;
+    }
+    .chip.branch { color: var(--orange); font-weight: 600; border-radius: 999px; }
+    .cmd:hover:not(:disabled), .toggle:hover, .tab:hover { border-color: var(--orange); color: var(--ink); }
+    .cmd:disabled { color: var(--muted); border-color: var(--line); cursor: default; }
+    .cmd.primary:not(:disabled) {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: var(--orange-ink);
+      font-weight: 700;
+    }
+    .cmd.quiet { background: none; border-color: transparent; color: var(--quiet); }
+    .cmd.quiet:hover { color: var(--ink); border-color: transparent; }
+    .toggle[aria-pressed="true"], .tab[aria-selected="true"] {
+      border-color: var(--orange);
+      color: var(--ink);
+      background: var(--raised);
+    }
+    .tracking { color: var(--quiet); white-space: nowrap; }
+    .tracking b { color: var(--orange); font-weight: 600; }
+
+    /* ---------- stage: four panes, three presets ---------- */
+    .stage { flex: 1; min-height: 0; display: flex; }
+    .col { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--app); }
+    .col.graph { flex: 5; }
+    .middle { flex: 10; min-width: 0; min-height: 0; display: flex; }
+    .col.inspector { flex: 3; background: var(--rail); }
+    .col.diff { flex: 7; }
+    .col.files { flex: 0 0 var(--files); background: var(--rail); }
+    .stage.files-hidden .col.files { flex-basis: 36px; }
+    .stage.files-hidden .col.files .col-body, .stage.files-hidden .col.files .col-head > :not(.rail-toggle) { display: none; }
+    .splitter { flex: 0 0 4px; background: var(--line); cursor: col-resize; }
+    .splitter:hover { background: var(--orange); }
+
+    /* Preset B: Graph | (Inspector over Diff) | Files — the diff gets the full middle width */
+    .stage.stack-middle .middle { flex-direction: column; }
+    .stage.stack-middle .col.inspector { flex: 0 0 var(--inspector-h, 230px); }
+    .stage.stack-middle .col.diff { flex: 1; }
+    .stage.stack-middle .middle .splitter { cursor: row-resize; }
+    /* a short, wide inspector lays its blocks out left to right */
+    .stage.stack-middle .inspector-body { flex-direction: row; flex-wrap: wrap; align-content: flex-start; }
+    .stage.stack-middle .inspector-body .block { flex: 1 1 260px; border-right: 1px solid var(--line); border-bottom: 0; }
+    .stage.stack-middle .inspector-body .group { flex-basis: 100%; }
+    .stage.stack-middle .inspector-body .file-list { flex: 2 1 360px; }
+
+    /* Preset C: everything stacked — Graph / Inspector / Diff / Files as a strip */
+    .stage.stack-all { flex-direction: column; }
+    .stage.stack-all .col.graph { flex: 0 0 200px; }
+    .stage.stack-all .middle { flex: 1; flex-direction: column; }
+    .stage.stack-all .col.inspector { flex: 0 0 var(--inspector-h, 230px); }
+    .stage.stack-all .col.diff { flex: 1; }
+    .stage.stack-all .col.files { flex: 0 0 auto; }
+    .stage.stack-all .col.files .col-head { border-bottom: 0; }
+    .stage.stack-all .rail-list { flex-direction: row; flex-wrap: wrap; gap: 2px 8px; padding: 2px 8px 6px; }
+    .stage.stack-all .rail-file { width: auto; }
+    .stage.stack-all .splitter { cursor: row-resize; }
+    .stage.stack-all .inspector-body { flex-direction: row; flex-wrap: wrap; align-content: flex-start; }
+    .stage.stack-all .inspector-body .block { flex: 1 1 260px; border-right: 1px solid var(--line); border-bottom: 0; }
+    .stage.stack-all .inspector-body .group { flex-basis: 100%; }
+    .stage.stack-all .inspector-body .file-list { flex: 2 1 360px; }
+    .stage.stack-all.files-hidden .col.files { flex-basis: 28px; }
+
+    .seg { display: inline-flex; border: 1px solid var(--chip-line); border-radius: 4px; overflow: hidden; }
+    .seg .toggle { border: 0; border-radius: 0; background: var(--chip); }
+    .seg .toggle + .toggle { border-left: 1px solid var(--chip-line); }
+
+    .col-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      min-height: 36px;
+      border-bottom: 1px solid var(--line);
+      background: var(--rail);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .col-head .gap { flex: 1; }
+    .col-head .title { color: var(--quiet); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .col-body { flex: 1; min-height: 0; overflow: auto; position: relative; }
+
+    /* ---------- graph column ---------- */
+    .graph-body { position: relative; }
+    .lane-sheet { position: absolute; left: 8px; top: 0; pointer-events: none; }
+    .row {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) minmax(0, 120px) 36px 64px;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      height: 28px;
+      padding: 0 12px 0 var(--graph-indent, 92px);
+      color: var(--text);
+    }
+    .row:hover, .row[aria-selected="true"] { background: var(--raised); }
+    .row[aria-selected="true"] .subject { color: var(--ink); }
+    .row.wip .subject { color: var(--quiet); font-style: italic; }
+    .subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+    .subject span.msg { overflow: hidden; text-overflow: ellipsis; }
+    .pill {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border: 1px solid var(--chip-line);
+      background: var(--chip);
+      border-radius: 4px;
+      padding: 0 6px;
+      font-size: 11px;
+      line-height: 17px;
+      color: var(--text);
+      font-family: var(--mono);
+    }
+    .pill.head { border-color: var(--orange); color: var(--orange); }
+    .pill.remote { color: var(--quiet); }
+    .pill.tag { color: var(--added); border-color: rgba(125, 206, 160, 0.4); }
+    .pill.stash { color: #c084fc; border-color: rgba(192, 132, 252, 0.4); }
+    .pill.wip { color: var(--orange); border-style: dashed; }
+    .author { color: var(--quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+    .avatar {
+      width: 16px; height: 16px; border-radius: 50%;
+      background: var(--chip); border: 1px solid var(--chip-line);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 9px; color: var(--quiet); flex-shrink: 0;
+    }
+    .when, .hash { font-family: var(--mono); font-size: 11.5px; color: var(--quiet); }
+    .hash { text-align: right; }
+    .section-rule {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px 2px var(--graph-indent, 92px);
+      color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    }
+
+    /* ---------- inspector column ---------- */
+    .inspector-body { display: flex; flex-direction: column; }
+    .block { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    .block h3 { margin: 0 0 6px; font-size: 12px; color: var(--quiet); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+    .commit-title { color: var(--ink); font-weight: 600; margin: 0 0 4px; }
+    .commit-meta { font-family: var(--mono); font-size: 11.5px; color: var(--quiet); display: flex; gap: 10px; flex-wrap: wrap; }
+    .message-box {
+      width: 100%;
+      background: var(--app);
+      border: 1px solid var(--chip-line);
+      border-radius: 4px;
+      color: var(--ink);
+      padding: 6px 8px;
+      margin-bottom: 6px;
+      min-height: 52px;
+      resize: vertical;
+    }
+    .message-box::placeholder { color: var(--muted); }
+    .btn-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .refs { display: grid; grid-template-columns: 1fr auto 1fr; gap: 6px; align-items: center; margin-bottom: 6px; }
+    .refs select { background: var(--chip); border: 1px solid var(--chip-line); border-radius: 4px; padding: 3px 6px; min-width: 0; }
+    .refs .arrow { color: var(--muted); text-align: center; }
+    .stat { color: var(--quiet); font-size: 12px; }
+    .stat b.up { color: var(--added); } .stat b.down { color: var(--removed); }
+
+    .file-list { display: flex; flex-direction: column; }
+    .file {
+      display: grid;
+      grid-template-columns: 16px minmax(0, 1fr) auto auto 1.2em;
+      gap: 8px;
+      align-items: center;
+      width: 100%;
+      padding: 3px 12px;
+      color: var(--text);
+      font-size: 12.5px;
+    }
+    .file:hover, .file[aria-selected="true"] { background: var(--raised); }
+    .file .mark { color: var(--muted); font-weight: 400; text-align: center; }
+    .file .mark[data-on="true"] { color: var(--orange); }
+    .file .name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file .name .dir { color: var(--muted); }
+    .file .add { color: var(--added); font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+    .file .del { color: var(--removed); font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+    .file .kind { color: var(--quiet); font-family: var(--mono); font-size: 11px; width: 1.2em; text-align: right; }
+    .file.staged .name { color: var(--orange); }
+    .group { padding: 8px 12px 2px; color: var(--quiet); font-size: 11.5px; display: flex; gap: 6px; align-items: center; }
+    .group .count { color: var(--muted); }
+    .mini-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 8px; padding: 3px 12px; align-items: center; }
+    .mini-row:hover { background: var(--raised); }
+    .mini-row .subject { color: var(--text); }
+
+    /* ---------- diff column ---------- */
+    .diff-body { display: flex; flex-direction: column; gap: 0; }
+    .file-block { border-bottom: 1px solid var(--line); }
+    .file-head {
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: center; gap: 10px;
+      padding: 5px 10px;
+      background: var(--chrome);
+      border-bottom: 1px solid var(--line);
+      border-top: 1px solid var(--line);
+    }
+    .file-head .fpath { font-family: var(--mono); font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-head .stats { font-family: var(--mono); font-size: 11.5px; }
+    .file-head .stats .add { color: var(--added); } .file-head .stats .del { color: var(--removed); }
+    .file-head .gap { flex: 1; }
+    .fold {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      background: var(--rail); border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line);
+      height: 20px;
+    }
+    .hunk-head { font-family: var(--mono); font-size: 11px; color: var(--muted); padding: 2px 10px; background: var(--rail); }
+    .hunk-tools { display: flex; gap: 6px; padding: 4px 10px 8px; }
+
+    .unified, .split { font-family: var(--mono); font-size: 12px; line-height: 19px; }
+    .line { display: grid; grid-template-columns: 40px 40px 14px minmax(0, 1fr); white-space: pre; }
+    .line .no { color: var(--muted); text-align: right; padding-right: 8px; user-select: none; font-size: 11px; }
+    .line .sign { color: var(--muted); text-align: center; }
+    .line.add { background: var(--added-bg); } .line.add .sign { color: var(--added); }
+    .line.del { background: var(--removed-bg); } .line.del .sign { color: var(--removed); }
+    .line mark { background: var(--added-word); color: inherit; border-radius: 2px; }
+    .line.del mark { background: var(--removed-word); }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; }
+    .split .side { min-width: 0; overflow: hidden; }
+    .split .side + .side { border-left: 1px solid var(--line); }
+    .split .line { grid-template-columns: 40px 14px minmax(0, 1fr); }
+    .split .line.blank { background: repeating-linear-gradient(45deg, transparent 0 6px, var(--rail) 6px 7px); }
+
+    /* ---------- files rail ---------- */
+    .rail-list { display: flex; flex-direction: column; padding: 4px 0; }
+    .rail-file {
+      display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 8px; align-items: center;
+      width: 100%; padding: 3px 10px; color: var(--text); font-size: 12px;
+    }
+    .rail-file:hover, .rail-file[aria-selected="true"] { background: var(--raised); }
+    .rail-file .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--quiet); }
+    .rail-file .dot.M { background: var(--orange); } .rail-file .dot.A { background: var(--added); } .rail-file .dot.D { background: var(--removed); }
+    .rail-file .name { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rail-file .stats { font-family: var(--mono); font-size: 10.5px; color: var(--quiet); }
+
+    /* ---------- status bar ---------- */
+    .status {
+      display: flex; align-items: center; gap: 14px;
+      height: 24px; padding: 0 12px;
+      background: var(--chrome); border-top: 1px solid var(--line);
+      color: var(--quiet); font-size: 11.5px; flex-shrink: 0;
+    }
+    .status .gap { flex: 1; }
+    .status .err { color: var(--orange); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--added); }
+
+    .annot { position: fixed; right: 10px; bottom: 34px; background: var(--chip); border: 1px solid var(--chip-line); border-radius: 6px; padding: 8px 10px; font-size: 11.5px; color: var(--quiet); max-width: 320px; z-index: 9; }
+    .annot b { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="left">
+        <span class="mark">GitCthulhu</span>
+        <span class="path" title="D:\Repos\GitCthulhu">D:\Repos\GitCthulhu</span>
+        <button class="chip branch" type="button" id="branch-chip" title="Switch branch">dev ▾</button>
+        <span class="tracking"><b>1 ahead</b> of origin/dev</span>
+      </div>
+      <div class="search">
+        <span>⌕</span>
+        <input id="search" type="search" placeholder="Search commits, refs, files…" aria-label="Search commits" />
+        <kbd>Ctrl K</kbd>
+      </div>
+      <div class="right">
+        <button class="cmd" type="button">Fetch</button>
+        <button class="cmd" type="button">Pull</button>
+        <button class="cmd" type="button">Push</button>
+        <button class="cmd" type="button">Stash</button>
+        <span class="seg" role="group" aria-label="Layout" title="Layout">
+          <button class="toggle" type="button" id="layout-columns" aria-pressed="true" title="Four columns">▯▯▯</button>
+          <button class="toggle" type="button" id="layout-stack-middle" aria-pressed="false" title="Inspector over Diff">▯⊟▯</button>
+          <button class="toggle" type="button" id="layout-stack-all" aria-pressed="false" title="Everything stacked">⊟</button>
+        </span>
+        <button class="cmd quiet" type="button">Open…</button>
+        <button class="cmd quiet" type="button">Settings</button>
+      </div>
+    </header>
+
+    <div class="stage" id="stage">
+      <!-- 1. Graph -->
+      <section class="col graph" aria-label="Commit graph">
+        <div class="col-head">
+          <span class="title">Graph</span>
+          <button class="toggle" type="button" aria-pressed="true">All branches</button>
+          <button class="toggle" type="button" aria-pressed="false">Current only</button>
+          <span class="gap"></span>
+          <button class="cmd quiet" type="button" title="Create branch at selected">Create</button>
+          <button class="cmd quiet" type="button">Rename</button>
+          <button class="cmd quiet" type="button" disabled>Delete</button>
+          <button class="cmd quiet" type="button" disabled>Merge</button>
+          <button class="cmd quiet" type="button" disabled>Rebase</button>
+        </div>
+        <div class="col-body graph-body" id="graph" role="listbox" aria-label="History"></div>
+      </section>
+      <div class="splitter" role="separator" aria-orientation="vertical"></div>
+
+      <!-- 2 + 3. Inspector and Diff share a group so they can stack -->
+      <div class="middle">
+      <section class="col inspector" aria-label="Inspector">
+        <div class="col-head" role="tablist">
+          <button class="tab" type="button" role="tab" id="tab-work" aria-selected="true">Working tree</button>
+          <button class="tab" type="button" role="tab" id="tab-commit" aria-selected="false">Commit</button>
+          <button class="tab" type="button" role="tab" id="tab-compare" aria-selected="false">Compare</button>
+          <span class="gap"></span>
+          <button class="toggle" type="button" id="as-list" aria-pressed="true">List</button>
+          <button class="toggle" type="button" id="as-tree" aria-pressed="false">Tree</button>
+        </div>
+        <div class="col-body inspector-body" id="inspector"></div>
+      </section>
+      <div class="splitter" role="separator" aria-orientation="vertical"></div>
+
+      <!-- 3. Diff -->
+      <section class="col diff" aria-label="Diff">
+        <div class="col-head">
+          <span class="title" id="diff-title">Working tree · 4 files</span>
+          <span class="gap"></span>
+          <button class="toggle" type="button" id="mode-unified" aria-pressed="false">Unified</button>
+          <button class="toggle" type="button" id="mode-split" aria-pressed="true">Side by side</button>
+          <button class="toggle" type="button" id="wrap" aria-pressed="false">Wrap</button>
+        </div>
+        <div class="col-body diff-body" id="diff"></div>
+      </section>
+      </div>
+      <div class="splitter" role="separator" aria-orientation="vertical"></div>
+
+      <!-- 4. Files rail -->
+      <aside class="col files" aria-label="Files in this diff">
+        <div class="col-head">
+          <span class="title" id="files-title">Files · 4</span>
+          <span class="gap"></span>
+          <button class="cmd quiet rail-toggle" type="button" id="rail-toggle" title="Collapse">⟩</button>
+        </div>
+        <div class="col-body rail-list" id="rail"></div>
+      </aside>
+    </div>
+
+    <footer class="status">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="status-text">Ready</span>
+      <span class="err" id="status-err"></span>
+      <span class="gap"></span>
+      <span>50 commits loaded</span>
+      <span>dev → origin/dev</span>
+      <span>UTF-8</span>
+    </footer>
+  </div>
+
+  <div class="annot">
+    <b>Wireframe.</b> Click a graph row to inspect a commit; click the WIP row for the working tree. Toggle Unified / Side by side. Collapse the Files rail with ⟩. The ▯▯▯ / ▯⊟▯ / ⊟ switch in the top bar changes the layout preset: columns, Inspector over Diff, or everything stacked. Splitters are drag-resizable in the real window (pane_grid).
+  </div>
+
+  <script>
+    // ---------- sample data ----------
+    const laneColour = ["#f27d26", "#3b82f6", "#22c55e", "#a855f7"];
+    const laneX = (lane) => 16 + lane * 14;
+    const ROW = 28;
+
+    const commits = [
+      { id: "wip", wip: true, lane: 0, message: "Working changes", author: "", when: "", hash: "", refs: [{ t: "wip", n: "dev" }] },
+      { id: "2385167", lane: 0, message: "Ciantar il king", author: "Gregory Mifsud", when: "2h", hash: "2385167", refs: [{ t: "head", n: "dev" }],
+        files: [{ path: "gui_app/src/view/workspace.rs", add: 40, del: 12, status: "M" }] },
+      { id: "11f6db4", lane: 0, message: "Parse unified diffs so one hunk can be applied again.", author: "Gregory Mifsud", when: "1d", hash: "11f6db4", refs: [{ t: "remote", n: "origin/dev" }],
+        files: [{ path: "git_adapter/src/diff.rs", add: 312, del: 0, status: "A" }, { path: "git_adapter/src/lib.rs", add: 18, del: 2, status: "M" }] },
+      { id: "c4e91aa", lane: 1, message: "Try the comparison dock under the graph.", author: "Gregory Mifsud", when: "2d", hash: "c4e91aa", refs: [{ t: "branch", n: "feature/panes" }],
+        files: [{ path: "docs/design/graph-dock-wireframe.html", add: 920, del: 0, status: "A" }] },
+      { id: "45b0dcc", lane: 0, message: "Record the dark context-ribbon window design.", author: "Gregory Mifsud", when: "3d", hash: "45b0dcc", refs: [],
+        files: [{ path: "docs/design/git-window.html", add: 120, del: 40, status: "M" }] },
+      { id: "7300741", lane: 0, message: "Make GitCthulhu a working iced Git client", author: "Gregory Mifsud", when: "4d", hash: "7300741", refs: [{ t: "tag", n: "v0.1.0" }],
+        files: [{ path: "gui_app/src/lib.rs", add: 60, del: 10, status: "M" }] },
+      { id: "1558f59", lane: 0, message: "feat: check out a branch by clicking it in the sidebar", author: "Gregory Mifsud", when: "5d", hash: "1558f59", refs: [{ t: "branch", n: "main" }, { t: "remote", n: "origin/main" }],
+        files: [{ path: "gui_app/src/view/refs.rs", add: 30, del: 8, status: "M" }] },
+      { id: "04d7b7a", lane: 2, message: "feat: draw the commit graph and make the branch list scrollable", author: "Gregory Mifsud", when: "6d", hash: "04d7b7a", refs: [{ t: "stash", n: "stash@{0}" }],
+        files: [{ path: "gui_app/src/view/history.rs", add: 40, del: 6, status: "M" }] },
+      { id: "e01d079", lane: 0, message: "feat: assign real commit graph lanes (Candidate A)", author: "Gregory Mifsud", when: "6d", hash: "e01d079", refs: [],
+        files: [{ path: "gui_app/src/commit_graph.rs", add: 90, del: 20, status: "M" }] },
+      { id: "8e85fb3", lane: 0, message: "feat: show real working-tree status in the changes panel", author: "Gregory Mifsud", when: "1w", hash: "8e85fb3", refs: [],
+        files: [{ path: "gui_app/src/view/changes.rs", add: 50, del: 12, status: "M" }] },
+      { id: "98b95d0", lane: 0, message: "feat: read status, log and branches from the repository with gix", author: "Gregory Mifsud", when: "1w", hash: "98b95d0", refs: [],
+        files: [{ path: "git_adapter/src/lib.rs", add: 140, del: 0, status: "A" }] },
+      { id: "5bd9788", lane: 0, message: "feat: run repository refresh on a background thread", author: "Gregory Mifsud", when: "1w", hash: "5bd9788", refs: [],
+        files: [{ path: "gui_app/src/jobs.rs", add: 80, del: 4, status: "M" }] },
+      { id: "a2d64a2", lane: 0, message: "feat: enforce gui_app seam with app crate and test it with FakeGitRepository", author: "Gregory Mifsud", when: "2w", hash: "a2d64a2", refs: [],
+        files: [{ path: "app/src/main.rs", add: 20, del: 4, status: "M" }] },
+      { id: "be88a5c", lane: 0, message: "docs: recover Copilot architecture-review session notes", author: "Gregory Mifsud", when: "2w", hash: "be88a5c", refs: [],
+        files: [{ path: "docs/sessions/README.md", add: 10, del: 0, status: "A" }] },
+      { id: "e90f110", lane: 0, message: "feat: invert gui_app seam — lib target has zero gui_adapter dependency (Candidate B)", author: "gmifsud", when: "3w", hash: "e90f110", refs: [],
+        files: [{ path: "gui_app/Cargo.toml", add: 2, del: 3, status: "M" }] },
+    ];
+
+    const workFiles = [
+      { path: "gui_app/src/view/workspace.rs", add: 86, del: 12, status: "M", place: "Staged" },
+      { path: "gui_app/src/layout.rs", add: 64, del: 9, status: "M", place: "Unstaged" },
+      { path: "gui_app/src/view/header.rs", add: 18, del: 4, status: "M", place: "Unstaged" },
+      { path: "docs/design/three-column-wireframe.html", add: 540, del: 0, status: "A", place: "Untracked" },
+    ];
+
+    const samplePatch = {
+      "gui_app/src/layout.rs": {
+        oldStart: 1, newStart: 1,
+        rows: [
+          ["ctx", "//! The graph and the detail. Side by side, the split is vertical. Stacked, the", "//! The graph, the inspector, the diff, and the files rail. Four columns, left to"],
+          ["ctx", "//! detail sits under the graph. Dragging the split remembers the ratio.", "//! right. Dragging a splitter remembers the ratio."],
+          ["ctx", "", ""],
+          ["ctx", "use iced::widget::pane_grid::{Axis, Configuration, Node, State};", "use iced::widget::pane_grid::{Axis, Configuration, Node, State};"],
+          ["ctx", "", ""],
+          ["del", "pub(crate) const SIDE_RATIO: f32 = 0.62;", null],
+          ["add", null, "pub(crate) const GRAPH_RATIO: f32 = 0.34;"],
+          ["add", null, "pub(crate) const INSPECTOR_RATIO: f32 = 0.30;"],
+          ["add", null, "pub(crate) const FILES_RATIO: f32 = 0.82;"],
+          ["ctx", "", ""],
+          ["ctx", "#[derive(Debug, Clone, Copy, PartialEq, Eq)]", "#[derive(Debug, Clone, Copy, PartialEq, Eq)]"],
+          ["ctx", "pub(crate) enum WorkspacePane {", "pub(crate) enum WorkspacePane {"],
+          ["ctx", "    Graph,", "    Graph,"],
+          ["del", "    Detail,", null],
+          ["add", null, "    Inspector,"],
+          ["add", null, "    Diff,"],
+          ["add", null, "    Files,"],
+          ["ctx", "}", "}"],
+        ],
+      },
+      "gui_app/src/view/workspace.rs": {
+        oldStart: 15, newStart: 15,
+        rows: [
+          ["ctx", "pub(super) fn workspace<'a>(", "pub(super) fn workspace<'a>("],
+          ["ctx", "    app: &'a GitApp,", "    app: &'a GitApp,"],
+          ["ctx", "    selection: &Selection,", "    selection: &Selection,"],
+          ["ctx", "    tokens: DesignTokens,", "    tokens: DesignTokens,"],
+          ["ctx", "    reading: Reading,", "    reading: Reading,"],
+          ["ctx", ") -> Element<'a, Message> {", ") -> Element<'a, Message> {"],
+          ["ctx", "    pane_grid::PaneGrid::new(&app.panes, move |_pane, kind, _maximised| {", "    pane_grid::PaneGrid::new(&app.panes, move |_pane, kind, _maximised| {"],
+          ["ctx", "        let body = match kind {", "        let body = match kind {"],
+          ["ctx", "            WorkspacePane::Graph => graph(app, selection, tokens, reading),", "            WorkspacePane::Graph => graph(app, selection, tokens, reading),"],
+          ["del", "            WorkspacePane::Detail => detail(app, selection, tokens, reading),", null],
+          ["add", null, "            WorkspacePane::Inspector => inspector(app, selection, tokens, reading),"],
+          ["add", null, "            WorkspacePane::Diff => diff(app, selection, tokens, reading),"],
+          ["add", null, "            WorkspacePane::Files => files_rail(app, tokens, reading),"],
+          ["ctx", "        };", "        };"],
+        ],
+      },
+    };
+
+    // ---------- state ----------
+    let mode = "work";          // work | commit | compare
+    let selectedId = "wip";
+    let split = true;
+    let asTree = false;
+    let selectedFile = null;
+
+    const $ = (id) => document.getElementById(id);
+
+    // ---------- graph ----------
+    function svg(name) { return document.createElementNS("http://www.w3.org/2000/svg", name); }
+    function stroke(x1, y1, x2, y2, lane, dashed) {
+      const l = svg("line");
+      l.setAttribute("x1", x1); l.setAttribute("y1", y1); l.setAttribute("x2", x2); l.setAttribute("y2", y2);
+      l.setAttribute("stroke", laneColour[lane]); l.setAttribute("stroke-width", "2");
+      if (dashed) l.setAttribute("stroke-dasharray", "3 3");
+      return l;
+    }
+    function curve(x1, y1, x2, y2, lane) {
+      const p = svg("path");
+      const my = (y1 + y2) / 2;
+      p.setAttribute("d", `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`);
+      p.setAttribute("fill", "none"); p.setAttribute("stroke", laneColour[lane]); p.setAttribute("stroke-width", "2");
+      return p;
+    }
+
+    function renderGraph() {
+      const graph = $("graph");
+      graph.replaceChildren();
+      const sheet = svg("svg");
+      sheet.setAttribute("class", "lane-sheet");
+      sheet.setAttribute("width", "72");
+      sheet.setAttribute("height", String(commits.length * ROW));
+      const y = (i) => i * ROW + ROW / 2;
+      const idx = (id) => commits.findIndex((c) => c.id === id);
+      // lane 0 trunk
+      sheet.appendChild(stroke(laneX(0), y(0), laneX(0), y(1), 0, true));
+      sheet.appendChild(stroke(laneX(0), y(1), laneX(0), y(commits.length - 1), 0));
+      // lane 1: feature/panes branches from 45b0dcc
+      sheet.appendChild(stroke(laneX(1), y(idx("c4e91aa")), laneX(1), y(idx("45b0dcc")) - ROW / 2, 1));
+      sheet.appendChild(curve(laneX(1), y(idx("45b0dcc")) - ROW / 2, laneX(0), y(idx("45b0dcc")), 1));
+      // lane 2: stash hangs off e01d079
+      sheet.appendChild(stroke(laneX(2), y(idx("04d7b7a")), laneX(2), y(idx("e01d079")) - ROW / 2, 2));
+      sheet.appendChild(curve(laneX(2), y(idx("e01d079")) - ROW / 2, laneX(0), y(idx("e01d079")), 2));
+      commits.forEach((c, i) => {
+        const dot = svg("circle");
+        dot.setAttribute("cx", laneX(c.lane)); dot.setAttribute("cy", y(i));
+        dot.setAttribute("r", c.wip ? "5" : "4");
+        dot.setAttribute("fill", c.wip ? "#0d0d0f" : laneColour[c.lane]);
+        dot.setAttribute("stroke", laneColour[c.lane]); dot.setAttribute("stroke-width", "2");
+        if (c.wip) dot.setAttribute("stroke-dasharray", "2 2");
+        sheet.appendChild(dot);
+      });
+      graph.appendChild(sheet);
+
+      const query = $("search").value.trim().toLowerCase();
+      for (const c of commits) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "row" + (c.wip ? " wip" : "");
+        btn.setAttribute("role", "option");
+        btn.setAttribute("aria-selected", String(c.id === selectedId));
+        if (query && !c.wip && !(c.message + c.hash + c.author).toLowerCase().includes(query)) btn.style.opacity = "0.3";
+        const subject = document.createElement("span");
+        subject.className = "subject";
+        for (const r of c.refs) {
+          const pill = document.createElement("span");
+          pill.className = "pill " + r.t;
+          pill.textContent = r.n;
+          subject.appendChild(pill);
+        }
+        const msg = document.createElement("span");
+        msg.className = "msg"; msg.textContent = c.message;
+        subject.appendChild(msg);
+        const author = document.createElement("span");
+        author.className = "author";
+        if (c.author) {
+          const av = document.createElement("span"); av.className = "avatar"; av.textContent = c.author[0];
+          author.append(av, c.author);
+        }
+        const when = document.createElement("span"); when.className = "when"; when.textContent = c.when;
+        const hash = document.createElement("span"); hash.className = "hash"; hash.textContent = c.hash;
+        btn.append(subject, author, when, hash);
+        btn.addEventListener("click", () => select(c.id));
+        graph.appendChild(btn);
+      }
+    }
+
+    // ---------- inspector ----------
+    function fileRow(f, { mark = false, staged = false } = {}) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "file" + (staged ? " staged" : "");
+      b.setAttribute("aria-selected", String(selectedFile === f.path));
+      const m = document.createElement("span"); m.className = "mark"; m.textContent = mark ? "☐" : "";
+      if (mark && staged) { m.textContent = "☑"; m.dataset.on = "true"; }
+      const name = document.createElement("span"); name.className = "name";
+      if (asTree) {
+        name.textContent = f.path.split("/").pop();
+      } else {
+        const parts = f.path.split("/");
+        const dir = document.createElement("span"); dir.className = "dir"; dir.textContent = parts.slice(0, -1).join("/") + (parts.length > 1 ? "/" : "");
+        name.append(dir, parts.at(-1));
+      }
+      const add = document.createElement("span"); add.className = "add"; add.textContent = f.add ? "+" + f.add : "";
+      const del = document.createElement("span"); del.className = "del"; del.textContent = f.del ? "−" + f.del : "";
+      const kind = document.createElement("span"); kind.className = "kind"; kind.textContent = f.status;
+      b.append(m, name, add, del, kind);
+      b.addEventListener("click", () => { selectedFile = f.path; renderInspector(); renderDiff(); renderRail(); });
+      return b;
+    }
+
+    function block(title, ...children) {
+      const d = document.createElement("div"); d.className = "block";
+      if (title) { const h = document.createElement("h3"); h.textContent = title; d.appendChild(h); }
+      d.append(...children);
+      return d;
+    }
+    function cmd(label, { primary = false, disabled = false } = {}) {
+      const b = document.createElement("button"); b.type = "button";
+      b.className = "cmd" + (primary ? " primary" : ""); b.textContent = label; b.disabled = disabled;
+      return b;
+    }
+    function list(files, grouped) {
+      const wrap = document.createElement("div"); wrap.className = "file-list";
+      if (asTree) {
+        const root = { dirs: new Map(), files: [] };
+        for (const f of files) {
+          let n = root;
+          for (const part of f.path.split("/").slice(0, -1)) { if (!n.dirs.has(part)) n.dirs.set(part, { dirs: new Map(), files: [] }); n = n.dirs.get(part); }
+          n.files.push(f);
+        }
+        const walk = (n, depth) => {
+          for (const [name, child] of n.dirs) {
+            const g = document.createElement("div"); g.className = "group"; g.style.paddingLeft = (12 + depth * 12) + "px"; g.textContent = "▾ " + name; wrap.appendChild(g); walk(child, depth + 1);
+          }
+          for (const f of n.files) { const r = fileRow(f, { mark: grouped, staged: f.place === "Staged" }); r.style.paddingLeft = (12 + depth * 12) + "px"; wrap.appendChild(r); }
+        };
+        walk(root, 0);
+        return wrap;
+      }
+      const places = grouped ? ["Staged", "Unstaged", "Untracked"] : [null];
+      for (const place of places) {
+        const subset = place ? files.filter((f) => f.place === place) : files;
+        if (!subset.length) continue;
+        if (place) {
+          const g = document.createElement("div"); g.className = "group";
+          g.innerHTML = `${place} <span class="count">(${subset.length})</span>`;
+          wrap.appendChild(g);
+        }
+        for (const f of subset) wrap.appendChild(fileRow(f, { mark: grouped, staged: f.place === "Staged" }));
+      }
+      return wrap;
+    }
+
+    function renderInspector() {
+      ["work", "commit", "compare"].forEach((m) => $("tab-" + m).setAttribute("aria-selected", String(mode === m)));
+      $("as-list").setAttribute("aria-pressed", String(!asTree));
+      $("as-tree").setAttribute("aria-pressed", String(asTree));
+      const host = $("inspector");
+      host.replaceChildren();
+
+      if (mode === "work") {
+        const ta = document.createElement("textarea"); ta.className = "message-box"; ta.placeholder = "Commit message";
+        const row = document.createElement("div"); row.className = "btn-row";
+        row.append(cmd("Commit", { primary: true, disabled: true }), cmd("Suggest"), cmd("Amend", { disabled: true }));
+        host.appendChild(block(null, ta, row));
+        const tools = document.createElement("div"); tools.className = "btn-row";
+        tools.append(cmd("Select all"), cmd("Clear"), cmd("Stage"), cmd("Unstage"), cmd("Discard"));
+        const stat = document.createElement("span"); stat.className = "stat"; stat.textContent = "1 selected";
+        tools.appendChild(stat);
+        host.appendChild(block("Changes", tools));
+        host.appendChild(list(workFiles, true));
+        return;
+      }
+
+      if (mode === "commit") {
+        const c = commits.find((x) => x.id === selectedId) || commits[1];
+        const t = document.createElement("p"); t.className = "commit-title"; t.textContent = c.message;
+        const meta = document.createElement("div"); meta.className = "commit-meta";
+        meta.innerHTML = `<span>${c.hash}</span><span>${c.author}</span><span>${c.when} ago</span><span>parent 45b0dcc</span>`;
+        const row = document.createElement("div"); row.className = "btn-row"; row.style.marginTop = "8px";
+        row.append(cmd("Cherry-pick"), cmd("Reset…"), cmd("Create branch"), cmd("Tag"), cmd("Copy SHA"));
+        host.appendChild(block(null, t, meta, row));
+        const h = document.createElement("div"); h.className = "group";
+        const adds = c.files.reduce((n, f) => n + f.add, 0), dels = c.files.reduce((n, f) => n + f.del, 0);
+        h.innerHTML = `Files changed <span class="count">(${c.files.length})</span> <span class="stat"><b class="up">+${adds}</b> <b class="down">−${dels}</b></span>`;
+        host.appendChild(h);
+        host.appendChild(list(c.files, false));
+        return;
+      }
+
+      // compare
+      const refs = document.createElement("div"); refs.className = "refs";
+      refs.innerHTML = `<select aria-label="Base"><option>main</option><option>origin/dev</option><option>dev</option></select><span class="arrow">…</span><select aria-label="Head"><option>dev</option><option>feature/panes</option></select>`;
+      const stat = document.createElement("div"); stat.className = "stat";
+      stat.innerHTML = `dev is <b class="up">6 ahead</b>, <b>0 behind</b> main`;
+      const row = document.createElement("div"); row.className = "btn-row"; row.style.marginTop = "8px";
+      row.append(cmd("Merge main into dev"), cmd("Rebase dev onto main"), cmd("Swap"));
+      host.appendChild(block("Comparing references", refs, stat, row));
+      const g = document.createElement("div"); g.className = "group"; g.innerHTML = `Commits <span class="count">(6)</span>`;
+      host.appendChild(g);
+      for (const c of commits.slice(1, 7)) {
+        const r = document.createElement("button"); r.type = "button"; r.className = "mini-row";
+        r.innerHTML = `<span class="hash">${c.hash}</span><span class="subject">${c.message}</span><span class="when">${c.when}</span>`;
+        r.addEventListener("click", () => select(c.id));
+        host.appendChild(r);
+      }
+      const g2 = document.createElement("div"); g2.className = "group"; g2.innerHTML = `Files changed <span class="count">(7)</span>`;
+      host.appendChild(g2);
+      host.appendChild(list(commits.slice(1, 7).flatMap((c) => c.files), false));
+    }
+
+    // ---------- diff ----------
+    function highlightWords(a, b) {
+      // crude word-level diff for the wireframe: mark tokens not present on the other side
+      const ta = a.split(/(\s+|[(){}\[\];,:.])/), tb = b.split(/(\s+|[(){}\[\];,:.])/);
+      const sa = new Set(ta), sb = new Set(tb);
+      const wrapA = ta.map((t) => (t.trim() && !sb.has(t) ? `<mark>${esc(t)}</mark>` : esc(t))).join("");
+      const wrapB = tb.map((t) => (t.trim() && !sa.has(t) ? `<mark>${esc(t)}</mark>` : esc(t))).join("");
+      return [wrapA, wrapB];
+    }
+    function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+    function lineEl(cls, oldNo, newNo, sign, html, splitMode) {
+      const d = document.createElement("div"); d.className = "line " + cls;
+      if (splitMode) {
+        d.innerHTML = `<span class="no">${oldNo ?? newNo ?? ""}</span><span class="sign">${sign}</span><span class="code">${html}</span>`;
+      } else {
+        d.innerHTML = `<span class="no">${oldNo ?? ""}</span><span class="no">${newNo ?? ""}</span><span class="sign">${sign}</span><span class="code">${html}</span>`;
+      }
+      return d;
+    }
+
+    function pairRows(rows) {
+      // Pair consecutive del/add runs so side-by-side aligns changed lines.
+      const out = []; let i = 0;
+      while (i < rows.length) {
+        if (rows[i][0] === "ctx") { out.push({ l: rows[i][1], r: rows[i][2], kind: "ctx" }); i++; continue; }
+        const dels = [], adds = [];
+        while (i < rows.length && rows[i][0] === "del") dels.push(rows[i++][1]);
+        while (i < rows.length && rows[i][0] === "add") adds.push(rows[i++][2]);
+        const n = Math.max(dels.length, adds.length);
+        for (let k = 0; k < n; k++) out.push({ l: dels[k] ?? null, r: adds[k] ?? null, kind: "chg" });
+      }
+      return out;
+    }
+
+    function fileBlock(path, patch, stats, worktree) {
+      const wrap = document.createElement("section"); wrap.className = "file-block"; wrap.id = "file-" + path.replace(/[^a-z0-9]/gi, "-");
+      const head = document.createElement("div"); head.className = "file-head";
+      head.innerHTML = `<span class="fpath">${path}</span><span class="stats"><span class="add">+${stats.add}</span> <span class="del">−${stats.del}</span></span><span class="gap"></span>`;
+      const open = cmd("Open file"); open.className = "cmd quiet"; head.appendChild(open);
+      if (worktree) { const st = cmd(stats.place === "Staged" ? "Unstage file" : "Stage file"); st.className = "cmd quiet"; head.appendChild(st); }
+      wrap.appendChild(head);
+
+      if (!patch) {
+        const f = document.createElement("div"); f.className = "fold"; f.textContent = "— patch not loaded in wireframe —"; wrap.appendChild(f);
+        return wrap;
+      }
+
+      const fold1 = document.createElement("div"); fold1.className = "fold"; fold1.textContent = `⋯ ${patch.oldStart - 1} hidden lines ⋯`;
+      if (patch.oldStart > 1) wrap.appendChild(fold1);
+      const hh = document.createElement("div"); hh.className = "hunk-head";
+      hh.textContent = `@@ -${patch.oldStart},${patch.rows.filter((r) => r[0] !== "add").length} +${patch.newStart},${patch.rows.filter((r) => r[0] !== "del").length} @@`;
+      wrap.appendChild(hh);
+
+      let o = patch.oldStart, n = patch.newStart;
+      if (split) {
+        const grid = document.createElement("div"); grid.className = "split";
+        const left = document.createElement("div"); left.className = "side";
+        const right = document.createElement("div"); right.className = "side";
+        for (const p of pairRows(patch.rows)) {
+          if (p.kind === "ctx") {
+            left.appendChild(lineEl("ctx", o++, null, " ", esc(p.l), true));
+            right.appendChild(lineEl("ctx", null, n++, " ", esc(p.r), true));
+          } else {
+            let lh = p.l == null ? "" : esc(p.l), rh = p.r == null ? "" : esc(p.r);
+            if (p.l != null && p.r != null) [lh, rh] = highlightWords(p.l, p.r);
+            left.appendChild(p.l == null ? lineEl("blank", null, null, "", "", true) : lineEl("del", o++, null, "−", lh, true));
+            right.appendChild(p.r == null ? lineEl("blank", null, null, "", "", true) : lineEl("add", null, n++, "+", rh, true));
+          }
+        }
+        grid.append(left, right);
+        wrap.appendChild(grid);
+      } else {
+        const uni = document.createElement("div"); uni.className = "unified";
+        for (const r of patch.rows) {
+          if (r[0] === "ctx") uni.appendChild(lineEl("ctx", o++, n++, " ", esc(r[1])));
+          else if (r[0] === "del") uni.appendChild(lineEl("del", o++, null, "−", esc(r[1])));
+          else uni.appendChild(lineEl("add", null, n++, "+", esc(r[2])));
+        }
+        wrap.appendChild(uni);
+      }
+      const fold2 = document.createElement("div"); fold2.className = "fold"; fold2.textContent = "⋯ 212 hidden lines ⋯"; wrap.appendChild(fold2);
+      if (worktree) {
+        const tools = document.createElement("div"); tools.className = "hunk-tools";
+        tools.append(cmd("Stage hunk"), cmd("Discard hunk"));
+        wrap.appendChild(tools);
+      }
+      return wrap;
+    }
+
+    function currentFiles() {
+      if (mode === "work") return workFiles;
+      if (mode === "compare") return commits.slice(1, 7).flatMap((c) => c.files);
+      const c = commits.find((x) => x.id === selectedId) || commits[1];
+      return c.files;
+    }
+
+    function renderDiff() {
+      $("mode-unified").setAttribute("aria-pressed", String(!split));
+      $("mode-split").setAttribute("aria-pressed", String(split));
+      const files = currentFiles();
+      const shown = selectedFile ? files.filter((f) => f.path === selectedFile) : files;
+      const label = mode === "work" ? "Working tree" : mode === "compare" ? "main…dev" : (commits.find((x) => x.id === selectedId)?.hash || "");
+      $("diff-title").textContent = `${label} · ${shown.length} file${shown.length === 1 ? "" : "s"}`;
+      const host = $("diff"); host.replaceChildren();
+      for (const f of shown) host.appendChild(fileBlock(f.path, samplePatch[f.path], f, mode === "work"));
+      if (!shown.length) { const e = document.createElement("div"); e.className = "fold"; e.textContent = "No changes"; host.appendChild(e); }
+    }
+
+    // ---------- rail ----------
+    function renderRail() {
+      const files = currentFiles();
+      $("files-title").textContent = `Files · ${files.length}`;
+      const host = $("rail"); host.replaceChildren();
+      const all = document.createElement("button"); all.type = "button"; all.className = "rail-file";
+      all.setAttribute("aria-selected", String(selectedFile === null));
+      all.innerHTML = `<span class="dot"></span><span class="name">All files</span><span class="stats"></span>`;
+      all.addEventListener("click", () => { selectedFile = null; renderInspector(); renderDiff(); renderRail(); });
+      host.appendChild(all);
+      for (const f of files) {
+        const b = document.createElement("button"); b.type = "button"; b.className = "rail-file";
+        b.setAttribute("aria-selected", String(selectedFile === f.path));
+        b.innerHTML = `<span class="dot ${f.status}"></span><span class="name" title="${f.path}">${f.path.split("/").pop()}</span><span class="stats">+${f.add} −${f.del}</span>`;
+        b.addEventListener("click", () => { selectedFile = f.path; renderInspector(); renderDiff(); renderRail(); });
+        host.appendChild(b);
+      }
+    }
+
+    // ---------- wiring ----------
+    function select(id) {
+      selectedId = id; selectedFile = null;
+      mode = id === "wip" ? "work" : "commit";
+      renderAll();
+    }
+    function renderAll() { renderGraph(); renderInspector(); renderDiff(); renderRail(); }
+
+    $("tab-work").addEventListener("click", () => { mode = "work"; selectedId = "wip"; selectedFile = null; renderAll(); });
+    $("tab-commit").addEventListener("click", () => { mode = "commit"; if (selectedId === "wip") selectedId = "2385167"; selectedFile = null; renderAll(); });
+    $("tab-compare").addEventListener("click", () => { mode = "compare"; selectedFile = null; renderAll(); });
+    $("as-list").addEventListener("click", () => { asTree = false; renderInspector(); });
+    $("as-tree").addEventListener("click", () => { asTree = true; renderInspector(); });
+    $("mode-unified").addEventListener("click", () => { split = false; renderDiff(); });
+    $("mode-split").addEventListener("click", () => { split = true; renderDiff(); });
+    $("wrap").addEventListener("click", (e) => { const on = e.currentTarget.getAttribute("aria-pressed") !== "true"; e.currentTarget.setAttribute("aria-pressed", String(on)); document.querySelectorAll(".line").forEach((l) => (l.style.whiteSpace = on ? "pre-wrap" : "pre")); });
+    function setLayout(preset) {
+      const stage = $("stage");
+      stage.classList.toggle("stack-middle", preset === "stack-middle");
+      stage.classList.toggle("stack-all", preset === "stack-all");
+      $("layout-columns").setAttribute("aria-pressed", String(preset === "columns"));
+      $("layout-stack-middle").setAttribute("aria-pressed", String(preset === "stack-middle"));
+      $("layout-stack-all").setAttribute("aria-pressed", String(preset === "stack-all"));
+      document.querySelectorAll(".splitter").forEach((s) => s.setAttribute("aria-orientation", preset === "stack-all" ? "horizontal" : "vertical"));
+      $("status-text").textContent = preset === "columns" ? "Ready · Columns" : preset === "stack-middle" ? "Ready · Inspector over Diff" : "Ready · Stacked";
+    }
+    $("layout-columns").addEventListener("click", () => setLayout("columns"));
+    $("layout-stack-middle").addEventListener("click", () => setLayout("stack-middle"));
+    $("layout-stack-all").addEventListener("click", () => setLayout("stack-all"));
+    $("rail-toggle").addEventListener("click", () => { const hidden = $("stage").classList.toggle("files-hidden"); $("rail-toggle").textContent = hidden ? "⟨" : "⟩"; });
+    $("search").addEventListener("input", renderGraph);
+
+    renderAll();
+  </script>
+</body>
+</html>
