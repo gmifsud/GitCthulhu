@@ -2,6 +2,8 @@
 //! Porcelain that gix 0.66 cannot do safely goes through [`command`].
 
 mod command;
+mod diff;
+mod stash;
 mod status;
 
 #[cfg(test)]
@@ -9,8 +11,12 @@ mod tests;
 
 use std::fmt::Display;
 
-use command::{run_git, run_git_paths, BLANK_COMMIT_MESSAGE};
-use core_domain::{Branch, Commit, DomainError, GitRepository, RepoStatus};
+use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
+use core_domain::{
+    Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus,
+    ResetMode, Stash, Tag,
+};
+use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
 use gix::refs::TargetRef;
 use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
@@ -35,6 +41,34 @@ impl GitoxideAdapter {
         let adapter = Self::new(repo_path);
         adapter.open_repo()?;
         Ok(adapter)
+    }
+
+    /// `git init` in an existing folder that is not already a repository.
+    pub fn init(path: &str) -> Result<(), DomainError> {
+        validate_directory(path)?;
+        if Self::discover(path).is_ok() {
+            return Err(DomainError::Unknown(
+                "Already a Git repository.".to_string(),
+            ));
+        }
+        run_git(path, &["init"])
+    }
+
+    /// `git clone` of `url` into a new directory under `parent`. Returns that directory.
+    ///
+    /// The name comes from the URL. No hosting provider is contacted except by git itself.
+    pub fn clone_repository(url: &str, parent: &str) -> Result<String, DomainError> {
+        validate_clone_url(url)?;
+        validate_directory(parent)?;
+        let name = repository_name(url)?;
+        let destination = std::path::Path::new(parent).join(&name);
+        if destination.exists() {
+            return Err(DomainError::Unknown(format!(
+                "{name} already exists in {parent}"
+            )));
+        }
+        run_git(parent, &["clone", "--", url.trim(), &name])?;
+        Ok(destination.to_string_lossy().into_owned())
     }
 
     fn open_repo(&self) -> Result<gix::Repository, DomainError> {
@@ -166,6 +200,29 @@ impl GitRepository for GitoxideAdapter {
         Ok(branches)
     }
 
+    fn tags(&self) -> Result<Vec<Tag>, DomainError> {
+        let repo = self.open_repo()?;
+        let mut tags = Vec::new();
+        for reference in repo
+            .references()
+            .map_err(unknown)?
+            .tags()
+            .map_err(unknown)?
+        {
+            let mut reference = reference.map_err(unknown)?;
+            let name = reference.name().shorten().to_string();
+            let Ok(commit) = reference.peel_to_commit() else {
+                continue;
+            };
+            tags.push(Tag {
+                name,
+                commit_id: commit.id().to_string(),
+            });
+        }
+        tags.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(tags)
+    }
+
     /// Switch to a local branch with `git switch`.
     ///
     /// gix 0.66 keeps the checkout options a correct worktree update needs (filters,
@@ -180,6 +237,56 @@ impl GitRepository for GitoxideAdapter {
             )));
         }
         run_git(&self.repo_path, &["switch", "--no-guess", branch_name])
+    }
+
+    fn create_branch(&self, name: &str, start_point: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_branch_name(name)?;
+        require_branch_name(start_point)?;
+        run_git(&self.repo_path, &["branch", "--", name, start_point])
+    }
+
+    fn rename_branch(&self, from: &str, to: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_branch_name(from)?;
+        require_branch_name(to)?;
+        run_git(&self.repo_path, &["branch", "-m", "--", from, to])
+    }
+
+    fn delete_branch(&self, name: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_branch_name(name)?;
+        run_git(&self.repo_path, &["branch", "-d", "--", name])
+    }
+
+    fn cherry_pick(&self, commit_id: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_hex_commit(commit_id)?;
+        run_git(&self.repo_path, &["cherry-pick", "--", commit_id])
+    }
+
+    fn reset(&self, commit_id: &str, mode: ResetMode) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_hex_commit(commit_id)?;
+        let flag = match mode {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        };
+        // A hex id cannot be an option. `--` would make git treat it as a path.
+        run_git(&self.repo_path, &["reset", flag, commit_id])
+    }
+
+    fn merge_branch(&self, name: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_branch_name(name)?;
+        run_git(&self.repo_path, &["merge", "--no-ff", "--", name])
+    }
+
+    fn rebase_onto(&self, name: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_branch_name(name)?;
+        run_git(&self.repo_path, &["rebase", "--", name])
     }
 
     fn stage_paths(&self, paths: &[String]) -> Result<(), DomainError> {
@@ -227,5 +334,244 @@ impl GitRepository for GitoxideAdapter {
     fn pull(&self) -> Result<(), DomainError> {
         self.open_repo()?;
         run_git(&self.repo_path, &["pull", "--no-rebase", "--ff-only"])
+    }
+
+    fn commit_patch(&self, commit_id: &str) -> Result<Vec<Patch>, DomainError> {
+        self.open_repo()?;
+        if !is_hex_revision(commit_id) {
+            return Err(DomainError::Unknown(format!(
+                "invalid commit: {commit_id:?}"
+            )));
+        }
+        let text = run_git_stdout(
+            &self.repo_path,
+            &["show", "--format=", "--unified=3", commit_id],
+        )?;
+        Ok(parse_patches(&text))
+    }
+
+    fn file_patch(&self, path: &str, place: FileDisposition) -> Result<Patch, DomainError> {
+        self.open_repo()?;
+        require_safe_path(path)?;
+        if place == FileDisposition::Untracked {
+            let full = std::path::Path::new(&self.repo_path).join(path);
+            let bytes = std::fs::read(&full)
+                .map_err(|error| DomainError::Unknown(format!("could not read {path}: {error}")))?;
+            return Ok(patch_from_worktree(path, &bytes));
+        }
+        let mut args = vec!["diff", "--unified=3"];
+        if place == FileDisposition::Staged {
+            args.push("--cached");
+        }
+        args.push("--");
+        args.push(path);
+        let text = run_git_stdout(&self.repo_path, &args)?;
+        Ok(parse_patches(&text).into_iter().next().unwrap_or(Patch {
+            path: path.to_string(),
+            hunks: Vec::new(),
+            binary: false,
+        }))
+    }
+
+    fn discard_path(&self, path: &str, place: FileDisposition) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_safe_path(path)?;
+        if place == FileDisposition::Untracked {
+            let full = std::path::Path::new(&self.repo_path).join(path);
+            return std::fs::remove_file(full).map_err(|error| {
+                DomainError::Unknown(format!("could not discard {path}: {error}"))
+            });
+        }
+        if tracked_at_head(&self.repo_path, path)? {
+            run_git(
+                &self.repo_path,
+                &[
+                    "restore",
+                    "--source=HEAD",
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    path,
+                ],
+            )
+        } else {
+            run_git(&self.repo_path, &["rm", "-f", "--", path])
+        }
+    }
+
+    fn stage_hunk(&self, path: &str, hunk: &Hunk) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_safe_path(path)?;
+        let patch = render_hunk(path, hunk)?;
+        run_git_stdin(
+            &self.repo_path,
+            &["apply", "--cached", "--recount", "--whitespace=nowarn"],
+            patch.as_bytes(),
+        )
+    }
+
+    fn discard_hunk(
+        &self,
+        path: &str,
+        hunk: &Hunk,
+        place: FileDisposition,
+    ) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_safe_path(path)?;
+        let patch = render_hunk(path, hunk)?;
+        let args: &[&str] = if place == FileDisposition::Staged {
+            &[
+                "apply",
+                "--cached",
+                "--reverse",
+                "--recount",
+                "--whitespace=nowarn",
+            ]
+        } else {
+            &["apply", "--reverse", "--recount", "--whitespace=nowarn"]
+        };
+        run_git_stdin(&self.repo_path, args, patch.as_bytes())
+    }
+
+    fn stashes(&self) -> Result<Vec<Stash>, DomainError> {
+        self.open_repo()?;
+        let text = run_git_stdout(&self.repo_path, &["stash", "list"])?;
+        stash::parse_stash_list(&text)
+    }
+
+    fn stash_push(&self, message: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if message.contains('\0') {
+            return Err(DomainError::Unknown(
+                "stash message contains a null byte".to_string(),
+            ));
+        }
+        let message = message.trim();
+        if message.is_empty() {
+            run_git(&self.repo_path, &["stash", "push"])
+        } else {
+            run_git(&self.repo_path, &["stash", "push", "-m", message])
+        }
+    }
+
+    fn stash_apply(&self, index: usize) -> Result<(), DomainError> {
+        self.open_repo()?;
+        let stash_ref = stash_ref(index);
+        run_git(&self.repo_path, &["stash", "apply", &stash_ref])
+    }
+
+    fn stash_pop(&self, index: usize) -> Result<(), DomainError> {
+        self.open_repo()?;
+        let stash_ref = stash_ref(index);
+        run_git(&self.repo_path, &["stash", "pop", &stash_ref])
+    }
+
+    fn stash_drop(&self, index: usize) -> Result<(), DomainError> {
+        self.open_repo()?;
+        let stash_ref = stash_ref(index);
+        run_git(&self.repo_path, &["stash", "drop", &stash_ref])
+    }
+}
+
+fn stash_ref(index: usize) -> String {
+    format!("stash@{{{index}}}")
+}
+
+fn validate_directory(path: &str) -> Result<(), DomainError> {
+    if path.trim().is_empty() || path.contains('\0') || path.starts_with('-') {
+        Err(DomainError::Unknown(format!("invalid path: {path:?}")))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_clone_url(url: &str) -> Result<(), DomainError> {
+    let url = url.trim();
+    if url.is_empty() || url.contains(['\0', '\n', '\r']) || url.starts_with('-') {
+        Err(DomainError::Unknown(format!("invalid clone URL: {url:?}")))
+    } else {
+        Ok(())
+    }
+}
+
+/// The last path segment of a clone URL, without a trailing `.git`.
+fn repository_name(url: &str) -> Result<String, DomainError> {
+    let trimmed = url.trim().trim_end_matches(['/', '\\']);
+    let segment = trimmed.rsplit(['/', '\\', ':']).next().unwrap_or("").trim();
+    let name = segment.strip_suffix(".git").unwrap_or(segment);
+    if name.is_empty() || name == "." || name == ".." {
+        Err(DomainError::Unknown(
+            "Clone URL has no repository name.".to_string(),
+        ))
+    } else {
+        Ok(name.to_string())
+    }
+}
+
+fn is_hex_revision(commit_id: &str) -> bool {
+    let length = commit_id.len();
+    (4..=40).contains(&length) && commit_id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn require_hex_commit(commit_id: &str) -> Result<(), DomainError> {
+    if is_hex_revision(commit_id) {
+        Ok(())
+    } else {
+        Err(DomainError::Unknown(format!(
+            "invalid commit: {commit_id:?}"
+        )))
+    }
+}
+
+fn require_branch_name(name: &str) -> Result<(), DomainError> {
+    let component_bad = name
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == ".." || part.ends_with(".lock"));
+    let bad = name.is_empty()
+        || name.starts_with('-')
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || component_bad
+        || name.contains([
+            '\0', '\n', '\r', ' ', '\t', '~', '^', ':', '?', '*', '[', '\\',
+        ])
+        || name.contains("..")
+        || name.contains("@{");
+    if bad {
+        Err(DomainError::Unknown(format!(
+            "invalid branch name: {name:?}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_safe_path(path: &str) -> Result<(), DomainError> {
+    let candidate = std::path::Path::new(path);
+    let escapes = path.is_empty()
+        || path.contains('\0')
+        || path.starts_with('-')
+        || candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+    if escapes {
+        Err(DomainError::Unknown(format!("invalid path: {path:?}")))
+    } else {
+        Ok(())
+    }
+}
+
+fn tracked_at_head(repo_path: &str, path: &str) -> Result<bool, DomainError> {
+    match run_git_stdout(repo_path, &["ls-tree", "--name-only", "HEAD", "--", path]) {
+        Ok(names) => Ok(!names.is_empty()),
+        Err(DomainError::Unknown(message))
+            if message.to_ascii_lowercase().contains("not a valid object")
+                || message.to_ascii_lowercase().contains("bad revision")
+                || message.to_ascii_lowercase().contains("ambiguous argument") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
 }
