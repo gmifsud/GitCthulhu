@@ -19,6 +19,20 @@ pub struct DagNode {
     pub connections: Vec<(String, usize)>,
 }
 
+/// A tag that peels to a commit. Tags that point at a tree or a blob are left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    pub name: String,
+    pub commit_id: String,
+}
+
+/// One entry from `git stash list`, addressed as `stash@{index}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stash {
+    pub index: usize,
+    pub message: String,
+}
+
 /// Represents a Git branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Branch {
@@ -34,6 +48,54 @@ pub struct TrackingStatus {
     pub upstream: String,
     pub ahead: usize,
     pub behind: usize,
+}
+
+/// Where a changed path sits, which decides the diff and the discard command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDisposition {
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+/// One line of a unified diff, without the leading `+`, `-`, or space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+/// One `@@` block of a unified diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+}
+
+/// The text diff of one path. `binary` is set when git reports a binary file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Patch {
+    pub path: String,
+    pub hunks: Vec<Hunk>,
+    pub binary: bool,
+}
+
+/// How far `git reset` moves the current branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// Move `HEAD` and leave the index and the worktree.
+    Soft,
+    /// Move `HEAD`, clear the index, and leave the worktree.
+    Mixed,
+    /// Move `HEAD` and replace the index and the worktree.
+    Hard,
 }
 
 /// Represents the status of the working directory.
@@ -62,6 +124,22 @@ pub struct AppSettings {
     pub repository_shortcuts: Vec<String>,
     /// Last folder opened, when one has been remembered.
     pub last_repo_path: Option<String>,
+    /// Face chosen under Appearance. Unknown names fall back to [`Self::DEFAULT_UI_FONT`].
+    pub ui_font: String,
+    /// Point size chosen under Appearance, clamped to [`Self::MIN_UI_SIZE`]..=[`Self::MAX_UI_SIZE`].
+    pub ui_size: u8,
+    /// Kilo gateway token. Empty until the user saves one under Agents and Models.
+    pub agent_token: String,
+    /// Model id sent to the Kilo gateway, such as `kilo-auto/free`.
+    pub agent_model: String,
+}
+
+impl AppSettings {
+    pub const DEFAULT_UI_FONT: &'static str = "Segoe UI";
+    pub const DEFAULT_UI_SIZE: u8 = 14;
+    pub const MIN_UI_SIZE: u8 = 12;
+    pub const MAX_UI_SIZE: u8 = 18;
+    pub const DEFAULT_AGENT_MODEL: &'static str = "kilo-auto/free";
 }
 
 impl Default for AppSettings {
@@ -70,6 +148,10 @@ impl Default for AppSettings {
             theme: "DeepFocus".to_string(),
             repository_shortcuts: vec![],
             last_repo_path: None,
+            ui_font: Self::DEFAULT_UI_FONT.to_string(),
+            ui_size: Self::DEFAULT_UI_SIZE,
+            agent_token: String::new(),
+            agent_model: Self::DEFAULT_AGENT_MODEL.to_string(),
         }
     }
 }
