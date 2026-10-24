@@ -16,6 +16,11 @@ struct AppSettingsDto {
     pub ui_font: String,
     #[serde(default = "default_ui_size")]
     pub ui_size: u8,
+    /// Absent until the user saves a Kilo token.
+    #[serde(default)]
+    pub agent_token: String,
+    #[serde(default = "default_agent_model")]
+    pub agent_model: String,
 }
 
 fn default_ui_font() -> String {
@@ -26,6 +31,10 @@ fn default_ui_size() -> u8 {
     AppSettings::DEFAULT_UI_SIZE
 }
 
+fn default_agent_model() -> String {
+    AppSettings::DEFAULT_AGENT_MODEL.to_string()
+}
+
 impl Default for AppSettingsDto {
     fn default() -> Self {
         Self {
@@ -34,6 +43,8 @@ impl Default for AppSettingsDto {
             last_repo_path: None,
             ui_font: default_ui_font(),
             ui_size: default_ui_size(),
+            agent_token: String::new(),
+            agent_model: default_agent_model(),
         }
     }
 }
@@ -46,6 +57,8 @@ impl From<AppSettingsDto> for AppSettings {
             last_repo_path: dto.last_repo_path,
             ui_font: dto.ui_font,
             ui_size: dto.ui_size,
+            agent_token: dto.agent_token,
+            agent_model: dto.agent_model,
         }
     }
 }
@@ -58,6 +71,8 @@ impl From<&AppSettings> for AppSettingsDto {
             last_repo_path: domain.last_repo_path.clone(),
             ui_font: domain.ui_font.clone(),
             ui_size: domain.ui_size,
+            agent_token: domain.agent_token.clone(),
+            agent_model: domain.agent_model.clone(),
         }
     }
 }
@@ -179,6 +194,20 @@ mod tests {
             assert_eq!(settings.last_repo_path, None);
             assert_eq!(settings.ui_font, AppSettings::DEFAULT_UI_FONT);
             assert_eq!(settings.ui_size, AppSettings::DEFAULT_UI_SIZE);
+            assert_eq!(settings.agent_token, "");
+            assert_eq!(settings.agent_model, AppSettings::DEFAULT_AGENT_MODEL);
+        });
+    }
+
+    #[test]
+    fn the_agent_token_and_model_round_trip() {
+        with_store("agent", |store| {
+            let mut settings = store.load_settings().expect("default");
+            settings.agent_token = "kilo-token".to_string();
+            settings.agent_model = "kilo-auto/free".to_string();
+            settings.last_repo_path = Some(r"D:\repo".to_string());
+            store.save_settings(&settings).expect("save");
+            assert_eq!(store.load_settings().expect("reload"), settings);
         });
     }
 }
