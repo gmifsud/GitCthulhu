@@ -988,3 +988,331 @@ fn commit_of_a_clean_index_does_not_move_head() {
     );
     assert_eq!(fixture.head_commit(), head);
 }
+
+#[test]
+fn commit_patch_is_the_diff_of_that_commit() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    let second = fixture.commit("second", &[("a.txt", "one\ntwo\n")], 1);
+
+    let patches = fixture
+        .adapter()
+        .commit_patch(&second.to_string())
+        .expect("patch");
+
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].path, "a.txt");
+    assert!(patches[0].hunks[0]
+        .lines
+        .iter()
+        .any(|line| { line.kind == core_domain::DiffLineKind::Added && line.text == "two" }));
+    assert!(fixture.adapter().commit_patch("-rf").is_err());
+}
+
+#[test]
+fn file_patch_stage_hunk_and_discard_hunk_round_trip() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "one\n")]);
+    fixture.write_file("a.txt", "one\ntwo\n");
+    let adapter = fixture.adapter();
+
+    let patch = adapter
+        .file_patch("a.txt", core_domain::FileDisposition::Unstaged)
+        .expect("diff");
+    let hunk = patch.hunks.first().expect("hunk").clone();
+    adapter.stage_hunk("a.txt", &hunk).expect("stage hunk");
+    let status = adapter.status().expect("status");
+    assert!(
+        status.staged_files.iter().any(|path| path == "a.txt"),
+        "{status:?}"
+    );
+
+    adapter
+        .discard_hunk("a.txt", &hunk, core_domain::FileDisposition::Staged)
+        .expect("discard hunk");
+    let status = adapter.status().expect("status after discard");
+    assert!(
+        !status.staged_files.iter().any(|path| path == "a.txt"),
+        "{status:?}"
+    );
+}
+
+#[test]
+fn discard_path_deletes_an_untracked_file_and_restores_a_tracked_one() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    fixture.write_file("a.txt", "changed\n");
+    fixture.write_file("extra.txt", "new\n");
+    let adapter = fixture.adapter();
+
+    adapter
+        .discard_path("extra.txt", core_domain::FileDisposition::Untracked)
+        .expect("discard untracked");
+    assert!(!fixture.workdir().join("extra.txt").exists());
+    assert!(fixture.workdir().join("a.txt").exists());
+
+    adapter
+        .discard_path("a.txt", core_domain::FileDisposition::Unstaged)
+        .expect("restore tracked");
+    let restored = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
+    assert_eq!(restored.replace("\r\n", "\n"), "one\n");
+    assert!(adapter
+        .discard_path("../a.txt", core_domain::FileDisposition::Untracked)
+        .is_err());
+}
+
+#[test]
+fn init_creates_a_repository_and_refuses_a_second_time() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().to_str().expect("utf-8 temp path");
+
+    GitoxideAdapter::init(path).expect("init");
+    assert!(GitoxideAdapter::discover(path).is_ok());
+
+    let again = GitoxideAdapter::init(path);
+    assert!(
+        matches!(again, Err(DomainError::Unknown(ref message)) if message == "Already a Git repository."),
+        "{again:?}"
+    );
+    assert!(GitoxideAdapter::init("-not-a-path").is_err());
+}
+
+#[test]
+fn clone_repository_copies_a_local_repository_under_the_parent() {
+    let source = TestRepo::new();
+    source.commit("first", &[("a.txt", "one\n")], 0);
+    let parent = tempfile::tempdir().expect("clone parent");
+    let parent_path = parent.path().to_str().expect("utf-8 parent");
+    let source_path = source.workdir().to_str().expect("utf-8 source");
+
+    let created = GitoxideAdapter::clone_repository(source_path, parent_path).expect("clone");
+
+    assert!(GitoxideAdapter::discover(&created).is_ok());
+    let read = std::fs::read_to_string(std::path::Path::new(&created).join("a.txt")).expect("file");
+    assert_eq!(read.replace("\r\n", "\n"), "one\n");
+    assert!(GitoxideAdapter::clone_repository("-rf", parent_path).is_err());
+    assert!(GitoxideAdapter::clone_repository(source_path, parent_path).is_err());
+}
+
+#[test]
+fn stash_push_apply_pop_and_drop_round_trip() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "one\n")]);
+    fixture.write_file("a.txt", "one\ntwo\n");
+    fixture.write_file("extra.txt", "new\n");
+    let adapter = fixture.adapter();
+
+    adapter.stash_push("wip").expect("stash");
+    let stashes = adapter.stashes().expect("list");
+    assert_eq!(stashes.len(), 1);
+    assert_eq!(stashes[0].index, 0);
+    assert!(stashes[0].message.contains("wip"), "{}", stashes[0].message);
+    let stashed = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
+    assert_eq!(stashed.replace("\r\n", "\n"), "one\n");
+    assert!(fixture.workdir().join("extra.txt").exists());
+
+    adapter.stash_apply(0).expect("apply");
+    let applied = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
+    assert_eq!(applied.replace("\r\n", "\n"), "one\ntwo\n");
+    assert_eq!(adapter.stashes().expect("list after apply").len(), 1);
+
+    adapter
+        .discard_path("a.txt", core_domain::FileDisposition::Unstaged)
+        .expect("clean the applied edit so pop can replay it");
+    adapter.stash_pop(0).expect("pop");
+    assert!(adapter.stashes().expect("list after pop").is_empty());
+    let popped = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
+    assert_eq!(popped.replace("\r\n", "\n"), "one\ntwo\n");
+
+    adapter
+        .stash_push("")
+        .expect("stash with git's own subject");
+    assert_eq!(adapter.stashes().expect("list before drop").len(), 1);
+    adapter.stash_drop(0).expect("drop");
+    assert!(adapter.stashes().expect("list after drop").is_empty());
+    let dropped = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
+    assert_eq!(dropped.replace("\r\n", "\n"), "one\n");
+    assert!(adapter.stash_push("\0").is_err());
+}
+
+#[test]
+fn create_rename_and_delete_a_local_branch() {
+    let fixture = TestRepo::with_feature_branch();
+    let head = fixture.head_branch();
+    let adapter = fixture.adapter();
+
+    adapter
+        .create_branch("from-feature", "feature")
+        .expect("create at the selected tip");
+    assert_eq!(fixture.current_branch(), head);
+    adapter
+        .checkout_branch("from-feature")
+        .expect("checkout created");
+    assert_eq!(
+        fixture.read_file("a.txt").as_deref(),
+        Some("a on feature\n")
+    );
+    adapter.checkout_branch(&head).expect("return");
+
+    adapter
+        .create_branch("topic", &head)
+        .expect("create at head");
+    adapter.rename_branch("topic", "topic-2").expect("rename");
+    let local = local_names(&adapter);
+    assert!(local.iter().any(|name| name == "topic-2"));
+    assert!(!local.iter().any(|name| name == "topic"));
+    adapter
+        .delete_branch("topic-2")
+        .expect("delete a merged branch");
+    assert!(!local_names(&adapter).iter().any(|name| name == "topic-2"));
+
+    let kept = adapter.delete_branch("feature");
+    assert!(kept.is_err(), "{kept:?}");
+    assert!(local_names(&adapter).iter().any(|name| name == "feature"));
+
+    adapter
+        .rename_branch(&head, "renamed")
+        .expect("rename current");
+    assert_eq!(fixture.current_branch(), "renamed");
+    assert!(adapter.delete_branch("renamed").is_err());
+    assert_eq!(fixture.current_branch(), "renamed");
+
+    for name in ["", "-d", "foo/../bar", "a@{1}", "has space"] {
+        assert!(
+            adapter.create_branch(name, "renamed").is_err(),
+            "{name:?} should be rejected"
+        );
+    }
+    assert!(!local_names(&adapter).iter().any(|name| name == "-d"));
+}
+
+#[test]
+fn tags_list_commit_tags_by_name_and_skip_a_tag_that_is_not_a_commit() {
+    let fixture = TestRepo::new();
+    let commit = fixture.commit("first", &[("a.txt", "one\n")], 0);
+    assert!(fixture.adapter().tags().expect("no tags yet").is_empty());
+
+    fixture.reference("refs/tags/v1", commit);
+    let id = commit.to_string();
+    git_in(
+        fixture.workdir(),
+        &[
+            "-c",
+            "tag.gpgsign=false",
+            "tag",
+            "-a",
+            "v2",
+            "-m",
+            "release",
+            &id,
+        ],
+    );
+    git_in(
+        fixture.workdir(),
+        &["-c", "tag.gpgsign=false", "tag", "tree-only", "HEAD^{tree}"],
+    );
+
+    let tags = fixture.adapter().tags().expect("tags");
+    assert_eq!(
+        tags,
+        vec![
+            core_domain::Tag {
+                name: "v1".to_string(),
+                commit_id: id.clone(),
+            },
+            core_domain::Tag {
+                name: "v2".to_string(),
+                commit_id: id,
+            },
+        ]
+    );
+}
+
+#[test]
+fn cherry_pick_reset_merge_and_rebase_use_the_selected_commit_or_branch() {
+    let fixture = TestRepo::with_feature_branch();
+    let adapter = fixture.adapter();
+    let main = fixture.head_commit();
+    let main_id = main.to_string();
+    let feature_id = adapter
+        .log(None)
+        .expect("log")
+        .into_iter()
+        .find(|commit| commit.message.contains("feature work"))
+        .expect("feature commit")
+        .id;
+    let branch = fixture.head_branch();
+
+    assert!(adapter.cherry_pick("HEAD").is_err());
+    assert!(adapter.reset(&branch, ResetMode::Hard).is_err());
+
+    adapter.cherry_pick(&feature_id).expect("cherry-pick");
+    assert_eq!(fixture.current_branch(), branch);
+    assert_eq!(fixture.read_file("b.txt").as_deref(), Some("b\n"));
+    assert_ne!(fixture.head_commit(), main);
+
+    adapter
+        .reset(&main_id, ResetMode::Hard)
+        .expect("hard reset");
+    assert_eq!(fixture.head_commit(), main);
+    assert!(fixture.read_file("b.txt").is_none());
+
+    fixture.write_file("c.txt", "c\n");
+    git_in(fixture.workdir(), &["add", "--", "c.txt"]);
+    git_in(fixture.workdir(), &["commit", "-m", "extra"]);
+    let extra = fixture.head_commit();
+    adapter
+        .reset(&main_id, ResetMode::Soft)
+        .expect("soft reset");
+    assert_eq!(fixture.head_commit(), main);
+    let staged = adapter.status().expect("status after soft reset");
+    assert!(
+        staged.staged_files.iter().any(|path| path == "c.txt"),
+        "{:?}",
+        staged.staged_files
+    );
+
+    adapter
+        .reset(&extra.to_string(), ResetMode::Mixed)
+        .expect("mixed reset");
+    assert_eq!(fixture.head_commit(), extra);
+    assert!(adapter
+        .status()
+        .expect("status after mixed reset")
+        .staged_files
+        .is_empty());
+
+    adapter
+        .reset(&main_id, ResetMode::Hard)
+        .expect("back to main");
+    adapter.merge_branch("feature").expect("explicit merge");
+    let tip = adapter.log(Some(1)).expect("log after merge");
+    assert_eq!(tip[0].parent_ids.len(), 2);
+    assert_eq!(fixture.read_file("b.txt").as_deref(), Some("b\n"));
+    assert_eq!(fixture.current_branch(), branch);
+    assert!(adapter.merge_branch("-feature").is_err());
+
+    adapter
+        .reset(&main_id, ResetMode::Hard)
+        .expect("clean main");
+    fixture.write_file("c.txt", "c\n");
+    git_in(fixture.workdir(), &["add", "--", "c.txt"]);
+    git_in(fixture.workdir(), &["commit", "-m", "extra again"]);
+    adapter.rebase_onto("feature").expect("rebase onto feature");
+    assert_eq!(fixture.current_branch(), branch);
+    assert_eq!(fixture.read_file("b.txt").as_deref(), Some("b\n"));
+    assert_eq!(fixture.read_file("c.txt").as_deref(), Some("c\n"));
+    assert!(adapter.rebase_onto("").is_err());
+}
+
+fn local_names(adapter: &GitoxideAdapter) -> Vec<String> {
+    adapter
+        .branches()
+        .expect("branches")
+        .into_iter()
+        .filter(|branch| !branch.is_remote)
+        .map(|branch| branch.name)
+        .collect()
+}
