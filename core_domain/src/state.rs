@@ -1,4 +1,4 @@
-use super::{build_dag, AppSettings, Branch, Commit, DagNode, DomainError, RepoStatus};
+use super::{build_dag, AppSettings, Branch, Commit, DagNode, DomainError, RepoStatus, Stash, Tag};
 
 /// Events applied to [`AppState`].
 #[derive(Debug, Clone)]
@@ -6,6 +6,8 @@ pub enum ViewEvent {
     StatusUpdated(RepoStatus),
     LogUpdated(Vec<Commit>),
     BranchesUpdated(Vec<Branch>),
+    StashesUpdated(Vec<Stash>),
+    TagsUpdated(Vec<Tag>),
     SettingsUpdated(AppSettings),
     ErrorOccurred(DomainError),
 }
@@ -16,6 +18,8 @@ pub struct AppState {
     pub commits: Vec<Commit>,
     pub dag_nodes: Vec<DagNode>,
     pub branches: Vec<Branch>,
+    pub stashes: Vec<Stash>,
+    pub tags: Vec<Tag>,
     pub loading: bool,
     pub settings: AppSettings,
 }
@@ -27,6 +31,8 @@ impl AppState {
             commits: vec![],
             dag_nodes: vec![],
             branches: vec![],
+            stashes: vec![],
+            tags: vec![],
             loading: false,
             settings: AppSettings::default(),
         }
@@ -47,6 +53,14 @@ impl AppState {
                 self.branches = branches;
                 self.loading = false;
             }
+            ViewEvent::StashesUpdated(stashes) => {
+                self.stashes = stashes;
+                self.loading = false;
+            }
+            ViewEvent::TagsUpdated(tags) => {
+                self.tags = tags;
+                self.loading = false;
+            }
             ViewEvent::SettingsUpdated(settings) => {
                 self.settings = settings;
             }
@@ -54,5 +68,11 @@ impl AppState {
                 self.loading = false;
             }
         }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
