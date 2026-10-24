@@ -2,6 +2,7 @@
 //! Constructs adapters and injects them into the pure `gui_app` library.
 //! This is the ONLY place in the application that imports `git_adapter` directly.
 
+mod kilo;
 mod startup;
 
 use std::sync::Arc;
@@ -40,6 +41,8 @@ fn save_appearance(store: Arc<ConfyConfigStore>) -> gui_app::SettingsSaver {
         };
         stored.ui_font = incoming.ui_font;
         stored.ui_size = incoming.ui_size;
+        stored.agent_token = incoming.agent_token;
+        stored.agent_model = incoming.agent_model;
         let _ = store.save_settings(&stored);
     })
 }
@@ -50,6 +53,8 @@ fn main() -> iced::Result {
     let initialise = initialiser();
     let clone_repository = cloner();
     let save_settings = save_appearance(Arc::clone(&store));
+    let list_models = kilo::lister();
+    let suggest_commit = kilo::suggester();
     let argument = std::env::args().nth(1);
     if let Some(path) = argument.as_deref() {
         remember(store.as_ref(), path);
@@ -64,7 +69,17 @@ fn main() -> iced::Result {
             clone_repository,
             settings,
             save_settings,
+            list_models,
+            suggest_commit,
         ),
-        None => gui_app::run_welcome(open, initialise, clone_repository, settings, save_settings),
+        None => gui_app::run_welcome(
+            open,
+            initialise,
+            clone_repository,
+            settings,
+            save_settings,
+            list_models,
+            suggest_commit,
+        ),
     }
 }

@@ -89,6 +89,8 @@ mod tests {
             last_repo_path: path.map(str::to_string),
             ui_font: AppSettings::DEFAULT_UI_FONT.to_string(),
             ui_size: AppSettings::DEFAULT_UI_SIZE,
+            agent_token: String::new(),
+            agent_model: AppSettings::DEFAULT_AGENT_MODEL.to_string(),
         }
     }
 
