@@ -31,14 +31,13 @@ pub(crate) fn run_git_stdout(repo_path: &str, args: &[&str]) -> Result<String, D
     }
 }
 
-fn git_command(repo_path: &str, args: &[&str]) -> std::process::Command {
+fn git_program(repo_path: &str, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(GIT_EXECUTABLE);
     command
         .arg("-C")
         .arg(repo_path)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null());
+        .env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -46,6 +45,42 @@ fn git_command(repo_path: &str, args: &[&str]) -> std::process::Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+fn git_command(repo_path: &str, args: &[&str]) -> std::process::Command {
+    let mut command = git_program(repo_path, args);
+    command.stdin(std::process::Stdio::null());
+    command
+}
+
+/// Run git with `stdin` as the patch body. Used by `git apply`.
+pub(crate) fn run_git_stdin(
+    repo_path: &str,
+    args: &[&str],
+    stdin: &[u8],
+) -> Result<(), DomainError> {
+    use std::io::Write;
+    let mut child = git_program(repo_path, args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            DomainError::Unknown(format!("could not run {GIT_EXECUTABLE}: {error}"))
+        })?;
+    if let Some(mut pipe) = child.stdin.take() {
+        pipe.write_all(stdin).map_err(|error| {
+            DomainError::Unknown(format!("could not write to {GIT_EXECUTABLE}: {error}"))
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|error| {
+        DomainError::Unknown(format!("could not run {GIT_EXECUTABLE}: {error}"))
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(DomainError::Unknown(git_failure_text(&output)))
+    }
 }
 
 /// `git commit` with a clean index writes its reason to stdout and leaves stderr empty.
