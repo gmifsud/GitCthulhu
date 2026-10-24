@@ -30,7 +30,7 @@ One window still holds one `GitRepository`. `last_repo_path` is a single path. A
 
 ## Later: the changes list
 
-The changes column is still one row per path. A later cut makes it closer to GitKraken: several paths selected at once, drag between unstaged and staged, stage all, unstage all, discard, delete, and stop tracking. The same paths can be shown as a tree or as a flat list.
+The working tree can be a flat list or a folder tree. Click a path to look at it. Add marks more than one, Select all, or Clear. Stage and Unstage apply to the marked paths. Still later: drag between unstaged and staged, discard or delete several paths at once, and stop tracking.
 
 ## Not in the session yet
 
