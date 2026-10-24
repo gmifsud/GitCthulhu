@@ -2,13 +2,23 @@ use std::future::Future;
 use std::sync::Arc;
 use std::thread;
 
-use core_domain::{DomainError, GitRepository, ViewEvent};
+use core_domain::{DomainError, FileDisposition, GitRepository, Hunk, Patch, ResetMode, ViewEvent};
 use iced::futures::channel::oneshot;
 
 /// A repository adapter that can be shared with background work.
 pub(crate) type SharedRepository = Arc<dyn GitRepository + Send + Sync>;
 
-/// A stage, unstage, or commit requested by the changes panel.
+/// A diff the patch pane asked to read.
+#[derive(Debug, Clone)]
+pub(crate) enum PatchQuery {
+    Commit(String),
+    File {
+        path: String,
+        place: FileDisposition,
+    },
+}
+
+/// A stage, unstage, or commit requested by the ribbon.
 #[derive(Debug, Clone)]
 pub(crate) enum WorktreeEdit {
     Stage(Vec<String>),
@@ -37,6 +47,14 @@ pub(crate) fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
             Ok(branches) => ViewEvent::BranchesUpdated(branches),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
+        match repo.stashes() {
+            Ok(stashes) => ViewEvent::StashesUpdated(stashes),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
+        match repo.tags() {
+            Ok(tags) => ViewEvent::TagsUpdated(tags),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
     ]
 }
 
@@ -51,6 +69,85 @@ fn in_background<T: Send + 'static>(
         let _ = sender.send(job());
     });
     async move { receiver.await.unwrap_or_else(|_| interrupted()) }
+}
+
+pub(crate) fn list_models_in_background(
+    list: crate::ModelLister,
+    token: String,
+) -> impl Future<Output = crate::ModelList> {
+    in_background(
+        move || list(token),
+        || crate::ModelList {
+            ids: Err(DomainError::Unknown(
+                "model list was interrupted".to_string(),
+            )),
+            exchange: crate::ProviderExchange::kilo("model list was interrupted"),
+        },
+    )
+}
+
+pub(crate) fn suggest_commit_in_background(
+    repo: SharedRepository,
+    files: Vec<(String, FileDisposition)>,
+    token: String,
+    model: String,
+    suggest: crate::CommitSuggester,
+) -> impl Future<Output = crate::CommitSuggestion> {
+    in_background(
+        move || {
+            let mut diff = String::new();
+            for (path, place) in files {
+                if diff.len() >= SUGGEST_DIFF_LIMIT {
+                    break;
+                }
+                match repo.file_patch(&path, place) {
+                    Ok(patch) => {
+                        diff.push_str(&format_patch(&patch));
+                        diff.push('\n');
+                    }
+                    Err(error) => {
+                        return crate::CommitSuggestion::local_failure(error_message(&error))
+                    }
+                }
+            }
+            if diff.trim().is_empty() {
+                return crate::CommitSuggestion::local_failure(
+                    "Those files have no diff to describe.",
+                );
+            }
+            if diff.len() > SUGGEST_DIFF_LIMIT {
+                diff.truncate(SUGGEST_DIFF_LIMIT);
+                diff.push_str("\n[diff truncated]\n");
+            }
+            suggest(token, model, diff)
+        },
+        || crate::CommitSuggestion::local_failure("commit suggestion was interrupted"),
+    )
+}
+
+const SUGGEST_DIFF_LIMIT: usize = 12_000;
+
+fn format_patch(patch: &Patch) -> String {
+    let mut text = format!("# {}\n", patch.path);
+    if patch.binary {
+        text.push_str("binary file\n");
+        return text;
+    }
+    for hunk in &patch.hunks {
+        text.push_str(&hunk.header);
+        text.push('\n');
+        for line in &hunk.lines {
+            let mark = match line.kind {
+                core_domain::DiffLineKind::Added => '+',
+                core_domain::DiffLineKind::Removed => '-',
+                core_domain::DiffLineKind::Context => ' ',
+            };
+            text.push(mark);
+            text.push_str(&line.text);
+            text.push('\n');
+        }
+    }
+    text
 }
 
 pub(crate) fn load_repository_in_background(
@@ -122,15 +219,182 @@ pub(crate) fn edit_in_background(
 }
 
 /// Native folder picker. Cancel and a crashed dialog both yield `None`.
-pub(crate) fn choose_repository_folder() -> impl Future<Output = Option<String>> {
+pub(crate) fn choose_repository_folder(
+    title: &'static str,
+) -> impl Future<Output = Option<String>> {
     in_background(
-        || {
+        move || {
             rfd::FileDialog::new()
-                .set_title("Open repository")
+                .set_title(title)
                 .pick_folder()
                 .map(|path| path.to_string_lossy().into_owned())
         },
         || None,
+    )
+}
+
+pub(crate) fn init_in_background(
+    initialise: crate::RepositoryInitialiser,
+    path: String,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || initialise(&path),
+        || Err(DomainError::Unknown("init was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn clone_in_background(
+    clone_repository: crate::RepositoryCloner,
+    url: String,
+    parent: String,
+) -> impl Future<Output = Result<String, DomainError>> {
+    in_background(
+        move || clone_repository(&url, &parent),
+        || Err(DomainError::Unknown("clone was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn load_patch(
+    repo: &dyn GitRepository,
+    query: PatchQuery,
+) -> Result<Vec<Patch>, DomainError> {
+    match query {
+        PatchQuery::Commit(id) => repo.commit_patch(&id),
+        PatchQuery::File { path, place } => repo.file_patch(&path, place).map(|patch| vec![patch]),
+    }
+}
+
+pub(crate) fn load_patch_in_background(
+    repo: SharedRepository,
+    query: PatchQuery,
+) -> impl Future<Output = Result<Vec<Patch>, DomainError>> {
+    in_background(
+        move || load_patch(repo.as_ref(), query),
+        || {
+            Err(DomainError::Unknown(
+                "patch load was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+/// Push, apply, pop, or drop. The index is the `stash@{n}` slot from the last list.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StashAction {
+    Push,
+    Apply(usize),
+    Pop(usize),
+    Drop(usize),
+}
+
+/// Create, rename, or delete one local branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchAction {
+    Create { name: String, start: String },
+    Rename { from: String, to: String },
+    Delete { name: String },
+}
+
+/// Cherry-pick, reset, merge, or rebase the commit or branch the user confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HistoryAction {
+    CherryPick { id: String },
+    Reset { id: String, mode: ResetMode },
+    Merge { name: String },
+    Rebase { name: String },
+}
+
+pub(crate) fn history_in_background(
+    repo: SharedRepository,
+    action: HistoryAction,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || match action {
+            HistoryAction::CherryPick { id } => repo.cherry_pick(&id),
+            HistoryAction::Reset { id, mode } => repo.reset(&id, mode),
+            HistoryAction::Merge { name } => repo.merge_branch(&name),
+            HistoryAction::Rebase { name } => repo.rebase_onto(&name),
+        },
+        || {
+            Err(DomainError::Unknown(
+                "history update was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+pub(crate) fn branch_in_background(
+    repo: SharedRepository,
+    action: BranchAction,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || match action {
+            BranchAction::Create { name, start } => repo.create_branch(&name, &start),
+            BranchAction::Rename { from, to } => repo.rename_branch(&from, &to),
+            BranchAction::Delete { name } => repo.delete_branch(&name),
+        },
+        || {
+            Err(DomainError::Unknown(
+                "branch update was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+pub(crate) fn stash_in_background(
+    repo: SharedRepository,
+    action: StashAction,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || match action {
+            StashAction::Push => repo.stash_push(""),
+            StashAction::Apply(index) => repo.stash_apply(index),
+            StashAction::Pop(index) => repo.stash_pop(index),
+            StashAction::Drop(index) => repo.stash_drop(index),
+        },
+        || Err(DomainError::Unknown("stash was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn discard_in_background(
+    repo: SharedRepository,
+    path: String,
+    place: FileDisposition,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.discard_path(&path, place),
+        || Err(DomainError::Unknown("discard was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn stage_hunk_in_background(
+    repo: SharedRepository,
+    path: String,
+    hunk: Hunk,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.stage_hunk(&path, &hunk),
+        || {
+            Err(DomainError::Unknown(
+                "stage hunk was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+pub(crate) fn discard_hunk_in_background(
+    repo: SharedRepository,
+    path: String,
+    hunk: Hunk,
+    place: FileDisposition,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.discard_hunk(&path, &hunk, place),
+        || {
+            Err(DomainError::Unknown(
+                "discard hunk was interrupted".to_string(),
+            ))
+        },
     )
 }
 
@@ -187,7 +451,38 @@ mod tests {
         fn branches(&self) -> Result<Vec<Branch>, DomainError> {
             unreachable!("status panics first")
         }
+        fn stashes(&self) -> Result<Vec<core_domain::Stash>, DomainError> {
+            unreachable!("status panics first")
+        }
+        fn tags(&self) -> Result<Vec<core_domain::Tag>, DomainError> {
+            unreachable!("status panics first")
+        }
         fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn create_branch(&self, _name: &str, _start_point: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn rename_branch(&self, _from: &str, _to: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn delete_branch(&self, _name: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn cherry_pick(&self, _commit_id: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn reset(
+            &self,
+            _commit_id: &str,
+            _mode: core_domain::ResetMode,
+        ) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn merge_branch(&self, _name: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn rebase_onto(&self, _name: &str) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
         fn fetch(&self) -> Result<(), DomainError> {
@@ -208,12 +503,52 @@ mod tests {
         fn commit(&self, _message: &str) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
+        fn commit_patch(&self, _commit_id: &str) -> Result<Vec<core_domain::Patch>, DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn file_patch(
+            &self,
+            _path: &str,
+            _place: core_domain::FileDisposition,
+        ) -> Result<core_domain::Patch, DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn discard_path(
+            &self,
+            _path: &str,
+            _place: core_domain::FileDisposition,
+        ) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn stage_hunk(&self, _path: &str, _hunk: &core_domain::Hunk) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn discard_hunk(
+            &self,
+            _path: &str,
+            _hunk: &core_domain::Hunk,
+            _place: core_domain::FileDisposition,
+        ) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn stash_push(&self, _message: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn stash_apply(&self, _index: usize) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn stash_pop(&self, _index: usize) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn stash_drop(&self, _index: usize) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
     }
 
     #[test]
     fn load_repository_reports_status_log_and_branches_in_order() {
         let events = load_repository(&populated_repo());
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         assert!(matches!(&events[0], ViewEvent::StatusUpdated(_)));
         assert!(
             matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2 && commits[0].id == "aaaaaaa1")
@@ -221,6 +556,8 @@ mod tests {
         assert!(
             matches!(&events[2], ViewEvent::BranchesUpdated(branches) if branches.len() == 2 && branches[0].is_head)
         );
+        assert!(matches!(&events[3], ViewEvent::StashesUpdated(stashes) if stashes.is_empty()));
+        assert!(matches!(&events[4], ViewEvent::TagsUpdated(tags) if tags.is_empty()));
     }
 
     #[test]
@@ -244,6 +581,8 @@ mod tests {
             status_result: Err(DomainError::RepositoryNotFound),
             log_result: Err(DomainError::RepositoryNotFound),
             branches_result: Err(DomainError::RepositoryNotFound),
+            stashes_result: Err(DomainError::RepositoryNotFound),
+            tags_result: Err(DomainError::RepositoryNotFound),
             ..FakeGitRepository::ok()
         };
         let events = load_repository(&repo);
@@ -258,9 +597,11 @@ mod tests {
         let events = iced::futures::executor::block_on(load_repository_in_background(Arc::new(
             populated_repo(),
         )));
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         assert!(matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2));
         assert!(matches!(&events[2], ViewEvent::BranchesUpdated(branches) if branches.len() == 2));
+        assert!(matches!(&events[3], ViewEvent::StashesUpdated(stashes) if stashes.is_empty()));
+        assert!(matches!(&events[4], ViewEvent::TagsUpdated(tags) if tags.is_empty()));
     }
 
     #[test]
