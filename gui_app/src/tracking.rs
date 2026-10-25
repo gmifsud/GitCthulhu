@@ -34,6 +34,7 @@ mod tests {
             unstaged_files: vec![],
             untracked_files: vec![],
             tracking,
+            head_commit_id: None,
         }
     }
 

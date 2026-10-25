@@ -417,14 +417,13 @@ fn status_of_clean_checkout_is_empty() {
 
     let status = fixture.adapter().status().expect("status");
 
+    assert!(status.staged_files.is_empty());
+    assert!(status.unstaged_files.is_empty());
+    assert!(status.untracked_files.is_empty());
+    assert!(status.tracking.is_none());
     assert_eq!(
-        status,
-        RepoStatus {
-            staged_files: vec![],
-            unstaged_files: vec![],
-            untracked_files: vec![],
-            tracking: None,
-        }
+        status.head_commit_id.as_deref(),
+        Some(fixture.head_commit().to_string().as_str())
     );
 }
 
@@ -785,15 +784,12 @@ fn checkout_switches_branch_and_updates_the_worktree() {
         Some("a on feature\n")
     );
     assert_eq!(fixture.read_file("b.txt").as_deref(), Some("b\n"));
-    assert_eq!(
-        adapter.status(),
-        Ok(RepoStatus {
-            staged_files: vec![],
-            unstaged_files: vec![],
-            untracked_files: vec![],
-            tracking: None,
-        })
-    );
+    let status = adapter.status().expect("status");
+    assert!(status.staged_files.is_empty());
+    assert!(status.unstaged_files.is_empty());
+    assert!(status.untracked_files.is_empty());
+    assert!(status.tracking.is_none());
+    assert!(status.head_commit_id.is_some());
 }
 
 #[test]
@@ -894,15 +890,14 @@ fn stage_unstage_and_commit_a_modification_and_an_untracked_file() {
     adapter
         .stage_paths(&["a.txt".to_string(), "new.txt".to_string()])
         .expect("stage");
+    let status = adapter.status().expect("status");
     assert_eq!(
-        adapter.status().expect("status"),
-        RepoStatus {
-            staged_files: vec!["a.txt".to_string(), "new.txt".to_string()],
-            unstaged_files: vec![],
-            untracked_files: vec![],
-            tracking: None,
-        }
+        status.staged_files,
+        vec!["a.txt".to_string(), "new.txt".to_string()]
     );
+    assert!(status.unstaged_files.is_empty());
+    assert!(status.untracked_files.is_empty());
+    assert!(status.tracking.is_none());
 
     adapter
         .unstage_paths(&["new.txt".to_string()])
@@ -925,15 +920,11 @@ fn stage_unstage_and_commit_a_modification_and_an_untracked_file() {
 
     let log = adapter.log(Some(1)).expect("log");
     assert_eq!(log[0].message, "record the change");
-    assert_eq!(
-        adapter.status().expect("status"),
-        RepoStatus {
-            staged_files: vec![],
-            unstaged_files: vec![],
-            untracked_files: vec![],
-            tracking: None,
-        }
-    );
+    let status = adapter.status().expect("status");
+    assert!(status.staged_files.is_empty());
+    assert!(status.unstaged_files.is_empty());
+    assert!(status.untracked_files.is_empty());
+    assert!(status.tracking.is_none());
 }
 
 #[test]
@@ -1360,7 +1351,7 @@ fn add_worktree_checks_out_branch_and_lists() {
     let path = linked_path(&parent, "linked");
 
     adapter
-        .add_worktree(&path, "feature", false)
+        .add_worktree(&path, "feature", false, None)
         .expect("add worktree on an existing branch");
 
     let list = adapter.worktrees().expect("list worktrees");
@@ -1394,15 +1385,58 @@ fn add_worktree_can_create_a_new_branch() {
     let path = linked_path(&parent, "topic-tree");
 
     adapter
-        .add_worktree(&path, "topic", true)
+        .add_worktree(&path, "topic", true, None)
         .expect("add worktree with a new branch");
 
     let list = adapter.worktrees().expect("list worktrees");
     assert_eq!(list.len(), 2, "{list:?}");
     assert_eq!(list[1].branch, "topic");
-    assert!(adapter.add_worktree(&path, "other", true).is_err());
-    assert!(adapter.add_worktree("-bad", "topic-2", true).is_err());
-    assert!(adapter.add_worktree(&path, "bad name", true).is_err());
+    assert!(adapter.add_worktree(&path, "other", true, None).is_err());
+    assert!(adapter.add_worktree("-bad", "topic-2", true, None).is_err());
+    assert!(adapter.add_worktree(&path, "bad name", true, None).is_err());
+}
+
+#[test]
+fn add_worktree_can_create_a_branch_at_a_commit() {
+    let fixture = TestRepo::with_feature_branch();
+    let adapter = fixture.adapter();
+    let base = fixture.head_commit().to_string();
+    let parent = tempfile::tempdir().expect("temp dir");
+    let path = linked_path(&parent, "from-commit");
+
+    adapter
+        .add_worktree(&path, "from-base", true, Some(&base))
+        .expect("add worktree at commit");
+
+    let list = adapter.worktrees().expect("list");
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[1].branch, "from-base");
+}
+
+#[test]
+fn checkout_detached_points_head_at_the_commit() {
+    let fixture = TestRepo::with_feature_branch();
+    let adapter = fixture.adapter();
+    let main = fixture.head_branch();
+    adapter.checkout_branch(&main).expect("on main");
+    let tip = fixture.head_commit().to_string();
+    adapter.checkout_branch("feature").expect("on feature");
+
+    adapter
+        .checkout_detached(&tip)
+        .expect("detach at main tip");
+
+    let status = adapter.status().expect("status");
+    assert_eq!(status.head_commit_id.as_deref(), Some(tip.as_str()));
+    assert!(
+        !adapter
+            .branches()
+            .expect("branches")
+            .iter()
+            .any(|branch| branch.is_head && !branch.is_remote)
+    );
+    assert!(adapter.checkout_detached("").is_err());
+    assert!(adapter.checkout_detached("-oops").is_err());
 }
 
 #[test]
@@ -1412,7 +1446,7 @@ fn remove_worktree_drops_linked() {
     let parent = tempfile::tempdir().expect("temp dir");
     let path = linked_path(&parent, "linked");
     adapter
-        .add_worktree(&path, "feature", false)
+        .add_worktree(&path, "feature", false, None)
         .expect("add worktree");
     assert_eq!(adapter.worktrees().unwrap().len(), 2);
 
@@ -1433,7 +1467,7 @@ fn force_remove_dirty_linked_worktree() {
     let parent = tempfile::tempdir().expect("temp dir");
     let path = linked_path(&parent, "linked");
     adapter
-        .add_worktree(&path, "feature", false)
+        .add_worktree(&path, "feature", false, None)
         .expect("add worktree");
     std::fs::write(std::path::Path::new(&path).join("a.txt"), "dirty\n").expect("dirty a file");
 

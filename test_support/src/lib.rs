@@ -55,6 +55,7 @@ impl FakeGitRepository {
                 unstaged_files: vec![],
                 untracked_files: vec![],
                 tracking: None,
+                head_commit_id: None,
             }),
             log_result: Ok(vec![]),
             branches_result: Ok(vec![]),
@@ -124,6 +125,7 @@ impl GitRepository for FakeGitRepository {
         _path: &str,
         _branch: &str,
         _create_branch: bool,
+        _start_point: Option<&str>,
     ) -> Result<(), DomainError> {
         self.add_worktree_result.clone()
     }
@@ -133,6 +135,10 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+        self.checkout_result.clone()
+    }
+
+    fn checkout_detached(&self, _commit_id: &str) -> Result<(), DomainError> {
         self.checkout_result.clone()
     }
 

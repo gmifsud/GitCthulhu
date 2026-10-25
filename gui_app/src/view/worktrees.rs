@@ -225,7 +225,16 @@ pub(super) fn worktree_prompt<'a>(
             path,
             branch,
             create_branch,
-        } => create_card(path, branch, *create_branch, busy, tokens, reading),
+            start_point,
+        } => create_card(
+            path,
+            branch,
+            *create_branch,
+            start_point.as_deref(),
+            busy,
+            tokens,
+            reading,
+        ),
         WorktreePrompt::Remove {
             path,
             branch,
@@ -277,6 +286,7 @@ fn create_card<'a>(
     path: &'a str,
     branch: &'a str,
     create_branch: bool,
+    start_point: Option<&'a str>,
     busy: bool,
     tokens: DesignTokens,
     reading: Reading,
@@ -331,12 +341,26 @@ fn create_card<'a>(
         .width(Length::Fill)
         .style(field_style(tokens)),
     );
+    let create_label = match start_point {
+        Some(tip) => format!(
+            "Create this branch at {}",
+            crate::selection::short_hash(tip)
+        ),
+        None => "Create this branch at HEAD".to_string(),
+    };
     card = card.push(
-        checkbox("Create this branch at HEAD", create_branch)
+        checkbox(create_label, create_branch)
             .on_toggle(Message::WorktreeCreateBranchToggled)
             .text_size(reading.size)
             .font(reading.font),
     );
+    if let Some(tip) = start_point {
+        card = card.push(body_text(
+            format!("Start tip: {tip}"),
+            tokens,
+            reading,
+        ));
+    }
     card.push(
         row![
             accent_button(

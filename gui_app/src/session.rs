@@ -63,6 +63,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) diff_lines_limit: usize,
     /// After a successful create, check out this local branch name in this session.
     pub(crate) pending_checkout: Option<String>,
+    /// When true, the history graph shows only commits reachable from this session's HEAD.
+    pub(crate) focus_current_branch: bool,
 }
 
 impl WorktreeSession {
@@ -86,6 +88,7 @@ impl WorktreeSession {
             focused_diff_path: None,
             diff_lines_limit: DIFF_LINES_PER_PAGE,
             pending_checkout: None,
+            focus_current_branch: false,
         }
     }
 

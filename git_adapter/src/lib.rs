@@ -108,11 +108,19 @@ impl GitRepository for GitoxideAdapter {
     fn status(&self) -> Result<RepoStatus, DomainError> {
         let repo = self.open_repo()?;
         let head_is_unborn = repo.head().map_err(unknown)?.is_unborn();
+        let head_commit_id = if head_is_unborn {
+            None
+        } else {
+            repo.head()
+                .ok()
+                .and_then(|head| head.id().map(|id| id.to_string()))
+        };
         let mut status = RepoStatus {
             staged_files: staged_paths(&repo, head_is_unborn)?,
             unstaged_files: vec![],
             untracked_files: vec![],
             tracking: tracking_status(&self.repo_path)?,
+            head_commit_id,
         };
 
         // Index ↔ worktree: modified/removed tracked files and untracked files, one path each.
@@ -242,15 +250,30 @@ impl GitRepository for GitoxideAdapter {
         path: &str,
         branch: &str,
         create_branch: bool,
+        start_point: Option<&str>,
     ) -> Result<(), DomainError> {
         self.open_repo()?;
         require_worktree_path(path)?;
         require_branch_name(branch)?;
         if create_branch {
-            run_git(
-                &self.repo_path,
-                &["worktree", "add", "-b", branch, "--", path],
-            )
+            match start_point {
+                Some(start) => {
+                    if start.is_empty() || start.starts_with('-') {
+                        return Err(DomainError::Unknown(format!(
+                            "invalid start point: {start:?}"
+                        )));
+                    }
+                    // `git worktree add -b <branch> <path> <commit-ish>`
+                    run_git(
+                        &self.repo_path,
+                        &["worktree", "add", "-b", branch, path, start],
+                    )
+                }
+                None => run_git(
+                    &self.repo_path,
+                    &["worktree", "add", "-b", branch, "--", path],
+                ),
+            }
         } else {
             run_git(&self.repo_path, &["worktree", "add", "--", path, branch])
         }
@@ -283,6 +306,16 @@ impl GitRepository for GitoxideAdapter {
             )));
         }
         run_git(&self.repo_path, &["switch", "--no-guess", branch_name])
+    }
+
+    fn checkout_detached(&self, commit_id: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if commit_id.is_empty() || commit_id.starts_with('-') {
+            return Err(DomainError::Unknown(format!(
+                "invalid commit id: {commit_id:?}"
+            )));
+        }
+        run_git(&self.repo_path, &["checkout", "--detach", commit_id])
     }
 
     fn create_branch(&self, name: &str, start_point: &str) -> Result<(), DomainError> {

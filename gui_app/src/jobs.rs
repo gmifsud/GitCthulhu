@@ -175,6 +175,16 @@ pub(crate) fn checkout_in_background(
     )
 }
 
+pub(crate) fn checkout_detached_in_background(
+    repo: SharedRepository,
+    commit_id: String,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.checkout_detached(&commit_id),
+        || Err(DomainError::Unknown("detach was interrupted".to_string())),
+    )
+}
+
 pub(crate) fn fetch_in_background(
     repo: SharedRepository,
 ) -> impl Future<Output = Result<(), DomainError>> {
@@ -270,15 +280,23 @@ pub(crate) fn worktrees_in_background(
     )
 }
 
-/// `git worktree add`. With `create_branch`, `branch` is made at HEAD; otherwise it must exist.
+/// `git worktree add`. With `create_branch`, `branch` is made at `start_point` or HEAD.
 pub(crate) fn add_worktree_in_background(
     repo: SharedRepository,
     path: String,
     branch: String,
     create_branch: bool,
+    start_point: Option<String>,
 ) -> impl Future<Output = Result<(), DomainError>> {
     in_background(
-        move || repo.add_worktree(&path, &branch, create_branch),
+        move || {
+            repo.add_worktree(
+                &path,
+                &branch,
+                create_branch,
+                start_point.as_deref(),
+            )
+        },
         || {
             Err(DomainError::Unknown(
                 "worktree create was interrupted".to_string(),
@@ -547,6 +565,7 @@ mod tests {
             _path: &str,
             _branch: &str,
             _create_branch: bool,
+            _start_point: Option<&str>,
         ) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
@@ -554,6 +573,9 @@ mod tests {
             unreachable!("not used by load_repository")
         }
         fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn checkout_detached(&self, _commit_id: &str) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
         fn create_branch(&self, _name: &str, _start_point: &str) -> Result<(), DomainError> {
@@ -850,6 +872,7 @@ mod tests {
             r"D:\repo-wt".to_string(),
             "topic".to_string(),
             true,
+            None,
         ));
         let removed = iced::futures::executor::block_on(remove_worktree_in_background(
             shared,

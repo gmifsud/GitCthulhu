@@ -1,10 +1,11 @@
 use crate::app::Message;
+use crate::context_menu::ContextTarget;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use core_domain::{Branch, Stash, Tag};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
 use super::chrome::{
@@ -98,6 +99,10 @@ fn branch_list<'a>(
                 Message::ChooseBranch(branch.name.clone()),
                 selected,
                 branch.is_head,
+                Some(ContextTarget::LocalBranch {
+                    name: branch.name.clone(),
+                    tip: branch.tip.clone(),
+                }),
                 tokens,
                 reading,
             ));
@@ -116,6 +121,7 @@ fn branch_list<'a>(
                 }),
                 selected,
                 false,
+                None,
                 tokens,
                 reading,
             ));
@@ -135,6 +141,7 @@ fn branch_list<'a>(
                 }),
                 selected,
                 false,
+                None,
                 tokens,
                 reading,
             ));
@@ -158,6 +165,7 @@ fn branch_list<'a>(
                 }),
                 selected,
                 false,
+                None,
                 tokens,
                 reading,
             ));
@@ -177,12 +185,14 @@ fn branch_list<'a>(
     list.into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ref_row<'a>(
     mark: &'static str,
     label: String,
     message: Message,
     selected: bool,
     accent: bool,
+    context: Option<ContextTarget>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -200,7 +210,7 @@ fn ref_row<'a>(
     } else {
         tokens.text_secondary
     };
-    button(
+    let row = button(
         row![
             glyph(mark, reading.size, mark_color, &reading),
             text(label)
@@ -233,8 +243,18 @@ fn ref_row<'a>(
             },
             shadow: Shadow::default(),
         }
-    })
-    .into()
+    });
+    if let Some(target) = context {
+        mouse_area(row)
+            .on_right_press(Message::OpenContextMenu {
+                target,
+                x: 0.0,
+                y: 0.0,
+            })
+            .into()
+    } else {
+        row.into()
+    }
 }
 
 pub(crate) fn matches_query(name: &str, query: &str) -> bool {

@@ -117,6 +117,8 @@ pub struct RepoStatus {
     pub untracked_files: Vec<String>,
     /// `None` when the current branch has no upstream, or `HEAD` is detached or unborn.
     pub tracking: Option<TrackingStatus>,
+    /// Peeled `HEAD` commit id when born; `None` when unborn. Used for focus-current when detached.
+    pub head_commit_id: Option<String>,
 }
 
 /// Domain errors that can occur during Git operations.

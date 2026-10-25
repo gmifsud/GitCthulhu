@@ -1,14 +1,16 @@
 use crate::app::{GitApp, Message};
 use crate::commit_graph::{graph_rows, graph_width, GraphCell, ROW_HEIGHT};
+use crate::context_menu::ContextTarget;
 use crate::jobs::COMMIT_PAGE_SIZE;
+use crate::reachability::{filter_dag_nodes, session_head_tip};
 use crate::ref_pills::{refs_at, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
 use crate::session::{basename, WorktreeSession};
 use crate::theme::DesignTokens;
-use core_domain::Commit;
+use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas, column, container, row, scrollable, text};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,11 +35,39 @@ pub(super) fn history_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let shown_nodes = &app.session().state.dag_nodes[..app.session().state.dag_nodes.len().min(COMMIT_PAGE_SIZE)];
+    let session = app.session();
+    let focus = session.focus_current_branch;
+    let head_tip = session_head_tip(
+        &session.state.branches,
+        session
+            .state
+            .current_status
+            .as_ref()
+            .and_then(|status| status.head_commit_id.as_deref()),
+    );
+    let filtered_owned: Vec<DagNode> = if focus {
+        head_tip
+            .as_deref()
+            .map(|tip| {
+                filter_dag_nodes(tip, &session.state.commits, &session.state.dag_nodes)
+                    .into_iter()
+                    .take(COMMIT_PAGE_SIZE)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let page_end = session.state.dag_nodes.len().min(COMMIT_PAGE_SIZE);
+    let shown_nodes: &[DagNode] = if focus {
+        &filtered_owned
+    } else {
+        &session.state.dag_nodes[..page_end]
+    };
     let rows = graph_rows(shown_nodes);
     let lanes_width = Length::Fixed(graph_width(&rows).max(MIN_GRAPH_COL_WIDTH));
-    let commits_by_id: HashMap<&str, &Commit> = app
-        .session()
+    let commits_by_id: HashMap<&str, &Commit> = session
         .state
         .commits
         .iter()
@@ -48,11 +78,14 @@ pub(super) fn history_pane<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let mut commit_rows = column![column_headers(lanes_width, tokens, reading)];
+    let mut commit_rows = column![column_headers(lanes_width, focus, tokens, reading)];
 
     // One WIP row per open session with changes, in tab order. Only the active tab's row can
-    // be selected: the selection belongs to that session.
+    // be selected: the selection belongs to that session. Focus-current hides other sessions.
     for (index, session) in app.sessions.iter().enumerate() {
+        if focus && index != app.active {
+            continue;
+        }
         if !session_dirty(session) {
             continue;
         }
@@ -123,18 +156,34 @@ pub(super) fn history_pane<'a>(
         .spacing(COL_GAP)
         .height(Length::Fixed(ROW_HEIGHT))
         .align_y(Alignment::Center);
+        let id = commit.id.clone();
+        let right_target = ContextTarget::Commit {
+            id: commit.id.clone(),
+        };
         commit_rows = commit_rows.push(
-            button(label)
-                .width(Length::Fill)
-                .padding(0)
-                .on_press(Message::Select(Selection::Commit {
-                    id: commit.id.clone(),
-                }))
-                .style(move |_theme, status| commit_style(tokens, status, selected)),
+            mouse_area(
+                button(label)
+                    .width(Length::Fill)
+                    .padding(0)
+                    .on_press(Message::Select(Selection::Commit { id }))
+                    .style(move |_theme, status| commit_style(tokens, status, selected)),
+            )
+            .on_right_press(Message::OpenContextMenu {
+                target: right_target,
+                x: 0.0,
+                y: 0.0,
+            }),
         );
     }
 
-    if shown_nodes.is_empty() && !app.sessions.iter().any(session_dirty) {
+    let any_wip = if focus {
+        app.sessions
+            .get(app.active)
+            .is_some_and(session_dirty)
+    } else {
+        app.sessions.iter().any(session_dirty)
+    };
+    if shown_nodes.is_empty() && !any_wip {
         commit_rows = commit_rows.push(
             text("No commits yet")
                 .font(reading.font)
@@ -154,9 +203,15 @@ pub(super) fn history_pane<'a>(
 
 fn column_headers<'a>(
     lanes_width: Length,
+    focus: bool,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    let focus_label = if focus {
+        "Focus current · on"
+    } else {
+        "Focus current"
+    };
     row![
         container(
             text("Graph")
@@ -171,11 +226,52 @@ fn column_headers<'a>(
         header_cell("Description", Length::Fill, tokens, reading),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
+        button(
+            text(focus_label)
+                .font(reading.font)
+                .size(HEADER_SIZE)
+                .style(move |_| text::Style {
+                    color: Some(if focus {
+                        tokens.accent_primary
+                    } else {
+                        tokens.text_muted
+                    }),
+                }),
+        )
+        .padding([2, 6])
+        .on_press(Message::ToggleFocusCurrentBranch)
+        .style(move |_theme, status| focus_chip_style(tokens, status, focus)),
     ]
     .spacing(COL_GAP)
     .padding([4, 0])
     .align_y(Alignment::Center)
     .into()
+}
+
+fn focus_chip_style(tokens: DesignTokens, status: Status, on: bool) -> button::Style {
+    let raised = on || matches!(status, Status::Hovered | Status::Pressed);
+    button::Style {
+        background: Some(Background::Color(if raised {
+            tokens.bg_raised
+        } else {
+            Color::TRANSPARENT
+        })),
+        text_color: if on {
+            tokens.accent_primary
+        } else {
+            tokens.text_muted
+        },
+        border: Border {
+            color: if on {
+                tokens.accent_primary
+            } else {
+                tokens.chip_border
+            },
+            width: 1.0,
+            radius: 3.0.into(),
+        },
+        shadow: Shadow::default(),
+    }
 }
 
 fn header_cell<'a>(
@@ -384,6 +480,7 @@ mod tests {
             unstaged_files: if dirty { vec!["a.rs".to_string()] } else { Vec::new() },
             untracked_files: Vec::new(),
             tracking: None,
+            head_commit_id: None,
         });
         session.state.branches = head
             .map(|name| {

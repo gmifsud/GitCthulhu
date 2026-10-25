@@ -56,6 +56,10 @@ pub(crate) struct GitApp {
     pub(crate) worktree_busy: bool,
     /// The path being opened into a tab; further opens are ignored until it lands.
     worktree_opening: Option<String>,
+    /// Right-click menu over a commit or local branch.
+    pub(crate) context_menu: Option<crate::context_menu::ContextMenuState>,
+    /// Commit id waiting for detach confirmation when the worktree is dirty.
+    pub(crate) confirm_detach: Option<String>,
     /// Authoritative, global settings. Fanned into each session's `AppState`.
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
@@ -248,6 +252,12 @@ pub(crate) enum Message {
     /// The path is the session that asked, so a result for a closed tab is dropped.
     WorktreesLoaded(String, Result<Vec<Worktree>, DomainError>),
     AskCreateWorktree,
+    /// Prefill the create dialog from a context-menu target.
+    AskCreateWorktreeFrom {
+        branch: String,
+        create_branch: bool,
+        start_point: Option<String>,
+    },
     AskRemoveWorktree {
         path: String,
     },
@@ -262,6 +272,23 @@ pub(crate) enum Message {
         force: bool,
     },
     CancelWorktree,
+    /// Toggle Focus-current on the active session's graph.
+    ToggleFocusCurrentBranch,
+    /// Open the right-click menu at approximate window coordinates.
+    OpenContextMenu {
+        target: crate::context_menu::ContextTarget,
+        x: f32,
+        y: f32,
+    },
+    CloseContextMenu,
+    /// Run a context-menu action (closes the menu first).
+    ContextMenuAction(crate::context_menu::ContextActionKind),
+    /// Detach HEAD to this commit; confirms when the worktree is dirty.
+    AskDetachHead {
+        commit_id: String,
+    },
+    ConfirmDetachHead,
+    CancelDetach,
     /// `git worktree add` finished. The first path is the session that ran it.
     WorktreeCreated {
         session: String,
@@ -282,8 +309,10 @@ pub(crate) enum WorktreePrompt {
     Create {
         path: String,
         branch: String,
-        /// `-b`: make `branch` at HEAD. Off checks out an existing local branch.
+        /// `-b`: make `branch`. Off checks out an existing local branch.
         create_branch: bool,
+        /// When creating a branch, tip to start from (`None` = HEAD).
+        start_point: Option<String>,
     },
     Remove {
         path: String,
@@ -355,6 +384,8 @@ impl GitApp {
             worktree_prompt: None,
             worktree_busy: false,
             worktree_opening: None,
+            context_menu: None,
+            confirm_detach: None,
             settings,
             opening: false,
             panes,
@@ -431,6 +462,8 @@ impl GitApp {
         self.tab_picker_open = false;
         self.branch_list_open = false;
         self.branch_query.clear();
+        self.context_menu = None;
+        self.confirm_detach = None;
     }
 
     #[cfg(test)]
@@ -1440,6 +1473,7 @@ impl GitApp {
                     path: String::new(),
                     branch: String::new(),
                     create_branch: true,
+                    start_point: None,
                 });
                 Task::none()
             }
@@ -1492,6 +1526,61 @@ impl GitApp {
                 self.worktree_prompt = None;
                 Task::none()
             }
+            Message::AskCreateWorktreeFrom {
+                branch,
+                create_branch,
+                start_point,
+            } => {
+                if self.worktree_busy || self.active_session().is_none() {
+                    return Task::none();
+                }
+                self.close_prompts();
+                self.error = None;
+                self.worktree_prompt = Some(WorktreePrompt::Create {
+                    path: String::new(),
+                    branch,
+                    create_branch,
+                    start_point,
+                });
+                Task::none()
+            }
+            Message::ToggleFocusCurrentBranch => {
+                if let Some(session) = self.active_session_mut() {
+                    session.focus_current_branch = !session.focus_current_branch;
+                }
+                Task::none()
+            }
+            Message::OpenContextMenu { target, x, y } => {
+                self.context_menu = Some(crate::context_menu::ContextMenuState { target, x, y });
+                Task::none()
+            }
+            Message::CloseContextMenu => {
+                self.context_menu = None;
+                Task::none()
+            }
+            Message::ContextMenuAction(kind) => {
+                self.context_menu = None;
+                match kind {
+                    crate::context_menu::ContextActionKind::OpenAsWorktree {
+                        branch,
+                        create_branch,
+                        start_point,
+                    } => self.update(Message::AskCreateWorktreeFrom {
+                        branch,
+                        create_branch,
+                        start_point,
+                    }),
+                    crate::context_menu::ContextActionKind::DetachHead { commit_id } => {
+                        self.update(Message::AskDetachHead { commit_id })
+                    }
+                }
+            }
+            Message::AskDetachHead { commit_id } => self.ask_detach_head(commit_id),
+            Message::ConfirmDetachHead => self.run_detach_head(),
+            Message::CancelDetach => {
+                self.confirm_detach = None;
+                Task::none()
+            }
             Message::WorktreeCreated {
                 session,
                 path,
@@ -1541,6 +1630,8 @@ impl GitApp {
 
     /// Close every modal that belongs to the window rather than a tab.
     fn close_prompts(&mut self) {
+        self.context_menu = None;
+        self.confirm_detach = None;
         self.confirm_discard = None;
         self.confirm_drop = None;
         self.branch_prompt = None;
@@ -1729,6 +1820,7 @@ impl GitApp {
             path,
             branch,
             create_branch,
+            start_point,
         }) = self.worktree_prompt.clone()
         else {
             return Task::none();
@@ -1754,12 +1846,58 @@ impl GitApp {
         self.error = None;
         let created = path.clone();
         Task::perform(
-            add_worktree_in_background(repo, path, branch, create_branch),
+            add_worktree_in_background(repo, path, branch, create_branch, start_point),
             move |result| Message::WorktreeCreated {
                 session: session.clone(),
                 path: created.clone(),
                 result,
             },
+        )
+    }
+
+    fn ask_detach_head(&mut self, commit_id: String) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading || commit_id.trim().is_empty() {
+            return Task::none();
+        }
+        let dirty = session
+            .state
+            .current_status
+            .as_ref()
+            .is_some_and(|status| {
+                !status.staged_files.is_empty()
+                    || !status.unstaged_files.is_empty()
+                    || !status.untracked_files.is_empty()
+            });
+        if dirty {
+            self.confirm_detach = Some(commit_id);
+            Task::none()
+        } else {
+            self.confirm_detach = Some(commit_id);
+            self.run_detach_head()
+        }
+    }
+
+    fn run_detach_head(&mut self) -> Task<Message> {
+        let Some(commit_id) = self.confirm_detach.take() else {
+            return Task::none();
+        };
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        let repo = session.adapter.clone();
+        let path = session.path.clone();
+        self.session_mut().state.loading = true;
+        self.error = None;
+        use crate::jobs::checkout_detached_in_background;
+        Task::perform(
+            checkout_detached_in_background(repo, commit_id),
+            move |result| Message::CheckoutFinished(path.clone(), result),
         )
     }
 
@@ -2210,6 +2348,12 @@ impl GitApp {
     }
 
     fn handle_escape(&mut self) -> Task<Message> {
+        if self.confirm_detach.is_some() {
+            return self.update(Message::CancelDetach);
+        }
+        if self.context_menu.is_some() {
+            return self.update(Message::CloseContextMenu);
+        }
         if self.confirm_discard.is_some() {
             return self.update(Message::CancelDiscard);
         }
@@ -2869,6 +3013,7 @@ mod tests {
             unstaged_files: vec!["b.rs".to_string()],
             untracked_files: vec![],
             tracking: None,
+            head_commit_id: None,
         });
 
         let _ = app.update(Message::SelectAllFiles);
@@ -4394,5 +4539,76 @@ mod tests {
 
         let _ = app.update(Message::Escape);
         assert!(!app.tab_picker_open);
+    }
+
+    #[test]
+    fn focus_current_toggles_on_the_active_session() {
+        let mut app = two_session_app();
+        assert!(!app.session().focus_current_branch);
+
+        let _ = app.update(Message::ToggleFocusCurrentBranch);
+        assert!(app.session().focus_current_branch);
+
+        let _ = app.update(Message::SelectWorktreeTab(1));
+        assert!(!app.session().focus_current_branch);
+        assert!(app.sessions[0].focus_current_branch);
+    }
+
+    #[test]
+    fn create_from_context_prefills_start_point() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskCreateWorktreeFrom {
+            branch: "wip/abcdef0".to_string(),
+            create_branch: true,
+            start_point: Some("abcdef012345".to_string()),
+        });
+
+        assert!(matches!(
+            &app.worktree_prompt,
+            Some(WorktreePrompt::Create {
+                branch,
+                create_branch: true,
+                start_point: Some(start),
+                ..
+            }) if branch == "wip/abcdef0" && start == "abcdef012345"
+        ));
+    }
+
+    #[test]
+    fn dirty_detach_asks_for_confirm() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["a.rs".to_string()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: Some("abc".into()),
+        });
+
+        let _ = app.update(Message::AskDetachHead {
+            commit_id: "deadbeef".to_string(),
+        });
+
+        assert_eq!(app.confirm_detach.as_deref(), Some("deadbeef"));
+        assert!(!app.session().state.loading);
+    }
+
+    #[test]
+    fn clean_detach_starts_the_job() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec![],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: Some("abc".into()),
+        });
+
+        let _ = app.update(Message::AskDetachHead {
+            commit_id: "deadbeef".to_string(),
+        });
+
+        assert!(app.confirm_detach.is_none());
+        assert!(app.session().state.loading);
     }
 }

@@ -263,6 +263,7 @@ mod tests {
                 unstaged_files: vec![],
                 untracked_files: vec![],
                 tracking: None,
+                head_commit_id: None,
             })),
             "No upstream"
         );
@@ -276,6 +277,7 @@ mod tests {
                     ahead: 1,
                     behind: 0,
                 }),
+                head_commit_id: None,
             })),
             "origin/dev ↑1"
         );

@@ -42,6 +42,25 @@ pub(super) fn confirm_drop_stash<'a>(
     )
 }
 
+pub(super) fn confirm_detach<'a>(
+    commit_id: &str,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let short = crate::selection::short_hash(commit_id);
+    dialog(
+        "Detach HEAD?",
+        short,
+        "HEAD will point at this commit. Local changes may block the checkout or carry over.",
+        false,
+        "Detach",
+        Message::ConfirmDetachHead,
+        Message::CancelDetach,
+        tokens,
+        reading,
+    )
+}
+
 pub(super) fn history_prompt<'a>(
     prompt: &HistoryPrompt,
     tokens: DesignTokens,
