@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::app::{GitApp, Message};
 use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow};
 use crate::selection::Selection;
@@ -6,9 +8,16 @@ use core_domain::FileDisposition;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{accent_button, command_button, panel_style, section_label, Reading};
+use super::chrome::{
+    accent_button, command_button, field_style, fold_mark, glyph, panel_style, section_label,
+    Reading,
+};
+
+/// Rows drawn per section. Each row is two buttons, so a huge untracked set would stall layout.
+/// "Select all" still covers every file; only the drawing is bounded.
+const FILE_ROWS_SHOWN: usize = 500;
 
 pub(super) fn changes_pane<'a>(
     app: &'a GitApp,
@@ -24,8 +33,9 @@ pub(super) fn changes_pane<'a>(
         row![
             text_input("Commit message", &app.commit_message)
                 .on_input(Message::CommitMessageChanged)
-                .padding(8)
-                .width(Length::Fill),
+                .padding(6)
+                .width(Length::Fill)
+                .style(field_style(tokens)),
             command_button(
                 "Suggest",
                 Message::SuggestCommit,
@@ -97,8 +107,8 @@ pub(super) fn changes_pane<'a>(
             color: Some(tokens.text_muted),
         }),
     ]
-    .spacing(8)
-    .padding(12);
+    .spacing(4)
+    .padding(6);
 
     match &app.state.current_status {
         None => {
@@ -124,16 +134,41 @@ pub(super) fn changes_pane<'a>(
                 );
             }
             for section in sections {
-                let mut files =
-                    column![text(format!("{} ({})", section.title, section.files.len()))
-                        .font(reading.font)
-                        .size((reading.size - 2.0).max(11.0))
-                        .style(move |_| text::Style {
-                            color: Some(tokens.text_muted),
-                        })]
-                    .spacing(0);
-                for row_item in change_rows(section.files, section.place, app.files_as_tree) {
-                    files = files.push(change_line(&row_item, app, selection, tokens, reading));
+                let folded = app.collapsed_sections.contains(&section.place);
+                let mut files = column![section_header(
+                    section.title,
+                    section.files.len(),
+                    folded,
+                    section.place,
+                    tokens,
+                    reading,
+                )]
+                .spacing(0);
+                if !folded {
+                    let collapsed = collapsed_prefixes(app, section.place);
+                    let rows =
+                        change_rows(section.files, section.place, app.files_as_tree, &collapsed);
+                    let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
+                    for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
+                        files = files.push(change_line(
+                            row_item,
+                            section.place,
+                            app,
+                            selection,
+                            tokens,
+                            reading,
+                        ));
+                    }
+                    if hidden > 0 {
+                        files = files.push(
+                            text(format!("… and {hidden} more"))
+                                .font(reading.font)
+                                .size((reading.size - 2.0).max(11.0))
+                                .style(move |_| text::Style {
+                                    color: Some(tokens.text_muted),
+                                }),
+                        );
+                    }
                 }
                 changes = changes.push(files);
             }
@@ -147,8 +182,46 @@ pub(super) fn changes_pane<'a>(
         .into()
 }
 
+fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {
+    app.collapsed_dirs
+        .iter()
+        .filter(|(entry_place, _)| *entry_place == place)
+        .map(|(_, prefix)| prefix.clone())
+        .collect()
+}
+
+fn section_header<'a>(
+    title: &'static str,
+    count: usize,
+    folded: bool,
+    place: FileDisposition,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let size = (reading.size - 2.0).max(11.0);
+    button(
+        row![
+            glyph(fold_mark(folded), size, tokens.text_muted, &reading),
+            text(format!("{title} ({count})"))
+                .font(reading.font)
+                .size(size)
+                .style(move |_| text::Style {
+                    color: Some(tokens.text_muted),
+                }),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([2, 0])
+    .width(Length::Fill)
+    .on_press(Message::ToggleChangeSection(place))
+    .style(move |_theme, status| fold_button_style(tokens, status))
+    .into()
+}
+
 fn change_line<'a>(
     row_item: &ChangeRow,
+    place: FileDisposition,
     app: &'a GitApp,
     selection: &Selection,
     tokens: DesignTokens,
@@ -162,17 +235,43 @@ fn change_line<'a>(
         .width(Length::Fixed(depth as f32 * 10.0))
         .height(Length::Fixed(1.0));
     match row_item {
-        ChangeRow::Directory { name, .. } => row![
-            indent,
-            text(name.clone())
-                .font(reading.font)
-                .size(row_size)
-                .line_height(1.0)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_muted),
-                }),
-        ]
-        .into(),
+        ChangeRow::Directory {
+            name,
+            prefix,
+            hidden,
+            ..
+        } => {
+            let folded = *hidden > 0;
+            let label = if folded {
+                format!("{name} ({hidden})")
+            } else {
+                name.clone()
+            };
+            row![
+                indent,
+                button(
+                    row![
+                        glyph(fold_mark(folded), row_size, tokens.text_muted, &reading),
+                        text(label)
+                            .font(reading.font)
+                            .size(row_size)
+                            .line_height(1.0)
+                            .style(move |_| text::Style {
+                                color: Some(tokens.text_secondary),
+                            }),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .padding([1, 4])
+                .on_press(Message::ToggleChangeDir {
+                    prefix: prefix.clone(),
+                    place,
+                })
+                .style(move |_theme, status| fold_button_style(tokens, status)),
+            ]
+            .into()
+        }
         ChangeRow::File {
             name, path, place, ..
         } => {
@@ -217,6 +316,27 @@ fn change_line<'a>(
     }
 }
 
+fn fold_button_style(
+    tokens: DesignTokens,
+    status: Status,
+) -> iced::widget::button::Style {
+    let hot = matches!(status, Status::Hovered | Status::Pressed);
+    iced::widget::button::Style {
+        background: Some(Background::Color(if hot {
+            tokens.border
+        } else {
+            Color::TRANSPARENT
+        })),
+        text_color: tokens.text_muted,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 2.0.into(),
+        },
+        shadow: Shadow::default(),
+    }
+}
+
 fn compact_mark<'a>(
     label: &'a str,
     message: Message,
@@ -224,31 +344,46 @@ fn compact_mark<'a>(
     tokens: DesignTokens,
     size: f32,
 ) -> Element<'a, Message> {
-    button(text(label).size(size).line_height(1.0))
-        .padding([1, 4])
-        .on_press(message)
-        .style(move |_theme, status| {
-            let hot = matches!(status, Status::Hovered | Status::Pressed);
-            iced::widget::button::Style {
-                background: Some(Background::Color(if marked || hot {
-                    tokens.border
-                } else {
-                    Color::TRANSPARENT
-                })),
-                text_color: if marked {
+    button(
+        text(label)
+            .size(size)
+            .line_height(1.0)
+            .style(move |_| text::Style {
+                color: Some(if marked {
                     tokens.accent_primary
                 } else {
                     tokens.text_muted
+                }),
+            }),
+    )
+    .padding([1, 5])
+    .on_press(message)
+    .style(move |_theme, status| {
+        let hot = matches!(status, Status::Hovered | Status::Pressed);
+        iced::widget::button::Style {
+            background: Some(Background::Color(if marked || hot {
+                tokens.chip
+            } else {
+                Color::TRANSPARENT
+            })),
+            text_color: if marked {
+                tokens.accent_primary
+            } else {
+                tokens.text_muted
+            },
+            border: Border {
+                color: if marked || hot {
+                    tokens.chip_border
+                } else {
+                    Color::TRANSPARENT
                 },
-                border: Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 2.0.into(),
-                },
-                shadow: Shadow::default(),
-            }
-        })
-        .into()
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            shadow: Shadow::default(),
+        }
+    })
+    .into()
 }
 
 fn compact_name<'a>(
