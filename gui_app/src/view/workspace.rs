@@ -5,14 +5,17 @@ use crate::theme::DesignTokens;
 use iced::widget::pane_grid::{self, Content};
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::changes::changes_pane;
-use super::chrome::{command_button, hairline, panel_style, symbol_reading, Reading};
+use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
-use super::history::history_pane;
-use super::patch::patch_pane;
+use super::history::{history_pane, relative_age};
+use super::patch::{patch_pane, patch_stats};
 use super::refs::branch_switcher;
+use crate::selection::short_hash;
+use iced::widget::button::Status;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PANE_SPACING: f32 = 4.0;
 const SPLIT_HIT: f32 = 8.0;
@@ -20,12 +23,11 @@ const HEAD_PADDING_Y: f32 = 4.0;
 const HEAD_PADDING_X: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 const FILES_RAIL_WIDTH: f32 = 36.0;
-const CHIP_PADDING_Y: f32 = 3.0;
-const CHIP_PADDING_X: f32 = 9.0;
-const CHIP_RADIUS: f32 = 4.0;
-const FILES_TITLE: &str = "Files";
-const COLLAPSE_FILES: &str = "⟩";
-const EXPAND_FILES: &str = "⟨";
+const FILES_TITLE: &str = "Changes";
+const GRAPH_TITLE: &str = "History";
+const DIFF_TITLE: &str = "Diff";
+const COLLAPSE_FILES: &str = "⟨";
+const EXPAND_FILES: &str = "⟩";
 
 pub(super) fn workspace<'a>(
     app: &'a GitApp,
@@ -34,14 +36,14 @@ pub(super) fn workspace<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let grid = pane_grid::PaneGrid::new(&app.panes, move |_pane, kind, _maximised| {
+        let surface = kind;
         let body = match kind {
             WorkspacePane::Graph => graph(app, selection, app.layout, tokens, reading),
             WorkspacePane::Inspector => inspector(app, selection, app.layout, tokens, reading),
             WorkspacePane::Diff => diff(app, selection, app.layout, tokens, reading),
-            WorkspacePane::Files => files_rail(app, app.layout, tokens, reading),
+            WorkspacePane::Files => files_rail(app, selection, app.layout, tokens, reading),
         };
-        let ruled = matches!(kind, WorkspacePane::Inspector | WorkspacePane::Files);
-        Content::new(body).style(move |_theme| panel_style(tokens, ruled))
+        Content::new(body).style(move |_theme| pane_surface(tokens, *surface))
     })
     .spacing(PANE_SPACING)
     .on_resize(SPLIT_HIT, Message::PaneResized)
@@ -54,14 +56,37 @@ pub(super) fn workspace<'a>(
 
     let rail = collapsed_files_rail(app.layout, tokens, reading);
     match app.layout {
-        LayoutPreset::Stacked => column![grid, rail]
+        LayoutPreset::Stacked => column![rail, grid]
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
-        LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => row![grid, rail]
+        LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => row![rail, grid]
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
+    }
+}
+
+fn pane_surface(tokens: DesignTokens, kind: WorkspacePane) -> container::Style {
+    let background = match kind {
+        WorkspacePane::Graph => tokens.bg_app,
+        WorkspacePane::Inspector => tokens.bg_sidebar,
+        WorkspacePane::Diff => tokens.bg_raised,
+        WorkspacePane::Files => tokens.bg_sidebar,
+    };
+    container::Style {
+        background: Some(Background::Color(background)),
+        text_color: Some(tokens.text_secondary),
+        border: Border {
+            color: tokens.border,
+            width: if matches!(kind, WorkspacePane::Graph) {
+                0.0
+            } else {
+                1.0
+            },
+            radius: 0.0.into(),
+        },
+        shadow: Shadow::default(),
     }
 }
 
@@ -73,19 +98,19 @@ fn graph<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let _ = layout;
-    let mut body = column![].width(Length::Fill).height(Length::Fill);
     let commands = placed_commands(
         selection,
         can_commit(app),
         can_stash(app),
         CommandPlace::Graph,
     );
-    if !commands.is_empty() {
-        body = body.push(command_head(&commands, selection, app, tokens, reading));
-    }
-    body = body.push(branch_switcher(app, selection, tokens, reading));
-    body = body.push(history_pane(app, selection, tokens, reading));
-    body.into()
+    column![
+        titled_command_head(GRAPH_TITLE, &commands, selection, app, tokens, reading),
+        history_pane(app, selection, tokens, reading),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn inspector<'a>(
@@ -113,7 +138,23 @@ fn diff<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let _ = layout;
-    patch_pane(app, tokens, reading)
+    let title = if app.patches.is_empty() {
+        DIFF_TITLE.to_string()
+    } else {
+        format!("{DIFF_TITLE} · {}", app.patches.len())
+    };
+    column![
+        column![
+            container(pane_title(&title, tokens, reading))
+                .padding([HEAD_PADDING_Y, HEAD_PADDING_X])
+                .width(Length::Fill),
+            hairline(tokens),
+        ],
+        patch_pane(app, tokens, reading),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn detail_body<'a>(
@@ -122,19 +163,14 @@ fn detail_body<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    if matches!(selection, Selection::File { .. }) {
-        return column![
-            changes_pane(app, selection, tokens, reading),
-            patch_pane(app, tokens, reading),
-        ]
-        .height(Length::Fill)
-        .into();
-    }
     let show_patch = matches!(selection, Selection::Commit { .. } | Selection::Tag { .. });
     if !show_patch {
-        return changes_pane(app, selection, tokens, reading);
+        return inspector_working_hint(tokens, reading);
     }
 
+    // Do not give the column `Length::Fill` height: it sits inside a
+    // scrollable, and iced panics when a vertically filling child is laid
+    // out inside a scrollable viewport.
     let mut body = column![row![command_button(
         "Working tree",
         Message::ShowWorkingTree,
@@ -144,39 +180,182 @@ fn detail_body<'a>(
     )]
     .padding([8, 12])]
     .spacing(4)
-    .width(Length::Fill)
-    .height(Length::Fill);
+    .width(Length::Fill);
 
     if let Selection::Commit { id } = selection {
         if let Some(commit) = app.state.commits.iter().find(|commit| &commit.id == id) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(commit.timestamp);
+            let meta = format!(
+                "{} · {} · {}",
+                short_hash(&commit.id),
+                commit.author,
+                relative_age(now, commit.timestamp)
+            );
             body = body.push(
                 container(
-                    text(commit.message.clone())
-                        .font(reading.font)
-                        .size(reading.size)
-                        .style(move |_| text::Style {
-                            color: Some(tokens.text_primary),
-                        }),
+                    column![
+                        text(commit.message.clone())
+                            .font(reading.font)
+                            .size(reading.size)
+                            .style(move |_| text::Style {
+                                color: Some(tokens.text_primary),
+                            }),
+                        text(meta)
+                            .font(reading.font)
+                            .size((reading.size - 2.0).max(11.0))
+                            .style(move |_| text::Style {
+                                color: Some(tokens.text_muted),
+                            }),
+                    ]
+                    .spacing(4),
                 )
                 .padding([0, 12]),
             );
         }
     } else if let Selection::Tag { name, .. } = selection {
         body = body.push(
-            text(name.clone())
-                .font(reading.font)
-                .size(reading.size)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_primary),
-                }),
+            container(
+                text(name.clone())
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_primary),
+                    }),
+            )
+            .padding([0, 12]),
         );
     }
 
-    body = body.push(patch_pane(app, tokens, reading));
-    container(body)
+    body = body.push(commit_files_block(app, tokens, reading));
+
+    container(scrollable(body))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+fn commit_files_block<'a>(
+    app: &'a GitApp,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let mut block = column![].spacing(2).padding([4, 12]);
+    if app.patch_pending {
+        return block
+            .push(
+                text("Loading files…")
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_muted),
+                    }),
+            )
+            .into();
+    }
+    if let Some(error) = &app.patch_error {
+        return block
+            .push(
+                text(error.clone())
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style {
+                        color: Some(tokens.accent_primary),
+                    }),
+            )
+            .into();
+    }
+    if app.patches.is_empty() {
+        return block
+            .push(
+                text("No files in this commit")
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_muted),
+                    }),
+            )
+            .into();
+    }
+
+    let (total_added, total_removed) = app.patches.iter().fold((0, 0), |(a, r), patch| {
+        let (added, removed) = patch_stats(patch);
+        (a + added, r + removed)
+    });
+    let title = format!(
+        "Files changed ({})  +{total_added} −{total_removed}",
+        app.patches.len()
+    );
+    let mut heading = row![text(title)
+        .font(reading.font)
+        .size((reading.size - 2.0).max(11.0))
+        .style(move |_| text::Style {
+            color: Some(tokens.text_muted),
+        })]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if app.focused_diff_path.is_some() {
+        heading = heading.push(iced::widget::horizontal_space()).push(
+            command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
+        );
+    }
+    block = block.push(heading);
+
+    for patch in &app.patches {
+        let (added, removed) = patch_stats(patch);
+        let focused = app.focused_diff_path.as_deref() == Some(patch.path.as_str());
+        let stats = if patch.binary {
+            "binary".to_string()
+        } else {
+            format!("+{added} −{removed}")
+        };
+        let path = patch.path.clone();
+        block = block.push(
+            button(
+                row![
+                    text(patch.path.clone())
+                        .font(reading.mono)
+                        .size((reading.size - 2.0).max(11.0))
+                        .wrapping(Wrapping::None)
+                        .width(Length::Fill),
+                    text(stats)
+                        .font(reading.mono)
+                        .size((reading.size - 2.0).max(11.0))
+                        .style(move |_| text::Style {
+                            color: Some(if added > 0 && removed == 0 {
+                                tokens.added
+                            } else if removed > 0 && added == 0 {
+                                tokens.removed
+                            } else {
+                                tokens.text_muted
+                            }),
+                        }),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([2, 4])
+            .width(Length::Fill)
+            .on_press(Message::FocusDiffPath(path))
+            .style(move |_theme, status| {
+                let hot = matches!(status, Status::Hovered | Status::Pressed);
+                iced::widget::button::Style {
+                    background: Some(Background::Color(if focused || hot {
+                        tokens.border
+                    } else {
+                        Color::TRANSPARENT
+                    })),
+                    text_color: tokens.text_secondary,
+                    border: Border::default(),
+                    shadow: Shadow::default(),
+                }
+            }),
+        );
+    }
+
+    block.into()
 }
 
 fn inspector_head<'a>(
@@ -211,14 +390,18 @@ fn inspector_head<'a>(
     .into()
 }
 
-fn command_head<'a>(
+fn titled_command_head<'a>(
+    title: &'a str,
     items: &[crate::selection::RibbonItem],
     selection: &Selection,
     app: &'a GitApp,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let mut commands = row![].spacing(COMMAND_SPACING).align_y(Alignment::Center);
+    let mut commands = row![pane_title(title, tokens, reading)]
+        .spacing(COMMAND_SPACING)
+        .align_y(Alignment::Center);
+    commands = commands.push(iced::widget::horizontal_space());
     for button in command_buttons(items, selection, app, tokens, reading) {
         commands = commands.push(button);
     }
@@ -233,17 +416,30 @@ fn command_head<'a>(
 
 fn files_rail<'a>(
     app: &'a GitApp,
+    selection: &Selection,
     layout: LayoutPreset,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    let _ = layout;
     column![
-        files_head(app.patches.len(), tokens, reading),
-        files_body(app, layout, tokens, reading),
+        files_head(working_change_count(app), tokens, reading),
+        branch_switcher(app, selection, tokens, reading),
+        changes_pane(app, selection, tokens, reading),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+fn working_change_count(app: &GitApp) -> usize {
+    app.state
+        .current_status
+        .as_ref()
+        .map(|status| {
+            status.staged_files.len() + status.unstaged_files.len() + status.untracked_files.len()
+        })
+        .unwrap_or(0)
 }
 
 fn files_head<'a>(count: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -273,73 +469,18 @@ fn files_head<'a>(count: usize, tokens: DesignTokens, reading: Reading) -> Eleme
     .into()
 }
 
-fn files_body<'a>(
-    app: &'a GitApp,
-    layout: LayoutPreset,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    if layout == LayoutPreset::Stacked {
-        let mut chips = row![]
-            .spacing(COMMAND_SPACING)
-            .padding([HEAD_PADDING_Y, HEAD_PADDING_X])
-            .width(Length::Fill);
-        for patch in &app.patches {
-            chips = chips.push(path_chip(&patch.path, tokens, reading));
-        }
-        return scrollable(chips.wrap())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    }
-
-    let mut list = column![].spacing(2);
-    for patch in &app.patches {
-        list = list.push(path_line(&patch.path, tokens, reading));
-    }
-    scrollable(list)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-fn path_line<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+fn inspector_working_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     container(
-        text(path.to_string())
-            .font(reading.mono)
-            .size((reading.size - 2.0).max(11.0))
-            .wrapping(Wrapping::None)
+        text("Stage and commit from Changes on the left. Select a commit to inspect it.")
+            .font(reading.font)
+            .size(reading.size)
             .style(move |_| text::Style {
-                color: Some(tokens.text_secondary),
+                color: Some(tokens.text_muted),
             }),
     )
+    .padding([12, 12])
     .width(Length::Fill)
-    .clip(true)
-    .padding([2.0, HEAD_PADDING_X])
-    .into()
-}
-
-fn path_chip<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    container(
-        text(path.to_string())
-            .font(reading.mono)
-            .size((reading.size - 2.0).max(11.0))
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_secondary),
-            }),
-    )
-    .padding([CHIP_PADDING_Y, CHIP_PADDING_X])
-    .style(move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(tokens.chip)),
-        text_color: Some(tokens.text_secondary),
-        border: Border {
-            color: tokens.chip_border,
-            width: 1.0,
-            radius: CHIP_RADIUS.into(),
-        },
-        shadow: Shadow::default(),
-    })
+    .height(Length::Fill)
     .into()
 }
 
@@ -413,7 +554,7 @@ fn rail_button_style(
         border: Border {
             color: tokens.chip_border,
             width: 1.0,
-            radius: CHIP_RADIUS.into(),
+            radius: 4.0.into(),
         },
         shadow: Shadow::default(),
     }
