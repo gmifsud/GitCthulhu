@@ -3,7 +3,7 @@ use crate::theme::DesignTokens;
 use iced::widget::{column, container, row, text, text_input};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
-use super::chrome::{accent_button, command_button, Reading};
+use super::chrome::{accent_button, command_button, field_style, Reading};
 
 pub(super) fn branch_prompt<'a>(
     prompt: &'a BranchPrompt,
@@ -13,7 +13,7 @@ pub(super) fn branch_prompt<'a>(
     let (title, body, confirm_label, confirm_enabled, detail, field) = match prompt {
         BranchPrompt::Create { start, name } => (
             "New branch",
-            "Created at this tip. The current checkout stays where it is.",
+            "Created at this tip, then checked out.",
             "Create",
             !name.trim().is_empty(),
             start.as_str(),
@@ -65,8 +65,9 @@ pub(super) fn branch_prompt<'a>(
         card = card.push(
             text_input("Branch name", field)
                 .on_input(Message::BranchNameChanged)
-                .padding(8)
-                .width(Length::Fill),
+                .padding(6)
+                .width(Length::Fill)
+                .style(field_style(tokens)),
         );
     }
     card = card.push(
