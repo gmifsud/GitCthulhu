@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use core_domain::{FileDisposition, RepoStatus};
 
@@ -14,7 +14,11 @@ pub(crate) struct MarkedFile {
 pub(crate) enum ChangeRow {
     Directory {
         name: String,
+        /// Folder path with `/` separators, e.g. `gui_app/src`.
+        prefix: String,
         depth: usize,
+        /// File descendants not drawn because this folder is collapsed.
+        hidden: usize,
     },
     File {
         name: String,
@@ -74,10 +78,12 @@ pub(crate) fn change_sections(status: &RepoStatus) -> Vec<ChangeSection<'_>> {
 }
 
 /// Flat paths, or the same paths folded into folders. Folders are shared.
+/// `collapsed` holds prefixes (e.g. `gui_app/src`) whose children should be omitted.
 pub(crate) fn change_rows(
     files: &[String],
     place: FileDisposition,
     as_tree: bool,
+    collapsed: &HashSet<String>,
 ) -> Vec<ChangeRow> {
     if !as_tree {
         return files
@@ -102,7 +108,7 @@ pub(crate) fn change_rows(
         insert(&mut root, &parts, path);
     }
     let mut rows = Vec::new();
-    flatten(&root, 0, place, &mut rows);
+    flatten(&root, 0, "", place, collapsed, &mut rows);
     rows
 }
 
@@ -139,13 +145,43 @@ fn insert(node: &mut Node, parts: &[&str], path: &str) {
     );
 }
 
-fn flatten(node: &Node, depth: usize, place: FileDisposition, rows: &mut Vec<ChangeRow>) {
+fn file_count(node: &Node) -> usize {
+    node.files.len() + node.dirs.values().map(file_count).sum::<usize>()
+}
+
+fn join_prefix(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn flatten(
+    node: &Node,
+    depth: usize,
+    prefix: &str,
+    place: FileDisposition,
+    collapsed: &HashSet<String>,
+    rows: &mut Vec<ChangeRow>,
+) {
     for (name, child) in &node.dirs {
+        let child_prefix = join_prefix(prefix, name);
+        let is_collapsed = collapsed.contains(&child_prefix);
+        let hidden = if is_collapsed {
+            file_count(child)
+        } else {
+            0
+        };
         rows.push(ChangeRow::Directory {
             name: name.clone(),
+            prefix: child_prefix.clone(),
             depth,
+            hidden,
         });
-        flatten(child, depth + 1, place, rows);
+        if !is_collapsed {
+            flatten(child, depth + 1, &child_prefix, place, collapsed, rows);
+        }
     }
     for (name, path) in &node.files {
         rows.push(ChangeRow::File {
@@ -192,23 +228,28 @@ mod tests {
             "gui_app/src/a.rs".to_string(),
             "gui_app/src/b.rs".to_string(),
         ];
-        let listed = change_rows(&files, FileDisposition::Unstaged, false);
+        let none = HashSet::new();
+        let listed = change_rows(&files, FileDisposition::Unstaged, false, &none);
         assert!(matches!(
             &listed[0],
             ChangeRow::File { name, .. } if name == "gui_app/src/a.rs"
         ));
 
-        let tree = change_rows(&files, FileDisposition::Unstaged, true);
+        let tree = change_rows(&files, FileDisposition::Unstaged, true, &none);
         assert_eq!(
             tree,
             vec![
                 ChangeRow::Directory {
                     name: "gui_app".into(),
-                    depth: 0
+                    prefix: "gui_app".into(),
+                    depth: 0,
+                    hidden: 0,
                 },
                 ChangeRow::Directory {
                     name: "src".into(),
-                    depth: 1
+                    prefix: "gui_app/src".into(),
+                    depth: 1,
+                    hidden: 0,
                 },
                 ChangeRow::File {
                     name: "a.rs".into(),
@@ -220,6 +261,34 @@ mod tests {
                     name: "b.rs".into(),
                     path: "gui_app/src/b.rs".into(),
                     depth: 2,
+                    place: FileDisposition::Unstaged,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_folder_hides_its_children() {
+        let files = vec![
+            "gui_app/src/a.rs".to_string(),
+            "gui_app/src/b.rs".to_string(),
+            "readme.md".to_string(),
+        ];
+        let collapsed = HashSet::from(["gui_app".to_string()]);
+        let tree = change_rows(&files, FileDisposition::Unstaged, true, &collapsed);
+        assert_eq!(
+            tree,
+            vec![
+                ChangeRow::Directory {
+                    name: "gui_app".into(),
+                    prefix: "gui_app".into(),
+                    depth: 0,
+                    hidden: 2,
+                },
+                ChangeRow::File {
+                    name: "readme.md".into(),
+                    path: "readme.md".into(),
+                    depth: 0,
                     place: FileDisposition::Unstaged,
                 },
             ]
