@@ -7,6 +7,7 @@ mod changes;
 mod commit_graph;
 mod jobs;
 mod layout;
+mod ref_pills;
 mod selection;
 mod terminal;
 mod theme;
