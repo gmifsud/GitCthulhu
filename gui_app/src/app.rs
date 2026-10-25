@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use core_domain::{
     AppSettings, AppState, Branch, DomainError, FileDisposition, Hunk, Patch, ResetMode, Stash,
     ViewEvent,
 };
-use iced::widget::pane_grid;
+use iced::widget::{pane_grid, text_editor};
 use iced::Task;
 
 use crate::appearance::{font_family, font_size};
@@ -13,15 +14,30 @@ use crate::jobs::{
     branch_in_background, checkout_in_background, choose_repository_folder, clone_in_background,
     discard_hunk_in_background, discard_in_background, edit_in_background, error_message,
     fetch_in_background, history_in_background, init_in_background, list_models_in_background,
-    load_patch_in_background, load_repository_in_background, pull_in_background,
-    push_in_background, stage_hunk_in_background, stash_in_background,
-    suggest_commit_in_background, BranchAction, HistoryAction, PatchQuery, SharedRepository,
-    StashAction, WorktreeEdit,
+    load_patch_in_background, load_repository_in_background, open_repository_in_background,
+    pull_in_background, push_in_background, save_settings_in_background, stage_hunk_in_background,
+    stash_in_background, suggest_commit_in_background, BranchAction, HistoryAction, PatchQuery,
+    SharedRepository, StashAction, WorktreeEdit,
 };
 use crate::layout::{self, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::{visible_selection, Selection};
 use crate::theme::DesignTokens;
 use crate::{RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver};
+
+/// Diff lines drawn per "Show more" step. One widget per line, so this bounds layout cost.
+pub(crate) const DIFF_LINES_PER_PAGE: usize = 400;
+
+/// Repository handed from a background open into [`Message::RepositoryOpened`].
+///
+/// Wraps the trait object so [`Message`] can stay `Debug`.
+#[derive(Clone)]
+pub(crate) struct OpenedRepository(pub SharedRepository);
+
+impl std::fmt::Debug for OpenedRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenedRepository")
+    }
+}
 
 pub(crate) struct GitApp {
     pub(crate) state: AppState,
@@ -38,25 +54,39 @@ pub(crate) struct GitApp {
     pub(crate) branch_query: String,
     pub(crate) marked_files: Vec<crate::changes::MarkedFile>,
     pub(crate) files_as_tree: bool,
+    /// Folder prefixes collapsed in Tree mode, keyed with their disposition.
+    pub(crate) collapsed_dirs: HashSet<(FileDisposition, String)>,
+    /// Staged / Unstaged / Untracked headers the user has folded shut.
+    pub(crate) collapsed_sections: HashSet<FileDisposition>,
     pub(crate) agent_models: Vec<String>,
     pub(crate) agent_models_error: Option<String>,
     pub(crate) agent_busy: bool,
     pub(crate) terminal: crate::terminal::Transcript,
+    pub(crate) terminal_log: text_editor::Content,
     pub(crate) terminal_open: bool,
     pub(crate) list_models: crate::ModelLister,
     pub(crate) suggest_commit: crate::CommitSuggester,
     pub(crate) error: Option<String>,
+    /// Status-bar error shows full text when true; first line only when false.
+    pub(crate) error_expanded: bool,
     pub(crate) commit_message: String,
     pub(crate) tokens: DesignTokens,
     pub(crate) selection: Option<Selection>,
     pub(crate) settings_open: bool,
     pub(crate) patches: Vec<Patch>,
+    /// When set, the Diff pane shows only this path (from a commit/tag file click).
+    pub(crate) focused_diff_path: Option<String>,
     pub(crate) patch_error: Option<String>,
     pub(crate) patch_pending: bool,
+    /// How many diff lines the diff pane draws before offering "Show more".
+    /// Every line is its own widget, so an unbounded diff stalls layout.
+    pub(crate) diff_lines_limit: usize,
     pub(crate) confirm_discard: Option<(String, FileDisposition)>,
     pub(crate) confirm_drop: Option<Stash>,
     pub(crate) branch_prompt: Option<BranchPrompt>,
     pub(crate) history_prompt: Option<HistoryPrompt>,
+    /// After a successful create, check out this local branch name.
+    pub(crate) pending_checkout: Option<String>,
     pub(crate) clone_url: String,
     patch_generation: u64,
     open_repository: RepositoryOpener,
@@ -100,12 +130,33 @@ pub(crate) enum Message {
     SelectAllFiles,
     ClearFileSelection,
     SetFileTree(bool),
+    /// Fold or unfold a folder row in the changes tree.
+    ToggleChangeDir {
+        prefix: String,
+        place: FileDisposition,
+    },
+    /// Fold or unfold a Staged / Unstaged / Untracked section.
+    ToggleChangeSection(FileDisposition),
+    /// Narrow the Diff pane to one path of the current commit/tag patch set.
+    FocusDiffPath(String),
+    /// Clear [`GitApp::focused_diff_path`] and show every file again.
+    ClearDiffFocus,
+    /// Dismiss the status-bar error.
+    ClearError,
+    /// Expand or collapse the status-bar error detail.
+    ToggleErrorDetail,
+    /// Cycle Columns → InspectorOverDiff → Stacked.
+    CycleLayout,
+    /// Escape: dismiss prompts, errors, overlays, then clear diff focus.
+    Escape,
     StageMarked,
     UnstageMarked,
     /// `None` means the dialog was cancelled.
     RepositoryFolderChosen(Option<String>),
     /// Replace the current adapter with the repository at this path.
     OpenRepository(String),
+    /// Result of [`Message::OpenRepository`] after the opener finishes off-thread.
+    RepositoryOpened(String, Result<OpenedRepository, DomainError>),
     /// Select the row the ribbon describes.
     Select(Selection),
     OpenSettings,
@@ -116,11 +167,16 @@ pub(crate) enum Message {
     SuggestCommit,
     CommitSuggested(crate::CommitSuggestion),
     ToggleTerminal,
+    TerminalEdited(text_editor::Action),
     ClearTerminal,
     CloseSettings,
+    /// Disk write finished. No UI effect; keeps the task from being discarded silently.
+    SettingsSaved,
     UiFontChosen(String),
     UiSizeChosen(u8),
     PatchLoaded(u64, Result<Vec<Patch>, DomainError>),
+    /// Draw another page of diff lines in the diff pane.
+    ShowMoreDiff,
     AskDiscard,
     CancelDiscard,
     ConfirmDiscard,
@@ -227,26 +283,33 @@ impl GitApp {
             branch_list_open: false,
             branch_query: String::new(),
             marked_files: Vec::new(),
-            files_as_tree: false,
+            files_as_tree: true,
+            collapsed_dirs: HashSet::new(),
+            collapsed_sections: HashSet::new(),
             agent_models: Vec::new(),
             agent_models_error: None,
             agent_busy: false,
             terminal: crate::terminal::Transcript::new(),
+            terminal_log: text_editor::Content::new(),
             terminal_open: true,
             list_models: unavailable_model_lister(),
             suggest_commit: unavailable_suggester(),
             error: None,
+            error_expanded: false,
             commit_message: String::new(),
             tokens: DesignTokens::deep_focus(),
             selection: None,
             settings_open: false,
             patches: Vec::new(),
+            focused_diff_path: None,
             patch_error: None,
             patch_pending: false,
+            diff_lines_limit: DIFF_LINES_PER_PAGE,
             confirm_discard: None,
             confirm_drop: None,
             branch_prompt: None,
             history_prompt: None,
+            pending_checkout: None,
             clone_url: String::new(),
             patch_generation: 0,
             open_repository,
