@@ -39,6 +39,8 @@ pub struct Branch {
     pub name: String,
     pub is_remote: bool,
     pub is_head: bool,
+    /// Peeled commit id this branch currently points at (full hex).
+    pub tip: String,
 }
 
 /// How the current branch compares with its upstream.
@@ -51,7 +53,7 @@ pub struct TrackingStatus {
 }
 
 /// Where a changed path sits, which decides the diff and the discard command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileDisposition {
     Staged,
     Unstaged,

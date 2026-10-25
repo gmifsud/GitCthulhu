@@ -1758,6 +1758,7 @@ mod tests {
             name: name.to_string(),
             is_remote: false,
             is_head,
+            tip: String::new(),
         }
     }
 

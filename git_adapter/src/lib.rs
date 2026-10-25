@@ -185,16 +185,22 @@ impl GitRepository for GitoxideAdapter {
 
         let mut branches = Vec::new();
         for (reference, is_remote) in local.chain(remote) {
-            let reference = reference.map_err(unknown)?;
+            let mut reference = reference.map_err(unknown)?;
             if matches!(reference.target(), TargetRef::Symbolic(_)) {
                 continue;
             }
+            let name = reference.name().shorten().to_string();
+            let is_head = head_name
+                .as_ref()
+                .is_some_and(|head| head.as_ref() == reference.name());
+            let Ok(commit) = reference.peel_to_commit() else {
+                continue;
+            };
             branches.push(Branch {
-                name: reference.name().shorten().to_string(),
+                name,
                 is_remote,
-                is_head: head_name
-                    .as_ref()
-                    .is_some_and(|head| head.as_ref() == reference.name()),
+                is_head,
+                tip: commit.id().to_string(),
             });
         }
         Ok(branches)

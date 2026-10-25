@@ -371,12 +371,14 @@ fn branches_lists_local_and_remote_and_marks_head() {
 
     let head = fixture.head_branch();
     let find = |name: &str| branches.iter().find(|b| b.name == name);
+    let tip_id = tip.to_string();
     assert_eq!(
         find(&head),
         Some(&Branch {
             name: head.clone(),
             is_remote: false,
-            is_head: true
+            is_head: true,
+            tip: tip_id.clone(),
         })
     );
     assert_eq!(
@@ -384,7 +386,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
         Some(&Branch {
             name: "feature/x".to_string(),
             is_remote: false,
-            is_head: false
+            is_head: false,
+            tip: tip_id.clone(),
         })
     );
     assert_eq!(
@@ -392,7 +395,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
         Some(&Branch {
             name: "origin/main".to_string(),
             is_remote: true,
-            is_head: false
+            is_head: false,
+            tip: tip_id,
         })
     );
     assert!(
