@@ -10,7 +10,7 @@ use crate::theme::DesignTokens;
 use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, Space};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,8 +21,6 @@ const COL_GAP: f32 = 10.0;
 const HASH_WIDTH: f32 = 72.0;
 const WHEN_WIDTH: f32 = 56.0;
 const AUTHOR_WIDTH: f32 = 100.0;
-const MIN_MESSAGE_WIDTH: f32 = 120.0;
-const PILLS_MIN_WIDTH: f32 = 48.0;
 const MESSAGE_FILL: u16 = 3;
 const PILLS_FILL: u16 = 1;
 /// Floor for the lane canvas so Graph never collapses into Description on resize.
@@ -293,7 +291,10 @@ fn pills_cell<'a>(
                 }),
         );
     }
-    fill_column_with_min(PILLS_MIN_WIDTH, PILLS_FILL, cell)
+    container(cell)
+        .width(Length::FillPortion(PILLS_FILL))
+        .clip(true)
+        .into()
 }
 
 fn message_cell<'a>(
@@ -308,25 +309,11 @@ fn message_cell<'a>(
         .style(move |_| text::Style {
             color: Some(tokens.text_primary),
         });
-    fill_column_with_min(MIN_MESSAGE_WIDTH, MESSAGE_FILL, body)
-}
-
-fn fill_column_with_min<'a>(
-    min_width: f32,
-    portion: u16,
-    content: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    container(
-        row![
-            Space::new(Length::Fixed(min_width), Length::Fixed(0.0)),
-            content.into(),
-        ]
-        .spacing(0.0)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::FillPortion(portion))
-    .clip(true)
-    .into()
+    // Share remaining width with pills; clip long subjects.
+    container(body)
+        .width(Length::FillPortion(MESSAGE_FILL))
+        .clip(true)
+        .into()
 }
 
 fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
