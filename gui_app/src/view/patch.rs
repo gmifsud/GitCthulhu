@@ -175,6 +175,7 @@ pub(crate) fn patch_stats(patch: &Patch) -> (usize, usize) {
 
 const SHOW_MORE_LABEL: &str = "Show more lines";
 const LINE_NO_WIDTH: f32 = 40.0;
+const MARK_WIDTH: f32 = 12.0;
 
 /// Old/new start (and optional counts) from a unified hunk header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,10 +255,15 @@ fn diff_line<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let (mark, color, tint) = match line.kind {
-        DiffLineKind::Added => ("+", tokens.added, tokens.added_bg),
-        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed_bg),
-        DiffLineKind::Context => (" ", tokens.text_secondary, Color::TRANSPARENT),
+    let (mark, text_color, mark_color, tint) = match line.kind {
+        DiffLineKind::Added => ("+", tokens.added, tokens.added, tokens.added_bg),
+        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed, tokens.removed_bg),
+        DiffLineKind::Context => (
+            " ",
+            tokens.text_secondary,
+            tokens.text_muted,
+            Color::TRANSPARENT,
+        ),
     };
     let gutter = tokens.text_muted;
     container(
@@ -278,19 +284,30 @@ fn diff_line<'a>(
                 .style(move |_| text::Style {
                     color: Some(gutter),
                 }),
-            text(format!("{mark}{}", line.text))
+            text(mark)
+                .font(reading.mono)
+                .size(reading.size)
+                .width(Length::Fixed(MARK_WIDTH))
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style {
+                    color: Some(mark_color),
+                }),
+            text(line.text.clone())
                 .font(reading.mono)
                 .size(reading.size)
                 .wrapping(Wrapping::None)
-                .style(move |_| text::Style { color: Some(color) }),
+                .style(move |_| text::Style {
+                    color: Some(text_color),
+                }),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
     )
+    .padding([0, 2])
     .width(Length::Fill)
     .style(move |_theme: &Theme| container::Style {
         background: Some(Background::Color(tint)),
-        text_color: Some(color),
+        text_color: Some(text_color),
         border: Border::default(),
         shadow: Shadow::default(),
     })

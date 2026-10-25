@@ -1,7 +1,7 @@
 use iced::Color;
 
-/// Tint behind an added or removed diff line. The wireframe uses 12%.
-const DIFF_TINT: f32 = 0.12;
+/// Tint behind an added or removed diff line. The wireframe uses 22%.
+const DIFF_TINT: f32 = 0.22;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DesignTokens {
