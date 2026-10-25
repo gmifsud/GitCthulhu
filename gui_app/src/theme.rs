@@ -8,8 +8,6 @@ pub(crate) struct DesignTokens {
     pub bg_app: Color,
     pub bg_sidebar: Color,
     pub bg_chrome: Color,
-    /// Selected-row fill. The graph and the diff paint it in later phases.
-    #[allow(dead_code)]
     pub bg_raised: Color,
     pub text_primary: Color,
     pub text_secondary: Color,
@@ -20,24 +18,23 @@ pub(crate) struct DesignTokens {
     pub chip_border: Color,
     pub added: Color,
     pub removed: Color,
-    /// Row tint behind an added or removed line. The diff column paints it later.
-    #[allow(dead_code)]
     pub added_bg: Color,
-    /// Row tint behind a removed line. The diff column paints it later.
-    #[allow(dead_code)]
     pub removed_bg: Color,
 }
 
 impl DesignTokens {
+    /// Deep charcoal shell, ember accent — tuned for a local Git client that
+    /// spends most of its life on history and staging, not marketing chrome.
     pub(crate) fn deep_focus() -> Self {
         Self {
             bg_app: hex_color(0x0D0D0F),
             bg_sidebar: hex_color(0x111214),
             bg_chrome: hex_color(0x151619),
             bg_raised: hex_color(0x1A1B1E),
-            text_primary: hex_color(0xFFFFFF),
-            text_secondary: hex_color(0xD1D1D1),
-            text_muted: hex_color(0x5A5A5A),
+            text_primary: hex_color(0xF4F4F5),
+            text_secondary: hex_color(0xC8C8CC),
+            // Wireframe `--quiet`: scannable labels and glyphs, not wallpaper grey.
+            text_muted: hex_color(0x8A8A8A),
             border: hex_color(0x2D2D30),
             accent_primary: hex_color(0xF27D26),
             chip: hex_color(0x232429),
