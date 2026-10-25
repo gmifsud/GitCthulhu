@@ -47,7 +47,7 @@ pub(super) fn explorer_pane<'a>(
             locals.len(),
             ExplorerSection::Local,
             collapsed.local,
-            local_rows(&locals, tokens, reading),
+            (!collapsed.local).then(|| local_rows(&locals, tokens, reading)),
             tokens,
             reading,
         ),
@@ -57,7 +57,7 @@ pub(super) fn explorer_pane<'a>(
             remotes.len(),
             ExplorerSection::Remote,
             collapsed.remote,
-            remote_rows(&remotes, tokens, reading),
+            (!collapsed.remote).then(|| remote_rows(&remotes, tokens, reading)),
             tokens,
             reading,
         ),
@@ -67,7 +67,7 @@ pub(super) fn explorer_pane<'a>(
             worktrees.len(),
             ExplorerSection::Worktrees,
             collapsed.worktrees,
-            worktrees_rows(app, worktrees, tokens, reading),
+            (!collapsed.worktrees).then(|| worktrees_rows(app, worktrees, tokens, reading)),
             tokens,
             reading,
         ),
@@ -77,7 +77,7 @@ pub(super) fn explorer_pane<'a>(
             stashes.len(),
             ExplorerSection::Stashes,
             collapsed.stashes,
-            stash_rows(stashes, tokens, reading),
+            (!collapsed.stashes).then(|| stash_rows(stashes, tokens, reading)),
             tokens,
             reading,
         ),
@@ -87,7 +87,7 @@ pub(super) fn explorer_pane<'a>(
             tags.len(),
             ExplorerSection::Tags,
             collapsed.tags,
-            tag_rows(tags, tokens, reading),
+            (!collapsed.tags).then(|| tag_rows(tags, tokens, reading)),
             tokens,
             reading,
         ),
@@ -97,13 +97,13 @@ pub(super) fn explorer_pane<'a>(
     .into()
 }
 
-/// One collapsible accordion block: header + optional body.
+/// One collapsible accordion block: header + optional body (body omitted when collapsed).
 fn section_block<'a>(
     title: &'static str,
     count: usize,
     section: ExplorerSection,
     collapsed: bool,
-    body: Element<'a, Message>,
+    body: Option<Element<'a, Message>>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -140,11 +140,12 @@ fn section_block<'a>(
         }
     });
 
-    if collapsed {
-        column![header].width(Length::Fill).into()
-    } else {
-        column![header, body].width(Length::Fill).into()
+    let mut block = column![header].width(Length::Fill);
+    if let Some(body) = body {
+        debug_assert!(!collapsed);
+        block = block.push(body);
     }
+    block.into()
 }
 
 // ── LOCAL ────────────────────────────────────────────────────────────────────
