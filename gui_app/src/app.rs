@@ -267,6 +267,7 @@ impl GitApp {
     }
 
     fn start_patch(&mut self) -> Task<Message> {
+        self.diff_lines_limit = DIFF_LINES_PER_PAGE;
         let query = match self.selection.clone() {
             Some(Selection::Commit { id } | Selection::Tag { commit_id: id, .. }) => {
                 PatchQuery::Commit(id)
@@ -326,13 +327,24 @@ impl GitApp {
             .cloned()
     }
 
-    fn store_agent(&mut self, token: String, model: String) {
+    fn store_agent(&mut self, token: String, model: String, persist: bool) -> Task<Message> {
         let mut settings = self.state.settings.clone();
         settings.agent_token = token;
         settings.agent_model = model;
         self.state
             .apply_event(ViewEvent::SettingsUpdated(settings.clone()));
-        (self.save_settings)(settings);
+        if persist {
+            self.persist_settings(settings)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn persist_settings(&self, settings: AppSettings) -> Task<Message> {
+        let save = Arc::clone(&self.save_settings);
+        Task::perform(save_settings_in_background(save, settings), |_| {
+            Message::SettingsSaved
+        })
     }
 
     fn refresh_models(&mut self) -> Task<Message> {
@@ -390,13 +402,13 @@ impl GitApp {
         }
     }
 
-    fn store_appearance(&mut self, font: &str, size: u8) {
+    fn store_appearance(&mut self, font: &str, size: u8) -> Task<Message> {
         let mut settings = self.state.settings.clone();
         settings.ui_font = font_family(font).to_string();
         settings.ui_size = font_size(size);
         self.state
             .apply_event(ViewEvent::SettingsUpdated(settings.clone()));
-        (self.save_settings)(settings);
+        self.persist_settings(settings)
     }
 
     #[cfg(test)]
@@ -519,6 +531,43 @@ impl GitApp {
                 self.files_as_tree = as_tree;
                 Task::none()
             }
+            Message::ToggleChangeDir { prefix, place } => {
+                let key = (place, prefix);
+                if !self.collapsed_dirs.remove(&key) {
+                    self.collapsed_dirs.insert(key);
+                }
+                Task::none()
+            }
+            Message::ToggleChangeSection(place) => {
+                if !self.collapsed_sections.remove(&place) {
+                    self.collapsed_sections.insert(place);
+                }
+                Task::none()
+            }
+            Message::FocusDiffPath(path) => {
+                self.focused_diff_path = Some(path);
+                Task::none()
+            }
+            Message::ClearDiffFocus => {
+                self.focused_diff_path = None;
+                Task::none()
+            }
+            Message::ClearError => {
+                self.error = None;
+                self.error_expanded = false;
+                Task::none()
+            }
+            Message::ToggleErrorDetail => {
+                if self.error.is_some() {
+                    self.error_expanded = !self.error_expanded;
+                }
+                Task::none()
+            }
+            Message::CycleLayout => {
+                let next = self.layout.next();
+                self.update(Message::SetLayout(next))
+            }
+            Message::Escape => self.handle_escape(),
             Message::StageMarked => self.edit_marked(true),
             Message::UnstageMarked => self.edit_marked(false),
             Message::CheckoutBranch(branch) => {
@@ -530,6 +579,10 @@ impl GitApp {
                 }
                 self.state.loading = true;
                 self.error = None;
+                self.selection = Some(Selection::Branch {
+                    name: branch.clone(),
+                    current: false,
+                });
                 Task::perform(
                     checkout_in_background(repo, branch),
                     Message::CheckoutFinished,
@@ -652,14 +705,17 @@ impl GitApp {
                     .iter()
                     .find(|(split, _)| *split == event.split)
                     .map(|(_, slot)| *slot);
-                self.panes.resize(event.split, event.ratio);
                 if let Some(slot) = slot {
                     let ratios = &mut self.ratios[self.layout.index()];
-                    match slot {
-                        RatioSlot::Graph => ratios.graph = event.ratio,
-                        RatioSlot::Middle => ratios.middle = event.ratio,
-                        RatioSlot::Files => ratios.files = event.ratio,
-                    }
+                    ratios.clamp_slot(slot, event.ratio);
+                    let clamped = match slot {
+                        RatioSlot::Graph => ratios.graph,
+                        RatioSlot::Middle => ratios.middle,
+                        RatioSlot::Files => ratios.files,
+                    };
+                    self.panes.resize(event.split, clamped);
+                } else {
+                    self.panes.resize(event.split, event.ratio);
                 }
                 Task::none()
             }
@@ -694,17 +750,21 @@ impl GitApp {
                     .branches
                     .iter()
                     .any(|branch| !branch.is_remote && branch.is_head && branch.name == name);
-                self.selection = Some(Selection::Branch {
-                    name: name.clone(),
-                    current,
-                });
                 if current {
-                    Task::none()
-                } else {
-                    self.update(Message::CheckoutBranch(name))
+                    self.selection = Some(Selection::Branch { name, current: true });
+                    return Task::none();
                 }
+                if self.local_branch(&name).is_some() {
+                    return self.update(Message::CheckoutBranch(name));
+                }
+                self.selection = Some(Selection::Branch {
+                    name,
+                    current: false,
+                });
+                Task::none()
             }
             Message::ShowWorkingTree => {
+                self.focused_diff_path = None;
                 let name = self
                     .state
                     .branches
@@ -739,29 +799,39 @@ impl GitApp {
                     self.error = Some("Choose a repository folder.".to_string());
                     return Task::none();
                 }
-                match (self.open_repository)(&path) {
-                    Ok(repo) => {
-                        let open_repository = Arc::clone(&self.open_repository);
-                        let initialise = Arc::clone(&self.initialise);
-                        let clone_repository = Arc::clone(&self.clone_repository);
-                        let save_settings = Arc::clone(&self.save_settings);
-                        let settings = self.state.settings.clone();
-                        *self = Self::new(
-                            Some(repo),
-                            Some(path),
-                            open_repository,
-                            initialise,
-                            clone_repository,
-                            settings,
-                            save_settings,
-                        );
-                        Task::done(Message::RefreshRepository)
-                    }
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
+                self.state.loading = true;
+                self.error = None;
+                let open = Arc::clone(&self.open_repository);
+                Task::perform(
+                    open_repository_in_background(open, path),
+                    |(path, result)| Message::RepositoryOpened(path, result.map(OpenedRepository)),
+                )
+            }
+            Message::RepositoryOpened(path, Ok(OpenedRepository(repo))) => {
+                let open_repository = Arc::clone(&self.open_repository);
+                let initialise = Arc::clone(&self.initialise);
+                let clone_repository = Arc::clone(&self.clone_repository);
+                let save_settings = Arc::clone(&self.save_settings);
+                let settings = self.state.settings.clone();
+                let list_models = Arc::clone(&self.list_models);
+                let suggest_commit = Arc::clone(&self.suggest_commit);
+                *self = Self::new(
+                    Some(repo),
+                    Some(path),
+                    open_repository,
+                    initialise,
+                    clone_repository,
+                    settings,
+                    save_settings,
+                );
+                self.list_models = list_models;
+                self.suggest_commit = suggest_commit;
+                Task::done(Message::RefreshRepository)
+            }
+            Message::RepositoryOpened(_, Err(error)) => {
+                self.state.loading = false;
+                self.error = Some(error_message(&error));
+                Task::none()
             }
             Message::ChooseInitFolder => {
                 if self.state.loading {
@@ -839,6 +909,7 @@ impl GitApp {
                 self.branch_list_open = false;
                 self.branch_query.clear();
                 self.selection = Some(selection);
+                self.focused_diff_path = None;
                 self.confirm_discard = None;
                 self.confirm_drop = None;
                 self.branch_prompt = None;
@@ -854,22 +925,24 @@ impl GitApp {
             }
             Message::RefreshAgentModels => self.refresh_models(),
             Message::AgentTokenChanged(token) => {
-                self.store_agent(token, self.state.settings.agent_model.clone());
-                Task::none()
+                // Keep typing responsive: update state only; persist on CloseSettings.
+                self.store_agent(token, self.state.settings.agent_model.clone(), false)
             }
             Message::AgentModelChosen(model) => {
-                self.store_agent(self.state.settings.agent_token.clone(), model);
-                Task::none()
+                self.store_agent(self.state.settings.agent_token.clone(), model, true)
             }
             Message::AgentModelsLoaded(result) => {
                 self.agent_busy = false;
                 self.terminal.record(result.exchange);
+                self.sync_terminal_log();
                 match result.ids {
                     Ok(mut ids) => {
                         self.agent_models_error = None;
                         let current = self.state.settings.agent_model.clone();
-                        if !current.is_empty() && !ids.iter().any(|id| id == &current) {
+                        let persist = if !current.is_empty() && !ids.iter().any(|id| id == &current)
+                        {
                             ids.insert(0, current);
+                            Task::none()
                         } else if self.state.settings.agent_model.is_empty() {
                             let chosen = ids
                                 .iter()
@@ -880,20 +953,24 @@ impl GitApp {
                                         .cloned()
                                         .unwrap_or_else(|| AppSettings::DEFAULT_AGENT_MODEL.into())
                                 });
-                            self.store_agent(self.state.settings.agent_token.clone(), chosen);
-                        }
+                            self.store_agent(self.state.settings.agent_token.clone(), chosen, true)
+                        } else {
+                            Task::none()
+                        };
                         self.agent_models = ids;
+                        persist
                     }
                     Err(error) => {
                         self.agent_models_error = Some(error_message(&error));
+                        Task::none()
                     }
                 }
-                Task::none()
             }
             Message::SuggestCommit => self.suggest_commit_message(),
             Message::CommitSuggested(result) => {
                 self.agent_busy = false;
                 self.terminal.record(result.exchange);
+                self.sync_terminal_log();
                 match result.subject {
                     Ok(subject) => self.commit_message = subject,
                     Err(error) => self.error = Some(error_message(&error)),
@@ -904,22 +981,28 @@ impl GitApp {
                 self.terminal_open = !self.terminal_open;
                 Task::none()
             }
+            Message::TerminalEdited(action) => {
+                if !action.is_edit() {
+                    self.terminal_log.perform(action);
+                }
+                Task::none()
+            }
             Message::ClearTerminal => {
                 self.terminal.clear();
+                self.sync_terminal_log();
                 Task::none()
             }
             Message::CloseSettings => {
                 self.settings_open = false;
-                Task::none()
+                self.persist_settings(self.state.settings.clone())
             }
+            Message::SettingsSaved => Task::none(),
             Message::UiFontChosen(font) => {
-                self.store_appearance(&font, self.state.settings.ui_size);
-                Task::none()
+                self.store_appearance(&font, self.state.settings.ui_size)
             }
             Message::UiSizeChosen(size) => {
                 let font = self.state.settings.ui_font.clone();
-                self.store_appearance(&font, size);
-                Task::none()
+                self.store_appearance(&font, size)
             }
             Message::PatchLoaded(generation, result) => {
                 if generation != self.patch_generation {
@@ -936,6 +1019,10 @@ impl GitApp {
                         self.patch_error = Some(error_message(&error));
                     }
                 }
+                Task::none()
+            }
+            Message::ShowMoreDiff => {
+                self.diff_lines_limit = self.diff_lines_limit.saturating_add(DIFF_LINES_PER_PAGE);
                 Task::none()
             }
             Message::AskDiscard => {
@@ -1060,14 +1147,22 @@ impl GitApp {
             }
             Message::CancelBranch => {
                 self.branch_prompt = None;
+                self.pending_checkout = None;
                 Task::none()
             }
             Message::ConfirmBranch => self.confirm_branch(),
             Message::BranchFinished(result) => {
                 self.state.loading = false;
                 match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
+                    Ok(()) => {
+                        if let Some(name) = self.pending_checkout.take() {
+                            self.update(Message::CheckoutBranch(name))
+                        } else {
+                            Task::done(Message::RefreshRepository)
+                        }
+                    }
                     Err(error) => {
+                        self.pending_checkout = None;
                         self.error = Some(error_message(&error));
                         Task::none()
                     }
@@ -1120,15 +1215,17 @@ impl GitApp {
             return Task::none();
         }
         let visible = self.shown_selection();
-        let Selection::Branch { name, current } = visible else {
-            return Task::none();
-        };
         let prompt = match ask {
             BranchAsk::Create => {
-                let start = if self.local_branch(&name).is_some() {
-                    name
-                } else {
-                    "HEAD".to_string()
+                let start = match &visible {
+                    Selection::Branch { name, .. } if self.local_branch(name).is_some() => {
+                        name.clone()
+                    }
+                    Selection::Remote { name } if self.remote_branch(name).is_some() => {
+                        name.clone()
+                    }
+                    Selection::Branch { .. } => "HEAD".to_string(),
+                    _ => return Task::none(),
                 };
                 BranchPrompt::Create {
                     start,
@@ -1136,6 +1233,9 @@ impl GitApp {
                 }
             }
             BranchAsk::Rename => {
+                let Selection::Branch { name, .. } = visible else {
+                    return Task::none();
+                };
                 if self.local_branch(&name).is_none() {
                     return Task::none();
                 }
@@ -1145,6 +1245,9 @@ impl GitApp {
                 }
             }
             BranchAsk::Delete => {
+                let Selection::Branch { name, current } = visible else {
+                    return Task::none();
+                };
                 if current || self.local_branch(&name).is_none() {
                     return Task::none();
                 }
@@ -1156,6 +1259,10 @@ impl GitApp {
         self.history_prompt = None;
         self.branch_prompt = Some(prompt);
         Task::none()
+    }
+
+    fn sync_terminal_log(&mut self) {
+        self.terminal_log = text_editor::Content::with_text(&self.terminal.shell_text());
     }
 
     fn confirm_branch(&mut self) -> Task<Message> {
@@ -1208,6 +1315,13 @@ impl GitApp {
             .branches
             .iter()
             .find(|branch| !branch.is_remote && branch.name == name)
+    }
+
+    fn remote_branch(&self, name: &str) -> Option<&Branch> {
+        self.state
+            .branches
+            .iter()
+            .find(|branch| branch.is_remote && branch.name == name)
     }
 
     fn edit_marked(&mut self, stage: bool) -> Task<Message> {
@@ -1274,6 +1388,10 @@ impl GitApp {
         if self.state.loading {
             return Task::none();
         }
+        self.pending_checkout = match &action {
+            BranchAction::Create { name, .. } => Some(name.clone()),
+            BranchAction::Rename { .. } | BranchAction::Delete { .. } => None,
+        };
         self.branch_prompt = None;
         self.history_prompt = None;
         self.confirm_discard = None;
@@ -1456,7 +1574,68 @@ impl GitApp {
     }
 
     pub(crate) fn subscription(&self) -> iced::Subscription<Message> {
-        iced::Subscription::none()
+        iced::keyboard::on_key_press(shortcut_message)
+    }
+
+    fn handle_escape(&mut self) -> Task<Message> {
+        if self.confirm_discard.is_some() {
+            return self.update(Message::CancelDiscard);
+        }
+        if self.confirm_drop.is_some() {
+            return self.update(Message::CancelDropStash);
+        }
+        if self.branch_prompt.is_some() {
+            return self.update(Message::CancelBranch);
+        }
+        if self.history_prompt.is_some() {
+            return self.update(Message::CancelHistory);
+        }
+        if self.settings_open {
+            return self.update(Message::CloseSettings);
+        }
+        if self.branch_list_open {
+            self.branch_list_open = false;
+            self.branch_query.clear();
+            return Task::none();
+        }
+        if self.error.is_some() {
+            return self.update(Message::ClearError);
+        }
+        if self.focused_diff_path.is_some() {
+            return self.update(Message::ClearDiffFocus);
+        }
+        Task::none()
+    }
+}
+
+/// Global shortcuts. Text inputs still receive keys; iced delivers both.
+fn shortcut_message(
+    key: iced::keyboard::Key,
+    modifiers: iced::keyboard::Modifiers,
+) -> Option<Message> {
+    use iced::keyboard::key::Named;
+    use iced::keyboard::Key;
+
+    let ctrl = modifiers.control() || modifiers.logo();
+    match key {
+        Key::Named(Named::Escape) => Some(Message::Escape),
+        Key::Named(Named::F5) => Some(Message::Fetch),
+        Key::Character(c)
+            if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("l") =>
+        {
+            Some(Message::CycleLayout)
+        }
+        Key::Character(c)
+            if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("r") =>
+        {
+            Some(Message::RefreshRepository)
+        }
+        Key::Character(c)
+            if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("s") =>
+        {
+            Some(Message::StageMarked)
+        }
+        _ => None,
     }
 }
 
