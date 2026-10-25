@@ -170,8 +170,6 @@ pub(super) fn history_pane<'a>(
             )
             .on_right_press(Message::OpenContextMenu {
                 target: right_target,
-                x: 0.0,
-                y: 0.0,
             }),
         );
     }

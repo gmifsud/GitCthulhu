@@ -16,7 +16,6 @@ use super::chrome::{glyph, hairline, Reading};
 
 const CLOSE_MARK: &str = "×";
 const ADD_MARK: &str = "+";
-const UNDERLINE: f32 = 2.0;
 const PICKER_MAX_HEIGHT: f32 = 200.0;
 const DETACHED: &str = "(detached)";
 
@@ -25,13 +24,17 @@ pub(super) fn tab_strip<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let mut strip = row![].align_y(Alignment::End).spacing(2);
+    let mut strip = row![].align_y(Alignment::Center).spacing(4);
     for (index, session) in app.sessions.iter().enumerate() {
         strip = strip.push(tab(app, index, session, tokens, reading));
     }
     strip = strip.push(add_button(app.tab_picker_open, tokens, reading));
 
-    let mut bar = column![container(strip).padding([0, 8]).width(Length::Fill)];
+    // Full-width chrome bar; tabs themselves stay content-sized chips on the left.
+    let mut bar = column![container(strip)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .align_left(Length::Fill)];
     if app.tab_picker_open {
         bar = bar.push(hairline(tokens));
         bar = bar.push(picker(app, tokens, reading));
@@ -59,22 +62,32 @@ fn tab<'a>(
     let active = index == app.active;
     // The last tab stays, and a tab with a job running has nowhere to land its finish.
     let can_close = app.sessions.len() > 1 && !session.state.loading;
+    let branch = session_branch(app, session);
     let ink = if active {
         tokens.text_primary
     } else {
         tokens.text_secondary
     };
 
-    let label = button(
+    let label = column![
         text(basename(&session.path).to_string())
             .font(reading.font)
             .size(reading.size)
             .wrapping(Wrapping::None)
             .style(move |_| text::Style { color: Some(ink) }),
-    )
-    .padding([4, 8])
-    .on_press(Message::SelectWorktreeTab(index))
-    .style(move |_theme, _status| flat_button(ink));
+        text(branch)
+            .font(reading.font)
+            .size((reading.size - 2.0).max(10.0))
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style {
+                color: Some(if active {
+                    tokens.accent_primary
+                } else {
+                    tokens.text_muted
+                }),
+            }),
+    ]
+    .spacing(1);
 
     let close = button(glyph(
         CLOSE_MARK,
@@ -106,33 +119,39 @@ fn tab<'a>(
         }
     });
 
-    let underline = container(column![])
-        .width(Length::Fill)
-        .height(Length::Fixed(UNDERLINE))
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(if active {
-                tokens.accent_primary
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: None,
-            border: Border::default(),
-            shadow: Shadow::default(),
-        });
+    let shade = if active {
+        tokens.bg_raised
+    } else {
+        tokens.chip
+    };
 
-    let cell = container(column![
-        row![label, close].align_y(Alignment::Center),
-        underline
-    ])
-    .style(move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(if active {
-            tokens.bg_raised
-        } else {
-            Color::TRANSPARENT
-        })),
-        text_color: Some(ink),
-        border: Border::default(),
-        shadow: Shadow::default(),
+    let cell = button(
+        row![label, close]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .padding([5, 8])
+    .on_press(Message::SelectWorktreeTab(index))
+    .style(move |_theme, status| {
+        let hot = matches!(status, Status::Hovered | Status::Pressed);
+        iced::widget::button::Style {
+            background: Some(Background::Color(if hot && !active {
+                tokens.bg_raised
+            } else {
+                shade
+            })),
+            text_color: ink,
+            border: Border {
+                color: if active {
+                    tokens.accent_primary
+                } else {
+                    tokens.chip_border
+                },
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            shadow: Shadow::default(),
+        }
     });
 
     tooltip(
@@ -158,9 +177,8 @@ fn tab<'a>(
     .into()
 }
 
-/// Full path, then the branch checked out there.
-fn tooltip_text(app: &GitApp, session: &WorktreeSession) -> String {
-    let branch = session
+fn session_branch(app: &GitApp, session: &WorktreeSession) -> String {
+    session
         .state
         .branches
         .iter()
@@ -173,8 +191,12 @@ fn tooltip_text(app: &GitApp, session: &WorktreeSession) -> String {
                 .map(|entry| entry.branch.clone())
         })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| DETACHED.to_string());
-    format!("{}\n{branch}", session.path)
+        .unwrap_or_else(|| DETACHED.to_string())
+}
+
+/// Full path, then the branch checked out there.
+fn tooltip_text(app: &GitApp, session: &WorktreeSession) -> String {
+    format!("{}\n{}", session.path, session_branch(app, session))
 }
 
 fn add_button<'a>(open: bool, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -188,35 +210,30 @@ fn add_button<'a>(open: bool, tokens: DesignTokens, reading: Reading) -> Element
         },
         &reading,
     ))
-    .padding([2, 8])
+    .padding([6, 10])
     .on_press(Message::ToggleTabPicker)
     .style(move |_theme, status| {
         let hot = matches!(status, Status::Hovered | Status::Pressed);
         iced::widget::button::Style {
-            background: Some(Background::Color(if hot {
-                tokens.bg_raised
+            background: Some(Background::Color(if hot || open {
+                tokens.chip
             } else {
                 Color::TRANSPARENT
             })),
             text_color: tokens.text_secondary,
             border: Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: 3.0.into(),
+                color: if open {
+                    tokens.accent_primary
+                } else {
+                    tokens.chip_border
+                },
+                width: 1.0,
+                radius: 5.0.into(),
             },
             shadow: Shadow::default(),
         }
     })
     .into()
-}
-
-fn flat_button(ink: Color) -> iced::widget::button::Style {
-    iced::widget::button::Style {
-        background: Some(Background::Color(Color::TRANSPARENT)),
-        text_color: ink,
-        border: Border::default(),
-        shadow: Shadow::default(),
-    }
 }
 
 /// The catalogue entries that have no tab yet.

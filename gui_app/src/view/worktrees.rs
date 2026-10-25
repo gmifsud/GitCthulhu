@@ -8,6 +8,7 @@ use crate::theme::DesignTokens;
 use core_domain::Worktree;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
     button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input,
 };
@@ -72,7 +73,14 @@ pub(super) fn worktrees_section<'a>(
                 }),
         );
     }
-    section = section.push(container(scrollable(rows)).max_height(LIST_MAX_HEIGHT));
+    // Embed the scrollbar so it takes layout space and does not cover the × buttons.
+    let list = scrollable(rows).direction(Direction::Vertical(
+        Scrollbar::new()
+            .width(8)
+            .scroller_width(8)
+            .spacing(6),
+    ));
+    section = section.push(container(list).max_height(LIST_MAX_HEIGHT));
 
     column![section, hairline(tokens)].into()
 }

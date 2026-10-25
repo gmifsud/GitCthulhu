@@ -267,7 +267,10 @@ pub(super) fn command_button<'a>(
         .into()
 }
 
-/// Compact symbol control for working-area toolbars. The title appears after a two-second hover.
+/// Compact symbol control for working-area toolbars.
+///
+/// Always wraps in `tooltip` so the hover target is never remounted when the
+/// two-second tip becomes ready (that remount was clearing hover and flickering).
 pub(super) fn icon_button<'a>(
     mark: &'static str,
     title: impl Into<String>,
@@ -296,41 +299,42 @@ pub(super) fn icon_button<'a>(
         .on_press_maybe(enabled.then_some(message))
         .style(move |_theme, status| bordered_button(tokens, status, enabled, accent));
 
-    let enter = Message::IconTipEnter {
-        key: tip_key.clone(),
-        title: title.clone(),
-    };
-    let leave = Message::IconTipLeave {
-        key: tip_key.clone(),
-    };
-    let sensed = mouse_area(control).on_enter(enter).on_exit(leave);
+    let sensed = mouse_area(control)
+        .on_enter(Message::IconTipEnter {
+            key: tip_key.clone(),
+            title: title.clone(),
+        })
+        .on_exit(Message::IconTipLeave { key: tip_key });
 
-    if tip_ready {
-        tooltip(
-            sensed,
-            container(
-                text(title)
-                    .font(reading.font)
-                    .size((reading.size - 1.0).max(10.0)),
-            )
-            .padding([4, 8])
-            .style(move |_theme: &Theme| container::Style {
-                background: Some(Background::Color(tokens.bg_app)),
-                text_color: Some(tokens.text_primary),
-                border: Border {
-                    color: tokens.border,
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                shadow: Shadow::default(),
-            }),
-            tooltip::Position::Bottom,
+    let tip: Element<'a, Message> = if tip_ready {
+        container(
+            text(title)
+                .font(reading.font)
+                .size((reading.size - 1.0).max(10.0)),
         )
-        .gap(4)
+        .padding([4, 8])
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.bg_app)),
+            text_color: Some(tokens.text_primary),
+            border: Border {
+                color: tokens.border,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+        })
         .into()
     } else {
-        sensed.into()
-    }
+        // Keep a zero-size tip so the outer `tooltip` wrapper never swaps away.
+        container(text("").size(1.0))
+            .width(Length::Fixed(0.0))
+            .height(Length::Fixed(0.0))
+            .into()
+    };
+
+    tooltip(sensed, tip, tooltip::Position::Bottom)
+        .gap(4)
+        .into()
 }
 
 /// Borderless control for Open… / Settings — matches the wireframe `.cmd.quiet`.

@@ -64,6 +64,8 @@ pub(crate) struct GitApp {
     pub(crate) tip_hover: Option<(String, String, std::time::Instant)>,
     /// Tip key whose hover has lasted long enough to show the title.
     pub(crate) tip_ready_key: Option<String>,
+    /// Last pointer position in window coordinates (for tips and context menus).
+    pub(crate) cursor: (f32, f32),
     /// Authoritative, global settings. Fanned into each session's `AppState`.
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
@@ -278,13 +280,16 @@ pub(crate) enum Message {
     CancelWorktree,
     /// Toggle Focus-current on the active session's graph.
     ToggleFocusCurrentBranch,
-    /// Open the right-click menu at approximate window coordinates.
+    /// Open the right-click menu at the current pointer (`cursor`).
     OpenContextMenu {
         target: crate::context_menu::ContextTarget,
+    },
+    CloseContextMenu,
+    /// Pointer moved; keeps context menus and delayed tips near the cursor.
+    CursorMoved {
         x: f32,
         y: f32,
     },
-    CloseContextMenu,
     /// Run a context-menu action (closes the menu first).
     ContextMenuAction(crate::context_menu::ContextActionKind),
     /// Detach HEAD to this commit; confirms when the worktree is dirty.
@@ -402,6 +407,7 @@ impl GitApp {
             confirm_detach: None,
             tip_hover: None,
             tip_ready_key: None,
+            cursor: (0.0, 0.0),
             settings,
             opening: false,
             panes,
@@ -1566,12 +1572,20 @@ impl GitApp {
                 }
                 Task::none()
             }
-            Message::OpenContextMenu { target, x, y } => {
-                self.context_menu = Some(crate::context_menu::ContextMenuState { target, x, y });
+            Message::OpenContextMenu { target } => {
+                self.context_menu = Some(crate::context_menu::ContextMenuState {
+                    target,
+                    x: self.cursor.0,
+                    y: self.cursor.1,
+                });
                 Task::none()
             }
             Message::CloseContextMenu => {
                 self.context_menu = None;
+                Task::none()
+            }
+            Message::CursorMoved { x, y } => {
+                self.cursor = (x, y);
                 Task::none()
             }
             Message::ContextMenuAction(kind) => {
@@ -2385,17 +2399,27 @@ impl GitApp {
 
     pub(crate) fn subscription(&self) -> iced::Subscription<Message> {
         let keys = iced::keyboard::on_key_press(shortcut_message);
+        let cursor = iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                Some(Message::CursorMoved {
+                    x: position.x,
+                    y: position.y,
+                })
+            }
+            _ => None,
+        });
         let waiting_tip = self.tip_hover.is_some()
             && self.tip_ready_key.as_ref()
                 != self.tip_hover.as_ref().map(|(key, _, _)| key);
         if waiting_tip {
             iced::Subscription::batch([
                 keys,
+                cursor,
                 iced::time::every(iced::time::Duration::from_millis(200))
                     .map(|_| Message::IconTipTick),
             ])
         } else {
-            keys
+            iced::Subscription::batch([keys, cursor])
         }
     }
 

@@ -246,11 +246,7 @@ fn ref_row<'a>(
     });
     if let Some(target) = context {
         mouse_area(row)
-            .on_right_press(Message::OpenContextMenu {
-                target,
-                x: 0.0,
-                y: 0.0,
-            })
+            .on_right_press(Message::OpenContextMenu { target })
             .into()
     } else {
         row.into()

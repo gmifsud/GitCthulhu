@@ -4,8 +4,8 @@ use crate::app::{GitApp, Message};
 use crate::context_menu::context_actions;
 use crate::reachability::session_head_tip;
 use crate::theme::DesignTokens;
-use iced::widget::{button, column, container, text};
-use iced::{Background, Border, Element, Length, Shadow, Theme};
+use iced::widget::{button, column, container, mouse_area, text};
+use iced::{Background, Border, Element, Length, Padding, Shadow, Theme};
 
 use super::chrome::Reading;
 
@@ -90,34 +90,48 @@ pub(super) fn context_menu_overlay<'a>(
         }),
     );
 
+    let panel = container(list)
+        .width(Length::Fixed(220.0))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.bg_chrome)),
+            text_color: Some(tokens.text_primary),
+            border: Border {
+                color: tokens.chip_border,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            shadow: Shadow::default(),
+        });
+
+    // Pin the panel to the pointer captured when the menu opened.
+    let left = menu.x.max(0.0);
+    let top = menu.y.max(0.0);
+
+    // Backdrop click (or right-click) dismisses; menu buttons capture first so
+    // choosing an action is unaffected.
     Some(
-        container(
-            container(list)
-                .width(Length::Fixed(220.0))
+        mouse_area(
+            container(panel)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(Padding {
+                    top,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left,
+                })
                 .style(move |_theme: &Theme| container::Style {
-                    background: Some(Background::Color(tokens.bg_chrome)),
-                    text_color: Some(tokens.text_primary),
-                    border: Border {
-                        color: tokens.chip_border,
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
+                    background: Some(Background::Color(iced::Color {
+                        a: 0.20,
+                        ..tokens.bg_app
+                    })),
+                    text_color: None,
+                    border: Border::default(),
                     shadow: Shadow::default(),
                 }),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(iced::Color {
-                a: 0.35,
-                ..tokens.bg_app
-            })),
-            text_color: None,
-            border: Border::default(),
-            shadow: Shadow::default(),
-        })
+        .on_press(Message::CloseContextMenu)
+        .on_right_press(Message::CloseContextMenu)
         .into(),
     )
 }
