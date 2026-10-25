@@ -74,5 +74,7 @@ Review weekly — prune anything stale.
 
 ## 9. Decisions Log
 <!-- Stable architectural decisions. One line each. Link to ADR if it deserves more. -->
-- _(empty)_
+- ADR 0001: window does not name the git adapter.
+- ADR 0002: app state stays a reducer.
+- ADR 0003: sessions-first GitLens path — worktree tabs own `AppState`; compare + split diff after WP1. Spec: `docs/superpowers/specs/2026-10-25-worktree-tabs-design.md`.
 

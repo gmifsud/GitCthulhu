@@ -50,5 +50,7 @@ Skill library symlinked at `.agents/skills/` (or `.codex/skills/` depending on t
 
 ## Decisions Log
 <!-- Stable architectural decisions. Link ADRs where they exist. -->
-- _(empty)_
+- ADR 0001: window does not name the git adapter.
+- ADR 0002: app state stays a reducer.
+- ADR 0003: sessions-first GitLens path — worktree tabs own `AppState`; compare + split diff after WP1. Spec: `docs/superpowers/specs/2026-10-25-worktree-tabs-design.md`.
 

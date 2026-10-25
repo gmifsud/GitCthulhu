@@ -1,6 +1,6 @@
 # ADR 0003: Reaching the GitLens target — worktree sessions, compare, and the split diff
 
-**Status:** Proposed
+**Status:** Accepted (2026-10-25), with one implementation amendment on finish routing (see below)
 **Date:** 2026-10-25
 **Deciders:** grego
 **Related:** ADR 0001 (window does not name the adapter), ADR 0002 (reducer), `docs/superpowers/specs/2026-10-25-worktree-tabs-design.md`, `docs/proposals/three-column-window.md`
@@ -33,7 +33,7 @@ The reference image is VS Code with GitLens: a commit graph with lanes, avatars,
 
 2. **Location:** `app/src/main.rs:29-34`, `opener()`. **Issue:** the only `RepositoryOpener` calls `remember(store, path)` on every open, so opening a linked worktree into a tab overwrites `last_repo_path` with the linked path. **Impact:** next launch reopens the linked worktree, or the welcome screen once it has been removed. **Remediation:** the composition root supplies a second closure for worktree tabs that constructs `GitoxideAdapter::new(path)` without `remember`; `gui_app` gains a `WorktreeOpener` type alias beside `RepositoryOpener`. ADR 0001 is intact: still no adapter name in `gui_app`. **Verification:** `startup::launch_path` test with a saved main path after a tab open.
 
-3. **Location:** spec §"Errors and concurrency", finish handlers. **Issue:** every `*Finished(Result<…>)` variant today assumes the single adapter (`app.rs:654-725`). The spec says "target that session by path" but does not say how. **Impact:** a checkout finishing on tab A after the user switched to tab B would clear B's `loading` and refresh B. **Remediation:** one routing shape, not fifteen: `Message::Finished { path: String, outcome: Outcome }` where `Outcome` is an enum over the existing result payloads (`Checkout`, `Fetch`, `Push`, `Pull`, `Edit(WorktreeEdit)`, `Discard`, `Hunk`, `Stash`, `Branch`, `History`, `Loaded(Vec<ViewEvent>)`, `Patch(u64, …)`). `update` resolves `self.session_mut(&path)`; a missing session drops the outcome. Modal prompts (`branch_prompt`, `history_prompt`, `confirm_*`) stay global and are cleared on tab switch. **Verification:** finish a job for a closed session and assert no panic and no state change.
+3. **Location:** spec §"Errors and concurrency", finish handlers. **Issue:** every `*Finished(Result<…>)` variant today assumes the single adapter (`app.rs:654-725`). The spec says "target that session by path" but does not say how. **Impact:** a checkout finishing on tab A after the user switched to tab B would clear B's `loading` and refresh B. **Remediation:** finish handlers resolve by **path**, never by `active` alone. Target shape: `Message::Finished { path: String, outcome: Outcome }` where `Outcome` covers the existing result payloads (`Checkout`, `Fetch`, `Push`, `Pull`, `Edit(WorktreeEdit)`, `Discard`, `Hunk`, `Stash`, `Branch`, `History`, `Loaded(Vec<ViewEvent>)`, `Patch(u64, …)`). `update` resolves `self.session_mut(&path)`; a missing session drops the outcome. Modal prompts (`branch_prompt`, `history_prompt`, `confirm_*`) stay global and are cleared on tab switch. **Amendment:** WP1-b may add `path` to each existing `*Finished` first and consolidate into one `Finished` enum in a follow-up, provided the fitness function holds (no finish handler reads `self.active` without a path). **Verification:** finish a job for a closed session and assert no panic and no state change.
 
 4. **Location:** spec §"Window chrome / Tab strip". **Issue:** the image's tabs are *document* tabs (Commit Graph, Changes in …), the spec's tabs are *session* tabs. **Impact:** reading the image literally would add a second tab concept. **Remediation:** Decision 1 below.
 
@@ -145,15 +145,15 @@ Wire the top-bar search to `graph_query` with a pure `matches_commit(&Commit, &s
 
 Each step compiles and passes `cargo test` alone. Order is a dependency order, not a preference.
 
-1. [ ] **Spec amendments** — update the worktree spec with the four review items (session owns `AppState`; `WorktreeOpener` without `remember`; `Message::Finished { path, outcome }`; tab strip is sessions only). Sign-off before code.
+1. [x] **Spec amendments** — worktree spec updated 2026-10-25 with the four review items (session owns `AppState`; `WorktreeOpener` without `remember`; path-routed finishes; tab strip is sessions only).
 2. [ ] **WP1-a Domain + port** — `Worktree` model; `worktrees` / `add_worktree` / `remove_worktree` on `GitRepository`; porcelain parser with tests; fake fields; adapter temp-repo tests (list after init, add, remove, force remove of a dirty tree).
-3. [ ] **WP1-b Sessions** — `WorktreeSession`, `GitApp::session()/session_mut()`, `apply_retention`, `WorktreeTabRetention` on `AppSettings` + Settings UI, `Finished` routing. Tests: switch leaves the other session untouched; finish for a closed session is dropped; retention round-trips through save/load.
+3. [ ] **WP1-b Sessions** — `WorktreeSession`, `GitApp::session()/session_mut()`, `apply_retention`, `WorktreeTabRetention` on `AppSettings` + Settings UI, path-routed finishes (incremental or consolidated `Finished`). Tests: switch leaves the other session untouched; finish for a closed session is dropped; retention round-trips through save/load.
 4. [ ] **WP1-c Chrome** — tab strip under the top bar; explorer Worktrees section in the Files column; `+` picker; create modal; remove confirm with force checkbox; composition-root `WorktreeOpener`. Test: `last_repo_path` unchanged after a tab open.
 5. [ ] **WP1-d** — WIP row per open session in the graph; `CONTEXT.md` rewrite of "Later: several repositories and worktrees".
 6. [ ] **WP2 Compare** — `FileChange`, `Comparison`, `compare`, `range_patch`; adapter + fake + temp-repo tests (ahead/behind, rename detection, empty range); `PatchQuery::Range`; `Compare` ribbon command; inspector Compare mode.
 7. [ ] **WP3 Split diff** — `pair_lines`, `word_diff`, hidden-line bars, per-file header, `diff_split` setting. Tests on the pure functions; pair-budget test.
 8. [ ] **WP4 Graph polish** — `graph_query` wiring, `matches_commit`, avatar initial, optional curved lane joins.
-9. [ ] Record outcome here (Accepted / amended) and add the decision to `CLAUDE.md` §9.
+9. [x] Record outcome: **Accepted** (with finish-routing amendment above); decision logged in `CLAUDE.md` / `AGENTS.md` §9.
 
 ## Verification
 
