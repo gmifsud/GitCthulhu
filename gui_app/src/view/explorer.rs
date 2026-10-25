@@ -48,6 +48,7 @@ pub(super) fn explorer_pane<'a>(
             ExplorerSection::Local,
             collapsed.local,
             (!collapsed.local).then(|| local_rows(&locals, tokens, reading)),
+            None,
             tokens,
             reading,
         ),
@@ -58,6 +59,7 @@ pub(super) fn explorer_pane<'a>(
             ExplorerSection::Remote,
             collapsed.remote,
             (!collapsed.remote).then(|| remote_rows(&remotes, tokens, reading)),
+            None,
             tokens,
             reading,
         ),
@@ -68,6 +70,17 @@ pub(super) fn explorer_pane<'a>(
             ExplorerSection::Worktrees,
             collapsed.worktrees,
             (!collapsed.worktrees).then(|| worktrees_rows(app, worktrees, tokens, reading)),
+            Some(icon_button(
+                "+",
+                "New worktree",
+                "worktree-new",
+                app.tip_ready("worktree-new"),
+                Message::AskCreateWorktree,
+                !app.worktree_busy,
+                false,
+                tokens,
+                reading,
+            )),
             tokens,
             reading,
         ),
@@ -78,6 +91,7 @@ pub(super) fn explorer_pane<'a>(
             ExplorerSection::Stashes,
             collapsed.stashes,
             (!collapsed.stashes).then(|| stash_rows(stashes, tokens, reading)),
+            None,
             tokens,
             reading,
         ),
@@ -88,6 +102,7 @@ pub(super) fn explorer_pane<'a>(
             ExplorerSection::Tags,
             collapsed.tags,
             (!collapsed.tags).then(|| tag_rows(tags, tokens, reading)),
+            None,
             tokens,
             reading,
         ),
@@ -104,13 +119,14 @@ fn section_block<'a>(
     section: ExplorerSection,
     collapsed: bool,
     body: Option<Element<'a, Message>>,
+    trailing: Option<Element<'a, Message>>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
     let chevron = if collapsed { FOLD_CLOSED } else { FOLD_OPEN };
     let header_label = format!("{title} · {count}");
     let sym = symbol_reading(&reading);
-    let header = button(
+    let toggle = button(
         row![
             text(chevron).font(sym.font).size(reading.size),
             text(header_label)
@@ -139,6 +155,13 @@ fn section_block<'a>(
             shadow: Shadow::default(),
         }
     });
+    let mut header_row = row![toggle].align_y(Alignment::Center);
+    if let Some(action) = trailing {
+        header_row = header_row.push(action);
+    }
+    let header = container(header_row)
+        .width(Length::Fill)
+        .padding([0, 4, 0, 0]);
 
     let mut block = column![header].width(Length::Fill);
     if let Some(body) = body {
