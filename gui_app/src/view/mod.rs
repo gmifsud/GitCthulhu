@@ -19,7 +19,7 @@ use iced::widget::{column, container};
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use branch::branch_prompt;
-use chrome::{hairline, reading};
+use chrome::{compact, hairline, reading};
 use confirm::{confirm_discard, confirm_drop_stash, history_prompt};
 use settings::settings_dialog;
 use status_bar::status_bar;
@@ -31,7 +31,7 @@ use workspace::workspace;
 impl GitApp {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let tokens = self.tokens;
-        let reading = reading(&self.state.settings);
+        let reading = compact(reading(&self.state.settings));
 
         if self.adapter.is_none() {
             return welcome(self, tokens, reading);
