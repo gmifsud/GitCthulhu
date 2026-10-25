@@ -104,7 +104,7 @@ pub(super) fn history_pane<'a>(
                 .width(lanes_width)
                 .height(Length::Fixed(ROW_HEIGHT)),
             single_line(
-                &short_hash(&commit.id),
+                short_hash(&commit.id),
                 Length::Fixed(HASH_WIDTH),
                 reading,
                 tokens,
