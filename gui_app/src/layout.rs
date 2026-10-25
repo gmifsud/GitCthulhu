@@ -1,21 +1,25 @@
-//! The graph, the inspector, the diff, and the files rail.
+//! Staging on the left, history in the middle, inspector on the right.
 //!
-//! Each preset is a different split tree over those panes. Ratios belong to
-//! the preset that produced them: a width in Columns is a height when the
-//! inspector sits over the diff.
+//! Default preset stacks the graph above the diff in the middle column so the
+//! description column keeps width while Diff still has a full middle span.
 
 use iced::widget::pane_grid::{Axis, Configuration, Node, Split, State};
 
-/// Graph's share of the outer split. The wireframe's left column.
-pub(crate) const GRAPH_RATIO: f32 = 0.34;
-/// Inspector's share of the inspector/diff split when that split is a width.
-pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.30;
-/// Inspector's share of the inspector/diff split when that split is a height.
-/// Both stacked presets use it.
-pub(crate) const STACKED_MIDDLE_RATIO: f32 = 0.28;
-/// Share of the post-graph split given to the inspector and the diff.
-/// The files rail takes the rest.
-pub(crate) const FILES_RATIO: f32 = 0.86;
+/// Left staging column share of the window.
+pub(crate) const FILES_RATIO: f32 = 0.22;
+/// Of the remainder, share given to Graph (+ Diff) versus the Inspector.
+pub(crate) const GRAPH_RATIO: f32 = 0.68;
+/// Graph's share of the Graph/Diff split when that split is a height.
+pub(crate) const STACKED_MIDDLE_RATIO: f32 = 0.48;
+/// Diff's share of Diff|Inspector when Columns places them side by side.
+pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.50;
+
+/// Floor for the left staging ratio (avoids crushing Stage).
+pub(crate) const MIN_FILES_RATIO: f32 = 0.16;
+pub(crate) const MAX_FILES_RATIO: f32 = 0.36;
+/// Floor for the middle history share of the post-staging remainder.
+pub(crate) const MIN_GRAPH_RATIO: f32 = 0.50;
+pub(crate) const MAX_GRAPH_RATIO: f32 = 0.82;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspacePane {
@@ -28,11 +32,11 @@ pub(crate) enum WorkspacePane {
 /// Which arrangement the top bar is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutPreset {
-    /// Graph | Inspector | Diff | Files
+    /// Files | Graph | Diff | Inspector
     Columns,
-    /// Graph | (Inspector / Diff) | Files
+    /// Files | (Graph / Diff) | Inspector
     InspectorOverDiff,
-    /// Graph / Inspector / Diff / Files
+    /// Files / Graph / Diff / Inspector
     Stacked,
 }
 
@@ -46,13 +50,22 @@ impl LayoutPreset {
             Self::Stacked => 2,
         }
     }
+
+    /// Next preset in the top-bar cycle (Ctrl+Shift+L).
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Columns => Self::InspectorOverDiff,
+            Self::InspectorOverDiff => Self::Stacked,
+            Self::Stacked => Self::Columns,
+        }
+    }
 }
 
 /// The three splitter positions for one preset.
 ///
-/// `graph` is the outer split (graph against everything else). `middle` is the
-/// inspector/diff split, vertical in [`LayoutPreset::Columns`] and horizontal
-/// in the other two. `files` is the split whose far side is the files rail.
+/// `files` is the outer split (staging against everything else). `graph` is the
+/// split between the history column (or history+diff stack) and the inspector.
+/// `middle` is Graph vs Diff.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LayoutRatios {
     pub graph: f32,
@@ -63,12 +76,26 @@ pub(crate) struct LayoutRatios {
 impl LayoutRatios {
     pub(crate) fn for_preset(preset: LayoutPreset) -> Self {
         Self {
+            files: FILES_RATIO,
             graph: GRAPH_RATIO,
             middle: match preset {
                 LayoutPreset::Columns => COLUMNS_MIDDLE_RATIO,
                 LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => STACKED_MIDDLE_RATIO,
             },
-            files: FILES_RATIO,
+        }
+    }
+
+    pub(crate) fn clamp_slot(&mut self, slot: RatioSlot, ratio: f32) {
+        match slot {
+            RatioSlot::Files => {
+                self.files = ratio.clamp(MIN_FILES_RATIO, MAX_FILES_RATIO);
+            }
+            RatioSlot::Graph => {
+                self.graph = ratio.clamp(MIN_GRAPH_RATIO, MAX_GRAPH_RATIO);
+            }
+            RatioSlot::Middle => {
+                self.middle = ratio.clamp(0.25, 0.75);
+            }
         }
     }
 }
@@ -93,7 +120,7 @@ pub(crate) fn new_panes(preset: LayoutPreset, ratios: &LayoutRatios) -> State<Wo
     State::with_configuration(configuration(preset, ratios, true))
 }
 
-/// The same tree as [`new_panes`] without the files rail, used when the rail is collapsed.
+/// The same tree as [`new_panes`] without the staging column.
 pub(crate) fn new_panes_without_files(
     preset: LayoutPreset,
     ratios: &LayoutRatios,
@@ -102,7 +129,6 @@ pub(crate) fn new_panes_without_files(
 }
 
 /// Split handles produced by the latest [`new_panes`] or [`new_panes_without_files`].
-/// The handles are new on every rebuild, so the caller replaces this map each time.
 pub(crate) fn split_slots(state: &State<WorkspacePane>) -> Vec<(Split, RatioSlot)> {
     let mut slots = Vec::new();
     collect_slots(state.layout(), state, &mut slots);
@@ -114,28 +140,46 @@ fn configuration(
     ratios: &LayoutRatios,
     files: bool,
 ) -> Configuration<WorkspacePane> {
-    let middle = split(
-        middle_axis(preset),
-        ratios.middle,
-        Configuration::Pane(WorkspacePane::Inspector),
-        Configuration::Pane(WorkspacePane::Diff),
-    );
-    let rest = if files {
+    let history = match preset {
+        LayoutPreset::Columns => split(
+            Axis::Vertical,
+            ratios.middle,
+            Configuration::Pane(WorkspacePane::Diff),
+            Configuration::Pane(WorkspacePane::Inspector),
+        ),
+        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+            middle_axis(preset),
+            ratios.middle,
+            Configuration::Pane(WorkspacePane::Graph),
+            Configuration::Pane(WorkspacePane::Diff),
+        ),
+    };
+
+    let centre = match preset {
+        LayoutPreset::Columns => split(
+            Axis::Vertical,
+            ratios.graph,
+            Configuration::Pane(WorkspacePane::Graph),
+            history,
+        ),
+        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+            outer_axis(preset),
+            ratios.graph,
+            history,
+            Configuration::Pane(WorkspacePane::Inspector),
+        ),
+    };
+
+    if files {
         split(
             outer_axis(preset),
             ratios.files,
-            middle,
             Configuration::Pane(WorkspacePane::Files),
+            centre,
         )
     } else {
-        middle
-    };
-    split(
-        outer_axis(preset),
-        ratios.graph,
-        Configuration::Pane(WorkspacePane::Graph),
-        rest,
-    )
+        centre
+    }
 }
 
 fn outer_axis(preset: LayoutPreset) -> Axis {
@@ -178,15 +222,24 @@ fn collect_slots(node: &Node, state: &State<WorkspacePane>, slots: &mut Vec<(Spl
 }
 
 fn slot_for(left: &[WorkspacePane], right: &[WorkspacePane]) -> Option<RatioSlot> {
-    if left == [WorkspacePane::Graph] {
-        Some(RatioSlot::Graph)
-    } else if left == [WorkspacePane::Inspector] && right == [WorkspacePane::Diff] {
-        Some(RatioSlot::Middle)
-    } else if right == [WorkspacePane::Files] {
-        Some(RatioSlot::Files)
-    } else {
-        None
+    if left == [WorkspacePane::Files] {
+        return Some(RatioSlot::Files);
     }
+    if left == [WorkspacePane::Graph] && right == [WorkspacePane::Diff] {
+        return Some(RatioSlot::Middle);
+    }
+    if left == [WorkspacePane::Diff] && right == [WorkspacePane::Inspector] {
+        return Some(RatioSlot::Middle);
+    }
+    if left == [WorkspacePane::Graph] {
+        return Some(RatioSlot::Graph);
+    }
+    if left == [WorkspacePane::Graph, WorkspacePane::Diff]
+        || (left.contains(&WorkspacePane::Graph) && left.contains(&WorkspacePane::Diff))
+    {
+        return Some(RatioSlot::Graph);
+    }
+    None
 }
 
 fn panes_under(node: &Node, state: &State<WorkspacePane>) -> Vec<WorkspacePane> {
