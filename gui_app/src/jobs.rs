@@ -2,7 +2,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::thread;
 
-use core_domain::{DomainError, FileDisposition, GitRepository, Hunk, Patch, ResetMode, ViewEvent};
+use core_domain::{
+    DomainError, FileDisposition, GitRepository, Hunk, Patch, ResetMode, ViewEvent, Worktree,
+};
 use iced::futures::channel::oneshot;
 
 /// A repository adapter that can be shared with background work.
@@ -249,6 +251,51 @@ pub(crate) fn open_repository_in_background(
                     "repository open was interrupted".to_string(),
                 )),
             )
+        },
+    )
+}
+
+pub(crate) fn worktrees_in_background(
+    repo: SharedRepository,
+) -> impl Future<Output = Result<Vec<Worktree>, DomainError>> {
+    in_background(
+        move || repo.worktrees(),
+        || {
+            Err(DomainError::Unknown(
+                "worktree list was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+/// `git worktree add`. With `create_branch`, `branch` is made at HEAD; otherwise it must exist.
+pub(crate) fn add_worktree_in_background(
+    repo: SharedRepository,
+    path: String,
+    branch: String,
+    create_branch: bool,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.add_worktree(&path, &branch, create_branch),
+        || {
+            Err(DomainError::Unknown(
+                "worktree create was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+pub(crate) fn remove_worktree_in_background(
+    repo: SharedRepository,
+    path: String,
+    force: bool,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.remove_worktree(&path, force),
+        || {
+            Err(DomainError::Unknown(
+                "worktree remove was interrupted".to_string(),
+            ))
         },
     )
 }
@@ -766,5 +813,39 @@ mod tests {
             declined,
             Err(DomainError::Unknown("hook declined".to_string()))
         );
+    }
+
+    #[test]
+    fn background_worktree_jobs_return_the_adapter_result() {
+        let linked = Worktree {
+            path: r"D:\repo-wt".to_string(),
+            branch: "topic".to_string(),
+            is_main: false,
+            locked: false,
+        };
+        let repo = FakeGitRepository {
+            worktrees_result: Ok(vec![linked.clone()]),
+            add_worktree_result: Err(DomainError::Unknown("path exists".to_string())),
+            ..FakeGitRepository::ok()
+        };
+        let shared: SharedRepository = Arc::new(repo);
+
+        let listed =
+            iced::futures::executor::block_on(worktrees_in_background(Arc::clone(&shared)));
+        let added = iced::futures::executor::block_on(add_worktree_in_background(
+            Arc::clone(&shared),
+            r"D:\repo-wt".to_string(),
+            "topic".to_string(),
+            true,
+        ));
+        let removed = iced::futures::executor::block_on(remove_worktree_in_background(
+            shared,
+            r"D:\repo-wt".to_string(),
+            false,
+        ));
+
+        assert_eq!(listed, Ok(vec![linked]));
+        assert_eq!(added, Err(DomainError::Unknown("path exists".to_string())));
+        assert_eq!(removed, Ok(()));
     }
 }

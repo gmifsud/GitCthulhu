@@ -28,6 +28,11 @@ use iced::{Task, Theme};
 pub type RepositoryOpener =
     Arc<dyn Fn(&str) -> Result<Arc<dyn GitRepository + Send + Sync>, DomainError> + Send + Sync>;
 
+/// Opens a linked worktree into a tab. Unlike [`RepositoryOpener`] it must not remember the path:
+/// `last_repo_path` stays the repository the user chose with Open….
+pub type WorktreeOpener =
+    Arc<dyn Fn(&str) -> Result<Arc<dyn GitRepository + Send + Sync>, DomainError> + Send + Sync>;
+
 /// `git init` in a folder. The window opens the path afterwards through [`RepositoryOpener`].
 pub type RepositoryInitialiser = Arc<dyn Fn(&str) -> Result<(), DomainError> + Send + Sync>;
 
@@ -52,6 +57,7 @@ pub fn run(
     repo: Box<dyn GitRepository + Send + Sync>,
     repository_path: String,
     open: RepositoryOpener,
+    open_worktree: WorktreeOpener,
     initialise: RepositoryInitialiser,
     clone_repository: RepositoryCloner,
     settings: AppSettings,
@@ -70,6 +76,7 @@ pub fn run(
                         Arc::from(repo),
                         Some(repository_path),
                         Arc::clone(&open),
+                        Arc::clone(&open_worktree),
                         Arc::clone(&initialise),
                         Arc::clone(&clone_repository),
                         settings.clone(),
@@ -85,8 +92,10 @@ pub fn run(
 }
 
 /// Run on the welcome screen. Open Repository uses `open` after the folder dialog.
+#[allow(clippy::too_many_arguments)]
 pub fn run_welcome(
     open: RepositoryOpener,
+    open_worktree: WorktreeOpener,
     initialise: RepositoryInitialiser,
     clone_repository: RepositoryCloner,
     settings: AppSettings,
@@ -103,6 +112,7 @@ pub fn run_welcome(
                 {
                     let mut app = GitApp::welcome_with(
                         open,
+                        open_worktree,
                         initialise,
                         clone_repository,
                         settings,

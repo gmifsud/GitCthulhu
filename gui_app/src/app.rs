@@ -10,19 +10,23 @@ use iced::Task;
 use crate::appearance::{font_family, font_size};
 use crate::changes::{marked_paths, MarkedFile};
 use crate::jobs::{
-    branch_in_background, checkout_in_background, choose_repository_folder, clone_in_background,
-    discard_hunk_in_background, discard_in_background, edit_in_background, error_message,
-    fetch_in_background, history_in_background, init_in_background, list_models_in_background,
-    load_patch_in_background, load_repository_in_background, open_repository_in_background,
-    pull_in_background, push_in_background, save_settings_in_background, stage_hunk_in_background,
-    stash_in_background, suggest_commit_in_background, BranchAction, HistoryAction,
-    SharedRepository, StashAction, WorktreeEdit,
+    add_worktree_in_background, branch_in_background, checkout_in_background,
+    choose_repository_folder, clone_in_background, discard_hunk_in_background,
+    discard_in_background, edit_in_background, error_message, fetch_in_background,
+    history_in_background, init_in_background, list_models_in_background, load_patch_in_background,
+    load_repository_in_background, open_repository_in_background, pull_in_background,
+    push_in_background, remove_worktree_in_background, save_settings_in_background,
+    stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
+    worktrees_in_background, BranchAction, HistoryAction, SharedRepository, StashAction,
+    WorktreeEdit,
 };
 use crate::layout::{self, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
-use crate::session::{apply_retention, WorktreeSession, DIFF_LINES_PER_PAGE};
+use crate::session::{apply_retention, same_path, WorktreeSession, DIFF_LINES_PER_PAGE};
 use crate::theme::DesignTokens;
-use crate::{RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver};
+use crate::{
+    RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver, WorktreeOpener,
+};
 
 /// Repository handed from a background open into [`Message::RepositoryOpened`].
 ///
@@ -41,11 +45,17 @@ pub(crate) struct GitApp {
     pub(crate) sessions: Vec<WorktreeSession>,
     /// Index into `sessions` of the tab bound to the window.
     pub(crate) active: usize,
-    /// Every worktree of the open repository. Populated by the explorer in WP1-c.
-    #[allow(dead_code)]
+    /// Every worktree of the open repository, from `git worktree list`.
     pub(crate) worktree_catalogue: Vec<Worktree>,
-    #[allow(dead_code)]
     pub(crate) catalogue_error: Option<String>,
+    /// The `+` picker under the tab strip is showing the worktrees that are not open yet.
+    pub(crate) tab_picker_open: bool,
+    /// A create or remove prompt waiting for the user to confirm.
+    pub(crate) worktree_prompt: Option<WorktreePrompt>,
+    /// A `git worktree add` / `remove` is in flight; further confirms are ignored.
+    pub(crate) worktree_busy: bool,
+    /// The path being opened into a tab; further opens are ignored until it lands.
+    worktree_opening: Option<String>,
     /// Authoritative, global settings. Fanned into each session's `AppState`.
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
@@ -78,6 +88,8 @@ pub(crate) struct GitApp {
     pub(crate) history_prompt: Option<HistoryPrompt>,
     pub(crate) clone_url: String,
     open_repository: RepositoryOpener,
+    /// Opens a linked worktree into a tab without remembering it.
+    open_worktree: WorktreeOpener,
     initialise: RepositoryInitialiser,
     clone_repository: RepositoryCloner,
     save_settings: SettingsSaver,
@@ -221,6 +233,61 @@ pub(crate) enum Message {
     ConfirmMerge,
     ConfirmRebase,
     HistoryFinished(String, Result<(), DomainError>),
+    /// Focus the tab at this index.
+    SelectWorktreeTab(usize),
+    /// Close the tab at this index. The worktree on disk is left alone.
+    CloseWorktreeTab(usize),
+    /// Show or hide the `+` picker of worktrees that are not open yet.
+    ToggleTabPicker,
+    /// Focus the tab for this path, opening it first when it is not open.
+    OpenWorktree(String),
+    /// A worktree adapter built off-thread by the `WorktreeOpener`.
+    WorktreeOpened(String, Result<OpenedRepository, DomainError>),
+    /// The path is the session that asked, so a result for a closed tab is dropped.
+    WorktreesLoaded(String, Result<Vec<Worktree>, DomainError>),
+    AskCreateWorktree,
+    AskRemoveWorktree {
+        path: String,
+    },
+    WorktreePathChanged(String),
+    WorktreeBranchChanged(String),
+    WorktreeCreateBranchToggled(bool),
+    WorktreeForceToggled(bool),
+    ChooseWorktreeFolder,
+    WorktreeFolderChosen(Option<String>),
+    ConfirmCreateWorktree,
+    ConfirmRemoveWorktree {
+        force: bool,
+    },
+    CancelWorktree,
+    /// `git worktree add` finished. The first path is the session that ran it.
+    WorktreeCreated {
+        session: String,
+        path: String,
+        result: Result<(), DomainError>,
+    },
+    /// `git worktree remove` finished. The first path is the session that ran it.
+    WorktreeRemoved {
+        session: String,
+        path: String,
+        result: Result<(), DomainError>,
+    },
+}
+
+/// A worktree create or remove waiting for the user to confirm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorktreePrompt {
+    Create {
+        path: String,
+        branch: String,
+        /// `-b`: make `branch` at HEAD. Off checks out an existing local branch.
+        create_branch: bool,
+    },
+    Remove {
+        path: String,
+        branch: String,
+        force: bool,
+    },
 }
 
 /// A cherry-pick, reset, merge, or rebase waiting for confirmation.
@@ -254,10 +321,12 @@ enum HistoryAsk {
 }
 
 impl GitApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         adapter: Option<SharedRepository>,
         repository_path: Option<String>,
         open_repository: RepositoryOpener,
+        open_worktree: WorktreeOpener,
         initialise: RepositoryInitialiser,
         clone_repository: RepositoryCloner,
         settings: AppSettings,
@@ -280,6 +349,10 @@ impl GitApp {
             active: 0,
             worktree_catalogue: Vec::new(),
             catalogue_error: None,
+            tab_picker_open: false,
+            worktree_prompt: None,
+            worktree_busy: false,
+            worktree_opening: None,
             settings,
             opening: false,
             panes,
@@ -308,6 +381,7 @@ impl GitApp {
             history_prompt: None,
             clone_url: String::new(),
             open_repository,
+            open_worktree,
             initialise,
             clone_repository,
             save_settings,
@@ -339,8 +413,6 @@ impl GitApp {
     }
 
     /// Switch to another tab, applying the retention policy to the session left behind.
-    /// Wired to the tab strip in WP1-c; exercised by tests until then.
-    #[allow(dead_code)]
     fn activate(&mut self, index: usize) {
         if index == self.active || index >= self.sessions.len() {
             return;
@@ -348,11 +420,13 @@ impl GitApp {
         let mode = self.settings.worktree_tab_retention;
         apply_retention(&mut self.sessions[self.active], mode);
         self.active = index;
-        // Modal prompts are global; clear them so a switch never carries one across.
-        self.confirm_discard = None;
-        self.confirm_drop = None;
-        self.branch_prompt = None;
-        self.history_prompt = None;
+        self.reset_transient_ui();
+    }
+
+    /// Modal prompts and pop-overs are global; clear them so a tab change never carries one across.
+    fn reset_transient_ui(&mut self) {
+        self.close_prompts();
+        self.tab_picker_open = false;
         self.branch_list_open = false;
         self.branch_query.clear();
     }
@@ -506,6 +580,7 @@ impl GitApp {
             repo,
             None,
             unavailable_opener(),
+            unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
             AppSettings::default(),
@@ -513,10 +588,12 @@ impl GitApp {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_repo_opener(
         repo: SharedRepository,
         repository_path: Option<String>,
         open_repository: RepositoryOpener,
+        open_worktree: WorktreeOpener,
         initialise: RepositoryInitialiser,
         clone_repository: RepositoryCloner,
         settings: AppSettings,
@@ -526,6 +603,7 @@ impl GitApp {
             Some(repo),
             repository_path,
             open_repository,
+            open_worktree,
             initialise,
             clone_repository,
             settings,
@@ -537,6 +615,7 @@ impl GitApp {
     pub(crate) fn welcome() -> Self {
         Self::welcome_with(
             unavailable_opener(),
+            unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
             AppSettings::default(),
@@ -546,6 +625,7 @@ impl GitApp {
 
     pub(crate) fn welcome_with(
         open_repository: RepositoryOpener,
+        open_worktree: WorktreeOpener,
         initialise: RepositoryInitialiser,
         clone_repository: RepositoryCloner,
         settings: AppSettings,
@@ -555,6 +635,7 @@ impl GitApp {
             None,
             None,
             open_repository,
+            open_worktree,
             initialise,
             clone_repository,
             settings,
@@ -564,7 +645,9 @@ impl GitApp {
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::RefreshRepository => self.begin_refresh(true),
+            Message::RefreshRepository => {
+                Task::batch([self.begin_refresh(true), self.load_catalogue()])
+            }
             Message::RefreshSession(path) => self.begin_refresh_for(&path, true),
             Message::RepositoryLoaded(path, events) => {
                 let mut saw_error = None;
@@ -695,7 +778,16 @@ impl GitApp {
                 };
                 self.checkout_for(&path, branch)
             }
-            Message::CheckoutFinished(path, result) => self.finish_reload(&path, result),
+            Message::CheckoutFinished(path, result) => {
+                // A checkout moves this worktree's branch, which the explorer lists.
+                let moved = result.is_ok();
+                let reload = self.finish_reload(&path, result);
+                if moved {
+                    Task::batch([reload, self.load_catalogue_for(&path)])
+                } else {
+                    reload
+                }
+            }
             Message::Fetch => {
                 let Some(session) = self.active_session() else {
                     return Task::none();
@@ -906,6 +998,7 @@ impl GitApp {
             }
             Message::RepositoryOpened(path, Ok(OpenedRepository(repo))) => {
                 let open_repository = Arc::clone(&self.open_repository);
+                let open_worktree = Arc::clone(&self.open_worktree);
                 let initialise = Arc::clone(&self.initialise);
                 let clone_repository = Arc::clone(&self.clone_repository);
                 let save_settings = Arc::clone(&self.save_settings);
@@ -916,6 +1009,7 @@ impl GitApp {
                     Some(repo),
                     Some(path),
                     open_repository,
+                    open_worktree,
                     initialise,
                     clone_repository,
                     settings,
@@ -1287,7 +1381,411 @@ impl GitApp {
                     }
                 }
             }
+            Message::SelectWorktreeTab(index) => {
+                self.activate(index);
+                self.tab_picker_open = false;
+                Task::none()
+            }
+            Message::CloseWorktreeTab(index) => {
+                // The last tab stays, and so does a tab with a job running: its finish
+                // would have nowhere to land.
+                if self.sessions.len() <= 1
+                    || self
+                        .sessions
+                        .get(index)
+                        .is_none_or(|session| session.state.loading)
+                {
+                    return Task::none();
+                }
+                self.drop_session(index);
+                Task::none()
+            }
+            Message::ToggleTabPicker => {
+                self.tab_picker_open = !self.tab_picker_open;
+                Task::none()
+            }
+            Message::OpenWorktree(path) => self.open_worktree_tab(path),
+            Message::WorktreeOpened(path, result) => self.worktree_opened(path, result),
+            Message::WorktreesLoaded(path, result) => {
+                // A result for a closed tab or a replaced repository is dropped.
+                if self.session_mut_by_path(&path).is_none() {
+                    return Task::none();
+                }
+                match result {
+                    Ok(list) => {
+                        self.worktree_catalogue = list;
+                        self.catalogue_error = None;
+                    }
+                    // Keep the last good catalogue; the explorer shows why it is stale.
+                    Err(error) => self.catalogue_error = Some(error_message(&error)),
+                }
+                Task::none()
+            }
+            Message::AskCreateWorktree => {
+                if self.worktree_busy || self.active_session().is_none() {
+                    return Task::none();
+                }
+                self.close_prompts();
+                self.worktree_prompt = Some(WorktreePrompt::Create {
+                    path: String::new(),
+                    branch: String::new(),
+                    create_branch: true,
+                });
+                Task::none()
+            }
+            Message::AskRemoveWorktree { path } => self.ask_remove_worktree(&path),
+            Message::WorktreePathChanged(value) => {
+                if let Some(WorktreePrompt::Create { path, .. }) = &mut self.worktree_prompt {
+                    *path = value;
+                }
+                Task::none()
+            }
+            Message::WorktreeBranchChanged(value) => {
+                if let Some(WorktreePrompt::Create { branch, .. }) = &mut self.worktree_prompt {
+                    *branch = value;
+                }
+                Task::none()
+            }
+            Message::WorktreeCreateBranchToggled(value) => {
+                if let Some(WorktreePrompt::Create { create_branch, .. }) =
+                    &mut self.worktree_prompt
+                {
+                    *create_branch = value;
+                }
+                Task::none()
+            }
+            Message::WorktreeForceToggled(value) => {
+                if let Some(WorktreePrompt::Remove { force, .. }) = &mut self.worktree_prompt {
+                    *force = value;
+                }
+                Task::none()
+            }
+            Message::ChooseWorktreeFolder => {
+                if !matches!(self.worktree_prompt, Some(WorktreePrompt::Create { .. })) {
+                    return Task::none();
+                }
+                Task::perform(
+                    choose_repository_folder("Worktree folder"),
+                    Message::WorktreeFolderChosen,
+                )
+            }
+            Message::WorktreeFolderChosen(None) => Task::none(),
+            Message::WorktreeFolderChosen(Some(folder)) => {
+                if let Some(WorktreePrompt::Create { path, .. }) = &mut self.worktree_prompt {
+                    *path = folder;
+                }
+                Task::none()
+            }
+            Message::ConfirmCreateWorktree => self.confirm_create_worktree(),
+            Message::ConfirmRemoveWorktree { force } => self.confirm_remove_worktree(force),
+            Message::CancelWorktree => {
+                self.worktree_prompt = None;
+                Task::none()
+            }
+            Message::WorktreeCreated {
+                session,
+                path,
+                result,
+            } => {
+                self.worktree_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.worktree_prompt = None;
+                        let reload = self.load_catalogue_for(&session);
+                        // Open the new tab only when the session that asked is still here;
+                        // otherwise the repository was replaced and the path is foreign.
+                        if self.sessions.iter().any(|open| open.path == session) {
+                            Task::batch([reload, Task::done(Message::OpenWorktree(path))])
+                        } else {
+                            reload
+                        }
+                    }
+                    // The prompt stays open with git's message so the user can fix the field.
+                    Err(error) => {
+                        self.error = Some(error_message(&error));
+                        Task::none()
+                    }
+                }
+            }
+            Message::WorktreeRemoved {
+                session,
+                path,
+                result,
+            } => {
+                self.worktree_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.worktree_prompt = None;
+                        self.drop_sessions_at(&path);
+                        self.load_catalogue_for(&session)
+                    }
+                    // Stay open: a dirty worktree is retried with Force ticked.
+                    Err(error) => {
+                        self.error = Some(error_message(&error));
+                        Task::none()
+                    }
+                }
+            }
         }
+    }
+
+    /// Close every modal that belongs to the window rather than a tab.
+    fn close_prompts(&mut self) {
+        self.confirm_discard = None;
+        self.confirm_drop = None;
+        self.branch_prompt = None;
+        self.history_prompt = None;
+        self.worktree_prompt = None;
+    }
+
+    /// Drop the session at `index`. A no-op when it is the last one, so a tab always remains.
+    /// The active index follows: a closed active tab hands over to the main worktree's tab
+    /// when it is open, otherwise to its neighbour.
+    fn drop_session(&mut self, index: usize) {
+        if index >= self.sessions.len() || self.sessions.len() <= 1 {
+            return;
+        }
+        let was_active = index == self.active;
+        self.sessions.remove(index);
+        if was_active {
+            self.active = self.successor_of_closed(index);
+            self.reset_transient_ui();
+        } else if index < self.active {
+            self.active -= 1;
+        }
+    }
+
+    /// The index to focus after the session at `closed` left the list.
+    fn successor_of_closed(&self, closed: usize) -> usize {
+        let main = self
+            .worktree_catalogue
+            .iter()
+            .find(|entry| entry.is_main)
+            .and_then(|entry| {
+                self.sessions
+                    .iter()
+                    .position(|session| same_path(&session.path, &entry.path))
+            });
+        main.unwrap_or_else(|| closed.min(self.sessions.len() - 1))
+    }
+
+    /// Drop every session that opened `path`. Removing the last one leaves the welcome screen.
+    fn drop_sessions_at(&mut self, path: &str) {
+        while let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| same_path(&session.path, path))
+        {
+            if self.sessions.len() == 1 {
+                self.sessions.clear();
+                self.active = 0;
+                self.worktree_catalogue.clear();
+                self.reset_transient_ui();
+                return;
+            }
+            self.drop_session(index);
+        }
+    }
+
+    /// Reload the catalogue through the active session.
+    fn load_catalogue(&mut self) -> Task<Message> {
+        let Some(path) = self.active_session().map(|session| session.path.clone()) else {
+            return Task::none();
+        };
+        self.load_catalogue_for(&path)
+    }
+
+    /// Reload the catalogue through the session at `path`. An unknown path is dropped.
+    fn load_catalogue_for(&mut self, path: &str) -> Task<Message> {
+        let Some(session) = self.session_mut_by_path(path) else {
+            return Task::none();
+        };
+        let repo = session.adapter.clone();
+        let path = session.path.clone();
+        Task::perform(worktrees_in_background(repo), move |result| {
+            Message::WorktreesLoaded(path.clone(), result)
+        })
+    }
+
+    /// Focus the tab for `path`, or build an adapter for it off-thread.
+    fn open_worktree_tab(&mut self, path: String) -> Task<Message> {
+        self.tab_picker_open = false;
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| same_path(&session.path, &path))
+        {
+            self.activate(index);
+            return Task::none();
+        }
+        if self.sessions.is_empty() || self.worktree_opening.is_some() || path.trim().is_empty() {
+            return Task::none();
+        }
+        self.worktree_opening = Some(path.clone());
+        self.error = None;
+        let open = Arc::clone(&self.open_worktree);
+        Task::perform(
+            open_repository_in_background(open, path),
+            |(path, result)| Message::WorktreeOpened(path, result.map(OpenedRepository)),
+        )
+    }
+
+    fn worktree_opened(
+        &mut self,
+        path: String,
+        result: Result<OpenedRepository, DomainError>,
+    ) -> Task<Message> {
+        // A result that is not the open in flight belongs to a replaced repository.
+        let expected = self
+            .worktree_opening
+            .as_deref()
+            .is_some_and(|pending| same_path(pending, &path));
+        if !expected {
+            return Task::none();
+        }
+        self.worktree_opening = None;
+        if self.sessions.is_empty() {
+            return Task::none();
+        }
+        match result {
+            Ok(OpenedRepository(repo)) => {
+                if let Some(index) = self
+                    .sessions
+                    .iter()
+                    .position(|session| same_path(&session.path, &path))
+                {
+                    self.activate(index);
+                    return Task::none();
+                }
+                self.sessions.push(WorktreeSession::new(
+                    path.clone(),
+                    repo,
+                    self.settings.clone(),
+                ));
+                self.activate(self.sessions.len() - 1);
+                Task::done(Message::RefreshSession(path))
+            }
+            Err(error) => {
+                self.error = Some(error_message(&error));
+                Task::none()
+            }
+        }
+    }
+
+    fn ask_remove_worktree(&mut self, path: &str) -> Task<Message> {
+        if self.worktree_busy {
+            return Task::none();
+        }
+        let Some(entry) = self
+            .worktree_catalogue
+            .iter()
+            .find(|entry| same_path(&entry.path, path))
+        else {
+            return Task::none();
+        };
+        if entry.is_main {
+            self.error = Some("The main worktree cannot be removed.".to_string());
+            return Task::none();
+        }
+        let prompt = WorktreePrompt::Remove {
+            path: entry.path.clone(),
+            branch: entry.branch.clone(),
+            force: false,
+        };
+        if self.only_session_is(path) {
+            self.error = Some("Open another worktree tab before removing this one.".to_string());
+            return Task::none();
+        }
+        self.close_prompts();
+        self.worktree_prompt = Some(prompt);
+        Task::none()
+    }
+
+    /// True when `path` is the only open session, so removing it would leave no tab.
+    fn only_session_is(&self, path: &str) -> bool {
+        self.sessions.len() == 1 && same_path(&self.sessions[0].path, path)
+    }
+
+    fn confirm_create_worktree(&mut self) -> Task<Message> {
+        let Some(WorktreePrompt::Create {
+            path,
+            branch,
+            create_branch,
+        }) = self.worktree_prompt.clone()
+        else {
+            return Task::none();
+        };
+        let path = path.trim().to_string();
+        let branch = branch.trim().to_string();
+        // A relative path would resolve against the adapter's folder for git but against the
+        // process folder for the new tab, so only an absolute path is accepted.
+        if self.worktree_busy
+            || path.is_empty()
+            || branch.is_empty()
+            || !std::path::Path::new(&path).is_absolute()
+        {
+            return Task::none();
+        }
+        let Some((repo, session)) = self
+            .active_session()
+            .map(|session| (session.adapter.clone(), session.path.clone()))
+        else {
+            return Task::none();
+        };
+        self.worktree_busy = true;
+        self.error = None;
+        let created = path.clone();
+        Task::perform(
+            add_worktree_in_background(repo, path, branch, create_branch),
+            move |result| Message::WorktreeCreated {
+                session: session.clone(),
+                path: created.clone(),
+                result,
+            },
+        )
+    }
+
+    fn confirm_remove_worktree(&mut self, force: bool) -> Task<Message> {
+        let Some(WorktreePrompt::Remove { path, .. }) = self.worktree_prompt.clone() else {
+            return Task::none();
+        };
+        if self.worktree_busy {
+            return Task::none();
+        }
+        // The catalogue may have moved while the prompt was open.
+        let still_removable = self
+            .worktree_catalogue
+            .iter()
+            .any(|entry| same_path(&entry.path, &path) && !entry.is_main);
+        if !still_removable || self.only_session_is(&path) {
+            self.worktree_prompt = None;
+            self.error = Some("That worktree can no longer be removed here.".to_string());
+            return Task::none();
+        }
+        // Run git from a tab other than the one being deleted: git cannot remove the folder
+        // it is standing in. Prefer the active tab when it is not the target.
+        let active = self.active;
+        let runner = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| !same_path(&session.path, &path))
+            .min_by_key(|(index, _)| usize::from(*index != active))
+            .map(|(_, session)| (session.adapter.clone(), session.path.clone()));
+        let Some((repo, session)) = runner else {
+            return Task::none();
+        };
+        self.worktree_busy = true;
+        self.error = None;
+        let removed = path.clone();
+        Task::perform(
+            remove_worktree_in_background(repo, path, force),
+            move |result| Message::WorktreeRemoved {
+                session: session.clone(),
+                path: removed.clone(),
+                result,
+            },
+        )
     }
 
     /// Stop the session's spinner, then reload on success or surface git's message.
@@ -1706,8 +2204,15 @@ impl GitApp {
         if self.history_prompt.is_some() {
             return self.update(Message::CancelHistory);
         }
+        if self.worktree_prompt.is_some() {
+            return self.update(Message::CancelWorktree);
+        }
         if self.settings_open {
             return self.update(Message::CloseSettings);
+        }
+        if self.tab_picker_open {
+            self.tab_picker_open = false;
+            return Task::none();
         }
         if self.branch_list_open {
             self.branch_list_open = false;
@@ -1858,6 +2363,7 @@ mod tests {
     #[test]
     fn open_repository_starts_loading_without_blocking() {
         let mut app = GitApp::welcome_with(
+            unavailable_opener(),
             unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
@@ -2382,6 +2888,7 @@ mod tests {
             Arc::new(|_| Err(DomainError::Unknown("opener was called".into())));
         let mut app = GitApp::welcome_with(
             open,
+            unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
             AppSettings::default(),
@@ -2400,6 +2907,7 @@ mod tests {
             Arc::new(|_| Err(DomainError::Unknown("opener was called".into())));
         let mut app = GitApp::welcome_with(
             open,
+            unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
             AppSettings::default(),
@@ -2418,6 +2926,7 @@ mod tests {
             Arc::new(|_| Err(DomainError::Unknown("opener was called".into())));
         let mut app = GitApp::welcome_with(
             open,
+            unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
             AppSettings::default(),
@@ -3352,5 +3861,455 @@ mod tests {
         app.activate(1);
 
         assert!(app.sessions[0].commit_message.is_empty());
+    }
+
+    const THIRD: &str = r"D:\third";
+
+    fn linked(path: &str, branch: &str, is_main: bool) -> Worktree {
+        Worktree {
+            path: path.to_string(),
+            branch: branch.to_string(),
+            is_main,
+            locked: false,
+        }
+    }
+
+    /// `two_session_app` plus a catalogue where `FIRST` is main and `THIRD` has no tab.
+    fn catalogued_app() -> GitApp {
+        let mut app = two_session_app();
+        app.worktree_catalogue = vec![
+            linked(FIRST, "main", true),
+            linked(SECOND, "feature", false),
+            linked(THIRD, "other", false),
+        ];
+        app
+    }
+
+    fn push_session(app: &mut GitApp, path: &str) {
+        app.sessions.push(WorktreeSession::new(
+            path.to_string(),
+            std::sync::Arc::new(FakeGitRepository::ok()),
+            AppSettings::default(),
+        ));
+    }
+
+    #[test]
+    fn closing_the_last_tab_is_refused() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+
+        let _ = app.update(Message::CloseWorktreeTab(0));
+
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_tab_with_a_job_running_is_refused() {
+        let mut app = two_session_app();
+        app.sessions[1].state.loading = true;
+
+        let _ = app.update(Message::CloseWorktreeTab(1));
+
+        assert_eq!(app.sessions.len(), 2);
+    }
+
+    #[test]
+    fn closing_a_background_tab_keeps_the_active_one_focused() {
+        let mut app = two_session_app();
+        push_session(&mut app, THIRD);
+        app.activate(2);
+
+        let _ = app.update(Message::CloseWorktreeTab(0));
+
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.active, 1);
+        assert_eq!(app.active_path(), THIRD);
+    }
+
+    #[test]
+    fn closing_the_active_tab_prefers_the_main_worktrees_tab() {
+        let mut app = catalogued_app();
+        push_session(&mut app, THIRD);
+        app.activate(2);
+
+        let _ = app.update(Message::CloseWorktreeTab(2));
+
+        assert_eq!(app.active_path(), FIRST);
+    }
+
+    #[test]
+    fn closing_the_active_tab_without_main_open_takes_its_neighbour() {
+        let mut app = two_session_app();
+        push_session(&mut app, THIRD);
+        app.worktree_catalogue = vec![linked(r"D:\elsewhere", "main", true)];
+        app.activate(1);
+
+        let _ = app.update(Message::CloseWorktreeTab(1));
+
+        assert_eq!(app.active_path(), THIRD);
+    }
+
+    #[test]
+    fn closing_a_tab_leaves_the_worktree_in_the_catalogue() {
+        let mut app = catalogued_app();
+
+        let _ = app.update(Message::CloseWorktreeTab(1));
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.worktree_catalogue.len(), 3);
+    }
+
+    #[test]
+    fn opening_an_open_worktree_focuses_its_tab_without_a_new_session() {
+        let mut app = catalogued_app();
+
+        // Git prints forward slashes; the tab still matches.
+        let _ = app.update(Message::OpenWorktree("D:/second/".to_string()));
+
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.active, 1);
+        assert!(app.worktree_opening.is_none());
+    }
+
+    #[test]
+    fn opening_a_second_worktree_adds_a_session_and_leaves_the_first_alone() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.sessions[0].path = FIRST.to_string();
+        app.session_mut().state.commits = vec![commit("aaaaaaa1")];
+
+        let _ = app.update(Message::OpenWorktree(SECOND.to_string()));
+        assert_eq!(app.worktree_opening.as_deref(), Some(SECOND));
+        let _ = app.update(Message::WorktreeOpened(
+            SECOND.to_string(),
+            Ok(OpenedRepository(std::sync::Arc::new(populated_repo()))),
+        ));
+
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.active, 1);
+        assert!(app.worktree_opening.is_none());
+        // The first tab keeps its history and was sent no load.
+        assert_eq!(app.sessions[0].state.commits.len(), 1);
+        assert!(!app.sessions[0].state.loading);
+    }
+
+    #[test]
+    fn a_failed_worktree_open_shows_why_and_adds_no_session() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::OpenWorktree(SECOND.to_string()));
+
+        let _ = app.update(Message::WorktreeOpened(
+            SECOND.to_string(),
+            Err(DomainError::Unknown("no such folder".to_string())),
+        ));
+
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.error.is_some());
+        assert!(app.worktree_opening.is_none());
+    }
+
+    #[test]
+    fn an_open_that_was_never_asked_for_is_dropped() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+
+        let _ = app.update(Message::WorktreeOpened(
+            SECOND.to_string(),
+            Ok(OpenedRepository(std::sync::Arc::new(populated_repo()))),
+        ));
+
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn a_worktree_opens_through_the_worktree_opener_and_never_remembers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn counting(calls: &Arc<AtomicUsize>) -> RepositoryOpener {
+            let calls = Arc::clone(calls);
+            Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(FakeGitRepository::ok()) as SharedRepository)
+            })
+        }
+
+        // The repository opener is the one that remembers `last_repo_path`.
+        let remembered = Arc::new(AtomicUsize::new(0));
+        let worktree_opened = Arc::new(AtomicUsize::new(0));
+        let mut app = GitApp::with_repo_opener(
+            Arc::new(FakeGitRepository::ok()),
+            Some(FIRST.to_string()),
+            counting(&remembered),
+            counting(&worktree_opened),
+            unavailable_initialiser(),
+            unavailable_cloner(),
+            AppSettings::default(),
+            ignore_settings(),
+        );
+
+        // The job starts its thread as soon as the handler builds it, so the opener runs
+        // even though the test never polls the returned task.
+        let _ = app.update(Message::OpenWorktree(SECOND.to_string()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while worktree_opened.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = app.update(Message::WorktreeOpened(
+            SECOND.to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
+
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(worktree_opened.load(Ordering::SeqCst), 1);
+        assert_eq!(remembered.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn opening_another_repository_keeps_the_worktree_opener() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let before = Arc::clone(&app.open_worktree);
+
+        let _ = app.update(Message::RepositoryOpened(
+            SECOND.to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
+
+        assert!(Arc::ptr_eq(&before, &app.open_worktree));
+    }
+
+    #[test]
+    fn a_loaded_catalogue_lands_for_a_known_session_only() {
+        let mut app = two_session_app();
+        let list = vec![linked(FIRST, "main", true)];
+
+        let _ = app.update(Message::WorktreesLoaded(
+            r"D:\gone".to_string(),
+            Ok(list.clone()),
+        ));
+        assert!(app.worktree_catalogue.is_empty());
+
+        let _ = app.update(Message::WorktreesLoaded(
+            SECOND.to_string(),
+            Ok(list.clone()),
+        ));
+        assert_eq!(app.worktree_catalogue, list);
+        assert_eq!(app.catalogue_error, None);
+    }
+
+    #[test]
+    fn a_failed_catalogue_load_keeps_the_list_and_every_session() {
+        let mut app = catalogued_app();
+
+        let _ = app.update(Message::WorktreesLoaded(
+            FIRST.to_string(),
+            Err(DomainError::Unknown("git is missing".to_string())),
+        ));
+
+        assert_eq!(app.worktree_catalogue.len(), 3);
+        assert_eq!(app.sessions.len(), 2);
+        assert!(app.catalogue_error.is_some());
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn the_main_worktree_cannot_be_removed() {
+        let mut app = catalogued_app();
+
+        let _ = app.update(Message::AskRemoveWorktree {
+            path: FIRST.to_string(),
+        });
+
+        assert!(app.worktree_prompt.is_none());
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn removing_asks_first_with_force_off() {
+        let mut app = catalogued_app();
+
+        let _ = app.update(Message::AskRemoveWorktree {
+            path: THIRD.to_string(),
+        });
+
+        assert_eq!(
+            app.worktree_prompt,
+            Some(WorktreePrompt::Remove {
+                path: THIRD.to_string(),
+                branch: "other".to_string(),
+                force: false,
+            })
+        );
+        let _ = app.update(Message::WorktreeForceToggled(true));
+        assert!(matches!(
+            app.worktree_prompt,
+            Some(WorktreePrompt::Remove { force: true, .. })
+        ));
+    }
+
+    #[test]
+    fn the_only_open_tab_cannot_be_removed() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.sessions[0].path = SECOND.to_string();
+        app.worktree_catalogue = vec![
+            linked(FIRST, "main", true),
+            linked(SECOND, "feature", false),
+        ];
+
+        let _ = app.update(Message::AskRemoveWorktree {
+            path: SECOND.to_string(),
+        });
+
+        assert!(app.worktree_prompt.is_none());
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn confirming_a_remove_starts_a_job_once() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskRemoveWorktree {
+            path: SECOND.to_string(),
+        });
+
+        let _ = app.update(Message::ConfirmRemoveWorktree { force: true });
+        assert!(app.worktree_busy);
+
+        // A second confirm while the job runs is ignored; the prompt is still the same one.
+        let _ = app.update(Message::ConfirmRemoveWorktree { force: true });
+        assert!(app.worktree_busy);
+        assert_eq!(app.sessions.len(), 2);
+    }
+
+    #[test]
+    fn a_removed_worktree_drops_its_session_and_reselects() {
+        let mut app = catalogued_app();
+        app.activate(1);
+        app.worktree_prompt = Some(WorktreePrompt::Remove {
+            path: SECOND.to_string(),
+            branch: "feature".to_string(),
+            force: false,
+        });
+        app.worktree_busy = true;
+
+        let _ = app.update(Message::WorktreeRemoved {
+            session: FIRST.to_string(),
+            path: "D:/second".to_string(),
+            result: Ok(()),
+        });
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.active_path(), FIRST);
+        assert!(app.worktree_prompt.is_none());
+        assert!(!app.worktree_busy);
+    }
+
+    #[test]
+    fn a_failed_remove_keeps_the_prompt_open_with_git_s_message() {
+        let mut app = catalogued_app();
+        app.worktree_prompt = Some(WorktreePrompt::Remove {
+            path: SECOND.to_string(),
+            branch: "feature".to_string(),
+            force: false,
+        });
+        app.worktree_busy = true;
+
+        let _ = app.update(Message::WorktreeRemoved {
+            session: FIRST.to_string(),
+            path: SECOND.to_string(),
+            result: Err(DomainError::Unknown("contains modified files".to_string())),
+        });
+
+        assert_eq!(app.sessions.len(), 2);
+        assert!(app.worktree_prompt.is_some());
+        assert!(app.error.is_some());
+        assert!(!app.worktree_busy);
+    }
+
+    fn absolute_temp(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn a_create_needs_an_absolute_path_and_a_branch() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskCreateWorktree);
+
+        let _ = app.update(Message::WorktreePathChanged("..\\relative".to_string()));
+        let _ = app.update(Message::WorktreeBranchChanged("topic".to_string()));
+        let _ = app.update(Message::ConfirmCreateWorktree);
+        assert!(!app.worktree_busy);
+
+        let _ = app.update(Message::WorktreePathChanged(absolute_temp("wt-topic")));
+        let _ = app.update(Message::WorktreeBranchChanged("  ".to_string()));
+        let _ = app.update(Message::ConfirmCreateWorktree);
+        assert!(!app.worktree_busy);
+
+        let _ = app.update(Message::WorktreeBranchChanged("topic".to_string()));
+        let _ = app.update(Message::ConfirmCreateWorktree);
+        assert!(app.worktree_busy);
+    }
+
+    #[test]
+    fn a_created_worktree_closes_the_prompt_and_is_not_opened_for_a_foreign_session() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskCreateWorktree);
+        app.worktree_busy = true;
+
+        let _ = app.update(Message::WorktreeCreated {
+            session: r"D:\gone".to_string(),
+            path: THIRD.to_string(),
+            result: Ok(()),
+        });
+
+        assert!(app.worktree_prompt.is_none());
+        assert!(!app.worktree_busy);
+        assert_eq!(app.sessions.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_create_keeps_the_prompt_open_with_git_s_message() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskCreateWorktree);
+        app.worktree_busy = true;
+
+        let _ = app.update(Message::WorktreeCreated {
+            session: FIRST.to_string(),
+            path: THIRD.to_string(),
+            result: Err(DomainError::Unknown("already exists".to_string())),
+        });
+
+        assert!(matches!(
+            app.worktree_prompt,
+            Some(WorktreePrompt::Create { .. })
+        ));
+        assert!(app.error.is_some());
+        assert!(!app.worktree_busy);
+        assert_eq!(app.worktree_catalogue.len(), 3);
+    }
+
+    #[test]
+    fn switching_tabs_clears_a_worktree_prompt_and_the_picker() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskCreateWorktree);
+        app.tab_picker_open = true;
+
+        let _ = app.update(Message::SelectWorktreeTab(1));
+
+        assert_eq!(app.active, 1);
+        assert!(app.worktree_prompt.is_none());
+        assert!(!app.tab_picker_open);
+    }
+
+    #[test]
+    fn escape_dismisses_the_worktree_prompt_then_the_picker() {
+        let mut app = catalogued_app();
+        let _ = app.update(Message::AskCreateWorktree);
+        app.tab_picker_open = true;
+
+        let _ = app.update(Message::Escape);
+        assert!(app.worktree_prompt.is_none());
+        assert!(app.tab_picker_open);
+
+        let _ = app.update(Message::Escape);
+        assert!(!app.tab_picker_open);
     }
 }

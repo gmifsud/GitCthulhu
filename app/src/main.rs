@@ -26,6 +26,12 @@ fn cloner() -> gui_app::RepositoryCloner {
     Arc::new(GitoxideAdapter::clone_repository)
 }
 
+/// Opens a linked worktree into a tab. Deliberately takes no store: a tab must never
+/// overwrite last_repo_path, which stays the repository the user chose with Open….
+fn worktree_opener() -> gui_app::WorktreeOpener {
+    Arc::new(|path| Ok(Arc::new(GitoxideAdapter::new(path))))
+}
+
 fn opener(store: Arc<ConfyConfigStore>) -> gui_app::RepositoryOpener {
     Arc::new(move |path| {
         remember(store.as_ref(), path);
@@ -51,6 +57,7 @@ fn save_appearance(store: Arc<ConfyConfigStore>) -> gui_app::SettingsSaver {
 fn main() -> iced::Result {
     let store = Arc::new(ConfyConfigStore::new(APP_NAME));
     let open = opener(Arc::clone(&store));
+    let open_worktree = worktree_opener();
     let initialise = initialiser();
     let clone_repository = cloner();
     let save_settings = save_appearance(Arc::clone(&store));
@@ -66,6 +73,7 @@ fn main() -> iced::Result {
             Box::new(GitoxideAdapter::new(&path)),
             path,
             open,
+            open_worktree,
             initialise,
             clone_repository,
             settings,
@@ -75,6 +83,7 @@ fn main() -> iced::Result {
         ),
         None => gui_app::run_welcome(
             open,
+            open_worktree,
             initialise,
             clone_repository,
             settings,

@@ -8,10 +8,12 @@ mod patch;
 mod refs;
 mod settings;
 mod status_bar;
+mod tabs;
 mod terminal;
 mod top_bar;
 mod welcome;
 mod workspace;
+mod worktrees;
 
 use crate::app::{GitApp, Message};
 use crate::selection::visible_selection;
@@ -23,10 +25,12 @@ use chrome::{compact, hairline, reading};
 use confirm::{confirm_discard, confirm_drop_stash, history_prompt};
 use settings::settings_dialog;
 use status_bar::status_bar;
+use tabs::tab_strip;
 use terminal::terminal_pane;
 use top_bar::top_bar;
 use welcome::welcome;
 use workspace::workspace;
+use worktrees::worktree_prompt;
 
 impl GitApp {
     pub(crate) fn view(&self) -> Element<'_, Message> {
@@ -48,6 +52,15 @@ impl GitApp {
         if let Some(prompt) = &self.history_prompt {
             return history_prompt(prompt, tokens, reading);
         }
+        if let Some(prompt) = &self.worktree_prompt {
+            return worktree_prompt(
+                prompt,
+                self.error.as_deref(),
+                self.worktree_busy,
+                tokens,
+                reading,
+            );
+        }
         if self.settings_open {
             return settings_dialog(self, tokens);
         }
@@ -64,6 +77,7 @@ impl GitApp {
         container(column![
             top_bar(self, tokens, reading),
             hairline(tokens),
+            tab_strip(self, tokens, reading),
             workspace(self, &selection, tokens, reading),
             terminal_pane(self, tokens, reading),
             status_bar(self, tokens, reading),

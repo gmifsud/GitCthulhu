@@ -13,6 +13,7 @@ use super::commands::{can_commit, can_stash, command_buttons, placed_commands, C
 use super::history::{history_pane, relative_age};
 use super::patch::{patch_pane, patch_stats};
 use super::refs::branch_switcher;
+use super::worktrees::worktrees_section;
 use crate::selection::short_hash;
 use iced::widget::button::Status;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -425,6 +426,7 @@ fn files_rail<'a>(
     column![
         files_head(working_change_count(app), tokens, reading),
         branch_switcher(app, selection, tokens, reading),
+        worktrees_section(app, tokens, reading),
         changes_pane(app, selection, tokens, reading),
     ]
     .width(Length::Fill)

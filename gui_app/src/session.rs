@@ -15,6 +15,31 @@ use crate::selection::{visible_selection, Selection};
 /// Diff lines drawn per "Show more" step. One widget per line, so this bounds layout cost.
 pub(crate) const DIFF_LINES_PER_PAGE: usize = 400;
 
+/// True when two worktree paths name the same folder. Git prints `D:/a/b`, the folder dialog
+/// gives `D:\a\b`, and Windows paths ignore case, so compare a normalised form.
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
+    fn normal(path: &str) -> String {
+        let flat = path.trim().replace('\\', "/");
+        let trimmed = flat.trim_end_matches('/');
+        if cfg!(windows) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed.to_string()
+        }
+    }
+    normal(a) == normal(b)
+}
+
+/// Last folder name of a path, for tab and explorer labels. Falls back to the whole path.
+pub(crate) fn basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+}
+
 /// Everything bound to one open worktree path.
 pub(crate) struct WorktreeSession {
     /// Absolute working directory this session opened.
@@ -190,16 +215,26 @@ pub(crate) fn apply_retention(session: &mut WorktreeSession, mode: WorktreeTabRe
     match mode {
         WorktreeTabRetention::Full => {}
         WorktreeTabRetention::Partial => {
-            session.selection = None;
-            session.focused_diff_path = None;
+            clear_selection(session);
         }
         WorktreeTabRetention::PathOnly => {
-            session.selection = None;
-            session.focused_diff_path = None;
+            clear_selection(session);
             session.commit_message.clear();
             session.marked_files.clear();
         }
     }
+}
+
+/// Forget the selection and the diff drawn for it. Without clearing the patches the Diff pane
+/// would keep showing the old selection's diff when the tab comes back; bumping the generation
+/// drops a patch load still in flight.
+fn clear_selection(session: &mut WorktreeSession) {
+    session.selection = None;
+    session.focused_diff_path = None;
+    session.patches.clear();
+    session.patch_error = None;
+    session.patch_pending = false;
+    session.patch_generation = session.patch_generation.wrapping_add(1);
 }
 
 #[cfg(test)]
@@ -222,6 +257,19 @@ mod tests {
     }
 
     #[test]
+    fn same_path_ignores_slash_direction_and_trailing_separators() {
+        assert!(same_path(r"D:\repo\wt", "D:/repo/wt/"));
+        assert!(!same_path(r"D:\repo\wt", r"D:\repo\other"));
+    }
+
+    #[test]
+    fn basename_is_the_last_folder() {
+        assert_eq!(basename(r"D:\repo\wt"), "wt");
+        assert_eq!(basename("D:/repo/wt/"), "wt");
+        assert_eq!(basename("solo"), "solo");
+    }
+
+    #[test]
     fn partial_clears_selection_keeps_message_and_marks() {
         let mut session = dirty_session();
         apply_retention(&mut session, WorktreeTabRetention::Partial);
@@ -229,6 +277,34 @@ mod tests {
         assert_eq!(session.marked_files.len(), 1);
         assert!(session.selection.is_none());
         assert!(session.focused_diff_path.is_none());
+    }
+
+    #[test]
+    fn leaving_with_a_cleared_selection_also_clears_its_diff() {
+        let mut session = dirty_session();
+        session.patches = vec![core_domain::Patch {
+            path: "a.rs".into(),
+            hunks: vec![],
+            binary: false,
+        }];
+        session.patch_pending = true;
+        let generation = session.patch_generation;
+        apply_retention(&mut session, WorktreeTabRetention::Partial);
+        assert!(session.patches.is_empty());
+        assert!(!session.patch_pending);
+        assert_ne!(session.patch_generation, generation);
+    }
+
+    #[test]
+    fn full_keeps_the_diff() {
+        let mut session = dirty_session();
+        session.patches = vec![core_domain::Patch {
+            path: "a.rs".into(),
+            hunks: vec![],
+            binary: false,
+        }];
+        apply_retention(&mut session, WorktreeTabRetention::Full);
+        assert_eq!(session.patches.len(), 1);
     }
 
     #[test]
