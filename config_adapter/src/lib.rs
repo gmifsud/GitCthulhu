@@ -120,12 +120,10 @@ impl ConfigStore for ConfyConfigStore {
 
             watcher.watch(&path, RecursiveMode::NonRecursive).unwrap();
 
-            for res in rx {
-                if let Ok(event) = res {
-                    if matches!(event.kind, EventKind::Modify(_)) {
-                        if let Ok(dto) = confy::load::<AppSettingsDto>(&app_name, None) {
-                            callback(dto.into());
-                        }
+            for event in rx.into_iter().flatten() {
+                if matches!(event.kind, EventKind::Modify(_)) {
+                    if let Ok(dto) = confy::load::<AppSettingsDto>(&app_name, None) {
+                        callback(dto.into());
                     }
                 }
             }

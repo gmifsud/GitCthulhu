@@ -224,7 +224,7 @@ fn clip(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let mut clipped: String = text.chars().take(max).collect();
-    clipped.push_str("…");
+    clipped.push('…');
     clipped
 }
 

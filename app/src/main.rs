@@ -19,11 +19,11 @@ fn repository_exists(path: &str) -> bool {
 }
 
 fn initialiser() -> gui_app::RepositoryInitialiser {
-    Arc::new(|path| GitoxideAdapter::init(path))
+    Arc::new(GitoxideAdapter::init)
 }
 
 fn cloner() -> gui_app::RepositoryCloner {
-    Arc::new(|url, parent| GitoxideAdapter::clone_repository(url, parent))
+    Arc::new(GitoxideAdapter::clone_repository)
 }
 
 fn opener(store: Arc<ConfyConfigStore>) -> gui_app::RepositoryOpener {
