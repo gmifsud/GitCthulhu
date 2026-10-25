@@ -300,10 +300,10 @@ fn diff_line<'a>(
                     color: Some(text_color),
                 }),
         ]
-        .spacing(6)
+        .spacing(2)
         .align_y(Alignment::Center),
     )
-    .padding([0, 2])
+    .padding([1, 4])
     .width(Length::Fill)
     .style(move |_theme: &Theme| container::Style {
         background: Some(Background::Color(tint)),
