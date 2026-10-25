@@ -233,6 +233,38 @@ pub(crate) fn choose_repository_folder(
     )
 }
 
+pub(crate) fn open_repository_in_background(
+    open: crate::RepositoryOpener,
+    path: String,
+) -> impl Future<Output = (String, Result<SharedRepository, DomainError>)> {
+    in_background(
+        move || {
+            let result = open(&path);
+            (path, result)
+        },
+        || {
+            (
+                String::new(),
+                Err(DomainError::Unknown(
+                    "repository open was interrupted".to_string(),
+                )),
+            )
+        },
+    )
+}
+
+pub(crate) fn save_settings_in_background(
+    save: crate::SettingsSaver,
+    settings: core_domain::AppSettings,
+) -> impl Future<Output = ()> {
+    in_background(
+        move || {
+            save(settings);
+        },
+        || {},
+    )
+}
+
 pub(crate) fn init_in_background(
     initialise: crate::RepositoryInitialiser,
     path: String,
@@ -681,6 +713,23 @@ mod tests {
                 "not possible to fast-forward".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn background_open_returns_the_opener_result() {
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_in_opener = Arc::clone(&seen);
+        let open: crate::RepositoryOpener = Arc::new(move |path| {
+            *seen_in_opener.lock().expect("path lock") = path.to_string();
+            Ok(Arc::new(FakeGitRepository::ok()) as SharedRepository)
+        });
+        let (path, result) = iced::futures::executor::block_on(open_repository_in_background(
+            open,
+            r"D:\repo".to_string(),
+        ));
+        assert_eq!(path, r"D:\repo");
+        assert!(result.is_ok());
+        assert_eq!(seen.lock().expect("path lock").as_str(), r"D:\repo");
     }
 
     #[test]
