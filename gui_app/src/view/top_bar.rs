@@ -54,7 +54,7 @@ pub(super) fn top_bar<'a>(
         branch_name,
         Message::ToggleBranchList,
         !app.session().state.loading,
-        app.branch_list_open,
+        app.files_rail_open && !app.session().explorer_collapsed.local,
         tokens,
         reading,
     ));

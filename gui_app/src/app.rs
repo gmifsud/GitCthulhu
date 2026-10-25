@@ -1046,7 +1046,12 @@ impl GitApp {
                 Task::none()
             }
             Message::ToggleBranchList => {
-                self.branch_list_open = !self.branch_list_open;
+                // Legacy dropdown was removed with the left Changes rail; the chip
+                // now reveals LOCAL branches in the Explorer accordion.
+                self.files_rail_open = true;
+                self.branch_list_open = false;
+                self.session_mut().explorer_collapsed.local = false;
+                self.install_layout();
                 Task::none()
             }
             Message::ChooseBranch(name) => {
