@@ -87,8 +87,24 @@ impl Transcript {
         self.entries.clear();
     }
 
-    pub(crate) fn entries(&self) -> &[TranscriptEntry] {
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> &[TranscriptEntry] {
         &self.entries
+    }
+
+    /// Prompt plus body, the way a shell prints a finished command.
+    pub(crate) fn shell_text(&self) -> String {
+        let mut text = String::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if index > 0 {
+                text.push('\n');
+            }
+            text.push_str("PS ");
+            text.push_str(&entry.source);
+            text.push('\n');
+            text.push_str(&entry.text);
+        }
+        text
     }
 }
 
@@ -115,6 +131,17 @@ mod tests {
         assert_eq!(transcript.entries()[0].text, "5");
         transcript.clear();
         assert!(transcript.entries().is_empty());
+    }
+
+    #[test]
+    fn shell_text_puts_a_prompt_before_each_reply() {
+        let mut transcript = Transcript::new();
+        transcript.record(ProviderExchange::kilo("model list is not connected"));
+        transcript.record(ProviderExchange::new(SOURCE_GIT, "No model is configured."));
+        assert_eq!(
+            transcript.shell_text(),
+            "PS Kilo\nmodel list is not connected\nPS Git\nNo model is configured."
+        );
     }
 
     #[test]
