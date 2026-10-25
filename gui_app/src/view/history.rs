@@ -15,7 +15,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme}
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::chrome::{panel_style, Reading};
+use super::chrome::{icon_button, panel_style, Reading};
 
 const COL_GAP: f32 = 10.0;
 const HASH_WIDTH: f32 = 64.0;
@@ -78,7 +78,7 @@ pub(super) fn history_pane<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let mut commit_rows = column![column_headers(lanes_width, focus, tokens, reading)];
+    let mut commit_rows = column![column_headers(app, lanes_width, focus, tokens, reading)];
 
     // One WIP row per open session with changes, in tab order. Only the active tab's row can
     // be selected: the selection belongs to that session. Focus-current hides other sessions.
@@ -202,16 +202,12 @@ pub(super) fn history_pane<'a>(
 }
 
 fn column_headers<'a>(
+    app: &'a GitApp,
     lanes_width: Length,
     focus: bool,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let focus_label = if focus {
-        "Focus current · on"
-    } else {
-        "Focus current"
-    };
     row![
         container(
             text("Graph")
@@ -226,52 +222,26 @@ fn column_headers<'a>(
         header_cell("Description", Length::Fill, tokens, reading),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
-        button(
-            text(focus_label)
-                .font(reading.font)
-                .size(HEADER_SIZE)
-                .style(move |_| text::Style {
-                    color: Some(if focus {
-                        tokens.accent_primary
-                    } else {
-                        tokens.text_muted
-                    }),
-                }),
-        )
-        .padding([2, 6])
-        .on_press(Message::ToggleFocusCurrentBranch)
-        .style(move |_theme, status| focus_chip_style(tokens, status, focus)),
+        icon_button(
+            "◎",
+            if focus {
+                "Show all branches"
+            } else {
+                "Focus current branch"
+            },
+            "graph-focus",
+            app.tip_ready("graph-focus"),
+            Message::ToggleFocusCurrentBranch,
+            true,
+            focus,
+            tokens,
+            reading,
+        ),
     ]
     .spacing(COL_GAP)
     .padding([4, 0])
     .align_y(Alignment::Center)
     .into()
-}
-
-fn focus_chip_style(tokens: DesignTokens, status: Status, on: bool) -> button::Style {
-    let raised = on || matches!(status, Status::Hovered | Status::Pressed);
-    button::Style {
-        background: Some(Background::Color(if raised {
-            tokens.bg_raised
-        } else {
-            Color::TRANSPARENT
-        })),
-        text_color: if on {
-            tokens.accent_primary
-        } else {
-            tokens.text_muted
-        },
-        border: Border {
-            color: if on {
-                tokens.accent_primary
-            } else {
-                tokens.chip_border
-            },
-            width: 1.0,
-            radius: 3.0.into(),
-        },
-        shadow: Shadow::default(),
-    }
 }
 
 fn header_cell<'a>(

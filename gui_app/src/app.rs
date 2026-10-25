@@ -60,6 +60,10 @@ pub(crate) struct GitApp {
     pub(crate) context_menu: Option<crate::context_menu::ContextMenuState>,
     /// Commit id waiting for detach confirmation when the worktree is dirty.
     pub(crate) confirm_detach: Option<String>,
+    /// Icon-button hover: key, title, when the pointer entered. Tip shows after two seconds.
+    pub(crate) tip_hover: Option<(String, String, std::time::Instant)>,
+    /// Tip key whose hover has lasted long enough to show the title.
+    pub(crate) tip_ready_key: Option<String>,
     /// Authoritative, global settings. Fanned into each session's `AppState`.
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
@@ -289,6 +293,16 @@ pub(crate) enum Message {
     },
     ConfirmDetachHead,
     CancelDetach,
+    /// Pointer entered an icon button; start the two-second tip timer.
+    IconTipEnter {
+        key: String,
+        title: String,
+    },
+    IconTipLeave {
+        key: String,
+    },
+    /// Poll while a tip hover is pending.
+    IconTipTick,
     /// `git worktree add` finished. The first path is the session that ran it.
     WorktreeCreated {
         session: String,
@@ -386,6 +400,8 @@ impl GitApp {
             worktree_opening: None,
             context_menu: None,
             confirm_detach: None,
+            tip_hover: None,
+            tip_ready_key: None,
             settings,
             opening: false,
             panes,
@@ -1581,6 +1597,30 @@ impl GitApp {
                 self.confirm_detach = None;
                 Task::none()
             }
+            Message::IconTipEnter { key, title } => {
+                self.tip_hover = Some((key, title, std::time::Instant::now()));
+                self.tip_ready_key = None;
+                Task::none()
+            }
+            Message::IconTipLeave { key } => {
+                if self
+                    .tip_hover
+                    .as_ref()
+                    .is_some_and(|(hover_key, _, _)| hover_key == &key)
+                {
+                    self.tip_hover = None;
+                    self.tip_ready_key = None;
+                }
+                Task::none()
+            }
+            Message::IconTipTick => {
+                if let Some((key, _, started)) = &self.tip_hover {
+                    if started.elapsed() >= std::time::Duration::from_secs(2) {
+                        self.tip_ready_key = Some(key.clone());
+                    }
+                }
+                Task::none()
+            }
             Message::WorktreeCreated {
                 session,
                 path,
@@ -2344,7 +2384,24 @@ impl GitApp {
     }
 
     pub(crate) fn subscription(&self) -> iced::Subscription<Message> {
-        iced::keyboard::on_key_press(shortcut_message)
+        let keys = iced::keyboard::on_key_press(shortcut_message);
+        let waiting_tip = self.tip_hover.is_some()
+            && self.tip_ready_key.as_ref()
+                != self.tip_hover.as_ref().map(|(key, _, _)| key);
+        if waiting_tip {
+            iced::Subscription::batch([
+                keys,
+                iced::time::every(iced::time::Duration::from_millis(200))
+                    .map(|_| Message::IconTipTick),
+            ])
+        } else {
+            keys
+        }
+    }
+
+    /// True when the hover tip for `key` should be drawn (two seconds elapsed).
+    pub(crate) fn tip_ready(&self, key: &str) -> bool {
+        self.tip_ready_key.as_deref() == Some(key)
     }
 
     fn handle_escape(&mut self) -> Task<Message> {
@@ -2353,6 +2410,11 @@ impl GitApp {
         }
         if self.context_menu.is_some() {
             return self.update(Message::CloseContextMenu);
+        }
+        if self.tip_hover.is_some() || self.tip_ready_key.is_some() {
+            self.tip_hover = None;
+            self.tip_ready_key = None;
+            return Task::none();
         }
         if self.confirm_discard.is_some() {
             return self.update(Message::CancelDiscard);

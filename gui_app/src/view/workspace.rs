@@ -8,7 +8,7 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::changes::changes_pane;
-use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+use super::chrome::{command_button, hairline, icon_button, pane_title, symbol_reading, Reading};
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
 use super::history::{history_pane, relative_age};
 use super::patch::{patch_pane, patch_stats};
@@ -172,10 +172,14 @@ fn detail_body<'a>(
     // Do not give the column `Length::Fill` height: it sits inside a
     // scrollable, and iced panics when a vertically filling child is laid
     // out inside a scrollable viewport.
-    let mut body = column![row![command_button(
+    let mut body = column![row![icon_button(
+        "⌂",
         "Working tree",
+        "inspector-working-tree",
+        app.tip_ready("inspector-working-tree"),
         Message::ShowWorkingTree,
         true,
+        false,
         tokens,
         reading,
     )]

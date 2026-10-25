@@ -14,7 +14,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::chrome::{
-    accent_button, command_button, field_style, glyph, hairline, pane_title, Reading,
+    accent_button, command_button, field_style, glyph, hairline, icon_button, pane_title, Reading,
 };
 
 const WORKTREES_TITLE: &str = "Worktrees";
@@ -31,10 +31,14 @@ pub(super) fn worktrees_section<'a>(
     let header = row![
         pane_title(title, tokens, reading),
         horizontal_space(),
-        command_button(
-            "New…",
+        icon_button(
+            "+",
+            "New worktree",
+            "worktree-new",
+            app.tip_ready("worktree-new"),
             Message::AskCreateWorktree,
             !app.worktree_busy,
+            false,
             tokens,
             reading,
         ),
@@ -170,20 +174,26 @@ fn worktree_row<'a>(
         }
     });
 
+    let remove_key = format!("worktree-remove:{}", entry.path);
+    let tip_ready = app.tip_ready(&remove_key);
     row![
         body,
-        command_button(
-            "Remove…",
+        icon_button(
+            "×",
+            "Remove worktree",
+            remove_key,
+            tip_ready,
             Message::AskRemoveWorktree {
                 path: entry.path.clone(),
             },
             // The main worktree is never offered, and a job in flight owns the dialog.
             !entry.is_main && !app.worktree_busy,
+            false,
             tokens,
             reading,
         ),
     ]
-    .spacing(6)
+    .spacing(4)
     .align_y(Alignment::Center)
     .into()
 }

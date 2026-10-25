@@ -11,8 +11,7 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input}
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::chrome::{
-    accent_button, command_button, field_style, fold_mark, glyph, panel_style, section_label,
-    Reading,
+    field_style, fold_mark, glyph, icon_button, panel_style, section_label, Reading,
 };
 
 /// Rows drawn per section. Each row is two buttons, so a huge untracked set would stall layout.
@@ -36,13 +35,17 @@ pub(super) fn changes_pane<'a>(
                 .padding(6)
                 .width(Length::Fill)
                 .style(field_style(tokens)),
-            command_button(
-                "Suggest",
+            icon_button(
+                "✦",
+                "Suggest commit message",
+                "changes-suggest",
+                app.tip_ready("changes-suggest"),
                 Message::SuggestCommit,
                 !app.agent_busy
                     && !app.session().state.loading
                     && (!app.session().marked_files.is_empty()
                         || matches!(selection, Selection::File { .. })),
+                false,
                 tokens,
                 reading,
             ),
@@ -50,50 +53,78 @@ pub(super) fn changes_pane<'a>(
         .spacing(6)
         .align_y(iced::Alignment::Center),
         row![
-            if app.files_as_tree {
-                command_button("List", Message::SetFileTree(false), true, tokens, reading)
-            } else {
-                accent_button("List", Message::SetFileTree(false), true, tokens, reading)
-            },
-            if app.files_as_tree {
-                accent_button("Tree", Message::SetFileTree(true), true, tokens, reading)
-            } else {
-                command_button("Tree", Message::SetFileTree(true), true, tokens, reading)
-            },
-            command_button(
+            icon_button(
+                "☰",
+                "List view",
+                "changes-list",
+                app.tip_ready("changes-list"),
+                Message::SetFileTree(false),
+                true,
+                !app.files_as_tree,
+                tokens,
+                reading,
+            ),
+            icon_button(
+                "▤",
+                "Tree view",
+                "changes-tree",
+                app.tip_ready("changes-tree"),
+                Message::SetFileTree(true),
+                true,
+                app.files_as_tree,
+                tokens,
+                reading,
+            ),
+            icon_button(
+                "☑",
                 "Select all",
+                "changes-select-all",
+                app.tip_ready("changes-select-all"),
                 Message::SelectAllFiles,
                 app.session().state.current_status.as_ref().is_some_and(|status| {
                     !status.staged_files.is_empty()
                         || !status.unstaged_files.is_empty()
                         || !status.untracked_files.is_empty()
                 }),
+                false,
                 tokens,
                 reading,
             ),
-            command_button(
-                "Clear",
+            icon_button(
+                "◻",
+                "Clear selection",
+                "changes-clear",
+                app.tip_ready("changes-clear"),
                 Message::ClearFileSelection,
                 chosen > 0,
+                false,
                 tokens,
                 reading,
             ),
-            command_button(
-                "Stage",
+            icon_button(
+                "+",
+                "Stage marked",
+                "changes-stage",
+                app.tip_ready("changes-stage"),
                 Message::StageMarked,
                 stageable && !app.session().state.loading,
+                false,
                 tokens,
-                reading
+                reading,
             ),
-            command_button(
-                "Unstage",
+            icon_button(
+                "−",
+                "Unstage marked",
+                "changes-unstage",
+                app.tip_ready("changes-unstage"),
                 Message::UnstageMarked,
                 unstageable && !app.session().state.loading,
+                false,
                 tokens,
                 reading,
             ),
         ]
-        .spacing(6),
+        .spacing(4),
         text(if chosen == 0 {
             "Nothing selected".to_string()
         } else if chosen == 1 {
