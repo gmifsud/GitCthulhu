@@ -12,7 +12,7 @@ use iced::widget::button::Status;
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
+use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Shadow};
 
 use super::chrome::{
     glyph, hairline, icon_button, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED, FOLD_OPEN,
