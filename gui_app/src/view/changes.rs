@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::app::{GitApp, Message};
-use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow};
+use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow, ChangeSection};
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
@@ -18,7 +18,69 @@ use super::chrome::{
 /// "Select all" still covers every file; only the drawing is bounded.
 const FILE_ROWS_SHOWN: usize = 500;
 
+/// Working-tree staging for the right files navigator (no left-rail chrome).
+pub(crate) fn wip_working_tree_block<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let status = app.session().state.current_status.as_ref();
+    let file_count = status
+        .map(|status| {
+            change_sections(status)
+                .iter()
+                .map(|section| section.files.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    let title = if file_count == 0 {
+        "Working tree".to_string()
+    } else if file_count == 1 {
+        "Working tree · 1 file".to_string()
+    } else {
+        format!("Working tree · {file_count} files")
+    };
+
+    let mut changes = column![text(title)
+        .font(reading.font)
+        .size((reading.size - 2.0).max(11.0))
+        .style(move |_| text::Style {
+            color: Some(tokens.text_muted),
+        })]
+    .spacing(4)
+    .padding([6, 12]);
+    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
+    changes = changes.push(wip_file_sections(app, selection, status, tokens, reading));
+    changes.into()
+}
+
 pub(super) fn changes_pane<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let mut changes = column![section_label(tokens, reading, "Changes")]
+        .spacing(4)
+        .padding(6);
+    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
+    changes = changes.push(wip_file_sections(
+        app,
+        selection,
+        app.session().state.current_status.as_ref(),
+        tokens,
+        reading,
+    ));
+
+    container(scrollable(changes))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_theme: &Theme| panel_style(tokens, true))
+        .into()
+}
+
+fn wip_toolbar<'a>(
     app: &'a GitApp,
     selection: &Selection,
     tokens: DesignTokens,
@@ -27,8 +89,7 @@ pub(super) fn changes_pane<'a>(
     let stageable = !marked_paths(&app.session().marked_files, true).is_empty();
     let unstageable = !marked_paths(&app.session().marked_files, false).is_empty();
     let chosen = app.session().marked_files.len();
-    let mut changes = column![
-        section_label(tokens, reading, "Changes"),
+    column![
         row![
             text_input("Commit message", &app.session().commit_message)
                 .on_input(Message::CommitMessageChanged)
@@ -139,23 +200,32 @@ pub(super) fn changes_pane<'a>(
         }),
     ]
     .spacing(4)
-    .padding(6);
+    .into()
+}
 
-    match &app.session().state.current_status {
+fn wip_file_sections<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    status: Option<&core_domain::RepoStatus>,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let mut sections_col = column![].spacing(4);
+    match status {
         None => {
-            changes = changes.push(
+            sections_col = sections_col.push(
                 text("Not loaded yet")
                     .font(reading.font)
                     .size(reading.size)
                     .style(move |_| text::Style {
                         color: Some(tokens.text_muted),
                     }),
-            )
+            );
         }
         Some(status) => {
             let sections = change_sections(status);
             if sections.is_empty() {
-                changes = changes.push(
+                sections_col = sections_col.push(
                     text("Working tree clean")
                         .font(reading.font)
                         .size(reading.size)
@@ -165,52 +235,57 @@ pub(super) fn changes_pane<'a>(
                 );
             }
             for section in sections {
-                let folded = app.session().collapsed_sections.contains(&section.place);
-                let mut files = column![section_header(
-                    section.title,
-                    section.files.len(),
-                    folded,
-                    section.place,
-                    tokens,
-                    reading,
-                )]
-                .spacing(0);
-                if !folded {
-                    let collapsed = collapsed_prefixes(app, section.place);
-                    let rows =
-                        change_rows(section.files, section.place, app.files_as_tree, &collapsed);
-                    let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
-                    for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
-                        files = files.push(change_line(
-                            row_item,
-                            section.place,
-                            app,
-                            selection,
-                            tokens,
-                            reading,
-                        ));
-                    }
-                    if hidden > 0 {
-                        files = files.push(
-                            text(format!("… and {hidden} more"))
-                                .font(reading.font)
-                                .size((reading.size - 2.0).max(11.0))
-                                .style(move |_| text::Style {
-                                    color: Some(tokens.text_muted),
-                                }),
-                        );
-                    }
-                }
-                changes = changes.push(files);
+                sections_col =
+                    sections_col.push(section_block(app, selection, section, tokens, reading));
             }
         }
     }
+    sections_col.into()
+}
 
-    container(scrollable(changes))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_theme: &Theme| panel_style(tokens, true))
-        .into()
+fn section_block<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    section: ChangeSection<'_>,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let folded = app.session().collapsed_sections.contains(&section.place);
+    let mut files = column![section_header(
+        section.title,
+        section.files.len(),
+        folded,
+        section.place,
+        tokens,
+        reading,
+    )]
+    .spacing(0);
+    if !folded {
+        let collapsed = collapsed_prefixes(app, section.place);
+        let rows = change_rows(section.files, section.place, app.files_as_tree, &collapsed);
+        let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
+        for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
+            files = files.push(change_line(
+                row_item,
+                section.place,
+                app,
+                selection,
+                tokens,
+                reading,
+            ));
+        }
+        if hidden > 0 {
+            files = files.push(
+                text(format!("… and {hidden} more"))
+                    .font(reading.font)
+                    .size((reading.size - 2.0).max(11.0))
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_muted),
+                    }),
+            );
+        }
+    }
+    files.into()
 }
 
 fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {

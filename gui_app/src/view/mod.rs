@@ -1,6 +1,7 @@
 mod branch;
 mod changes;
 mod chrome;
+mod files_nav;
 mod commands;
 mod confirm;
 mod context_overlay;
