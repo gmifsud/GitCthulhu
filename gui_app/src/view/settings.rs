@@ -5,7 +5,7 @@ use core_domain::AppSettings;
 use iced::widget::{column, container, pick_list, row, slider, text, text_input};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
-use super::chrome::{accent_button, command_button, reading};
+use super::chrome::{accent_button, command_button, field_style, reading};
 
 pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Element<'a, Message> {
     let settings = &app.state.settings;
@@ -76,8 +76,9 @@ pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Elem
         text_input("Paste your Kilo token", &settings.agent_token)
             .secure(true)
             .on_input(Message::AgentTokenChanged)
-            .padding(8)
-            .width(Length::Fill),
+            .padding(6)
+            .width(Length::Fill)
+            .style(field_style(tokens)),
         text("Model")
             .font(reading.font)
             .size(reading.size)
