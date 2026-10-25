@@ -36,6 +36,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) focused_diff_path: Option<String>,
     /// How many diff lines the diff pane draws before offering "Show more".
     pub(crate) diff_lines_limit: usize,
+    /// After a successful create, check out this local branch name in this session.
+    pub(crate) pending_checkout: Option<String>,
 }
 
 impl WorktreeSession {
@@ -58,6 +60,7 @@ impl WorktreeSession {
             patch_generation: 0,
             focused_diff_path: None,
             diff_lines_limit: DIFF_LINES_PER_PAGE,
+            pending_checkout: None,
         }
     }
 
