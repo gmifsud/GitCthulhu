@@ -1426,6 +1426,7 @@ impl GitApp {
                     return Task::none();
                 }
                 self.close_prompts();
+                self.error = None;
                 self.worktree_prompt = Some(WorktreePrompt::Create {
                     path: String::new(),
                     branch: String::new(),
@@ -1641,6 +1642,13 @@ impl GitApp {
             .as_deref()
             .is_some_and(|pending| same_path(pending, &path));
         if !expected {
+            // An empty path is a failure with no echo; it can only be ours, so release the lock.
+            if path.trim().is_empty() {
+                self.worktree_opening = None;
+                if let Err(error) = result {
+                    self.error = Some(error_message(&error));
+                }
+            }
             return Task::none();
         }
         self.worktree_opening = None;
@@ -1697,6 +1705,7 @@ impl GitApp {
             return Task::none();
         }
         self.close_prompts();
+        self.error = None;
         self.worktree_prompt = Some(prompt);
         Task::none()
     }
@@ -4016,6 +4025,48 @@ mod tests {
         ));
 
         assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_path_open_failure_releases_the_open_lock() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::OpenWorktree(SECOND.to_string()));
+        assert_eq!(app.worktree_opening.as_deref(), Some(SECOND));
+
+        // The interrupted-thread shape: no path echoed back.
+        let _ = app.update(Message::WorktreeOpened(
+            String::new(),
+            Err(DomainError::Unknown(
+                "repository open was interrupted".to_string(),
+            )),
+        ));
+
+        assert!(app.worktree_opening.is_none());
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.error.is_some());
+
+        // A later open is accepted rather than silently dropped.
+        let _ = app.update(Message::OpenWorktree(THIRD.to_string()));
+        assert_eq!(app.worktree_opening.as_deref(), Some(THIRD));
+    }
+
+    #[test]
+    fn asking_to_create_or_remove_clears_a_stale_error() {
+        let mut app = catalogued_app();
+        app.error = Some("stale".to_string());
+        let _ = app.update(Message::AskCreateWorktree);
+        assert!(app.worktree_prompt.is_some());
+        assert_eq!(app.error, None);
+
+        app.error = Some("stale".to_string());
+        let _ = app.update(Message::AskRemoveWorktree {
+            path: THIRD.to_string(),
+        });
+        assert!(matches!(
+            app.worktree_prompt,
+            Some(WorktreePrompt::Remove { .. })
+        ));
+        assert_eq!(app.error, None);
     }
 
     #[test]

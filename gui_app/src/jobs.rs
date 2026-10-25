@@ -239,14 +239,16 @@ pub(crate) fn open_repository_in_background(
     open: crate::RepositoryOpener,
     path: String,
 ) -> impl Future<Output = (String, Result<SharedRepository, DomainError>)> {
+    // The interrupted fallback echoes the requested path, like the success path.
+    let echoed = path.clone();
     in_background(
         move || {
             let result = open(&path);
             (path, result)
         },
-        || {
+        move || {
             (
-                String::new(),
+                echoed,
                 Err(DomainError::Unknown(
                     "repository open was interrupted".to_string(),
                 )),
@@ -792,6 +794,17 @@ mod tests {
         assert_eq!(path, r"D:\repo");
         assert!(result.is_ok());
         assert_eq!(seen.lock().expect("path lock").as_str(), r"D:\repo");
+    }
+
+    #[test]
+    fn an_interrupted_open_echoes_the_requested_path() {
+        let open: crate::RepositoryOpener = Arc::new(|_| panic!("opener thread died"));
+        let (path, result) = iced::futures::executor::block_on(open_repository_in_background(
+            open,
+            r"D:\repo".to_string(),
+        ));
+        assert_eq!(path, r"D:\repo");
+        assert!(result.is_err());
     }
 
     #[test]
