@@ -2,10 +2,15 @@ use crate::app::Message;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use core_domain::{Branch, Stash, Tag};
-use iced::widget::{column, container, scrollable, text, text_input};
-use iced::{Element, Length};
+use iced::widget::button::Status;
+use iced::widget::text::Wrapping;
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
-use super::chrome::{accent_button, row_button, section_label, Reading};
+use super::chrome::{
+    branch_chip, field_style, glyph, section_label, Reading, BRANCH_MARK, REMOTE_MARK, STASH_MARK,
+    TAG_MARK,
+};
 
 pub(super) fn branch_switcher<'a>(
     app: &'a crate::app::GitApp,
@@ -14,10 +19,11 @@ pub(super) fn branch_switcher<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let name = current_branch_name(&app.state.branches);
-    let mut switcher = column![accent_button(
-        &name,
+    let mut switcher = column![branch_chip(
+        name,
         Message::ToggleBranchList,
         !app.state.loading,
+        app.branch_list_open,
         tokens,
         reading,
     )]
@@ -27,10 +33,11 @@ pub(super) fn branch_switcher<'a>(
     if app.branch_list_open {
         let query = app.branch_query.as_str();
         switcher = switcher.push(
-            text_input("Switch branch…", &app.branch_query)
+            text_input("Checkout branch…", &app.branch_query)
                 .on_input(Message::BranchQueryChanged)
-                .padding(8)
-                .width(Length::Fill),
+                .padding(6)
+                .width(Length::Fill)
+                .style(field_style(tokens)),
         );
         switcher = switcher.push(
             container(scrollable(branch_list(
@@ -83,15 +90,16 @@ fn branch_list<'a>(
     if !locals.is_empty() {
         let mut local = column![section_label(tokens, reading, "Branches")].spacing(2);
         for branch in locals {
-            local = local.push(row_button(
+            let selected = branch.is_head
+                || matches!(selection, Selection::Branch { name, .. } if name == &branch.name);
+            local = local.push(ref_row(
+                BRANCH_MARK,
                 branch.name.clone(),
                 Message::ChooseBranch(branch.name.clone()),
-                branch.is_head
-                    || matches!(selection, Selection::Branch { name, .. } if name == &branch.name),
+                selected,
                 branch.is_head,
                 tokens,
                 reading,
-                false,
             ));
         }
         list = list.push(local);
@@ -99,16 +107,17 @@ fn branch_list<'a>(
     if !remotes.is_empty() {
         let mut remote = column![section_label(tokens, reading, "Remotes")].spacing(2);
         for branch in remotes {
-            remote = remote.push(row_button(
+            let selected = matches!(selection, Selection::Remote { name } if name == &branch.name);
+            remote = remote.push(ref_row(
+                REMOTE_MARK,
                 branch.name.clone(),
                 Message::Select(Selection::Remote {
                     name: branch.name.clone(),
                 }),
-                matches!(selection, Selection::Remote { name } if name == &branch.name),
+                selected,
                 false,
                 tokens,
                 reading,
-                false,
             ));
         }
         list = list.push(remote);
@@ -116,17 +125,18 @@ fn branch_list<'a>(
     if !shown_tags.is_empty() {
         let mut tagged = column![section_label(tokens, reading, "Tags")].spacing(2);
         for tag in shown_tags {
-            tagged = tagged.push(row_button(
+            let selected = matches!(selection, Selection::Tag { name, .. } if name == &tag.name);
+            tagged = tagged.push(ref_row(
+                TAG_MARK,
                 tag.name.clone(),
                 Message::Select(Selection::Tag {
                     name: tag.name.clone(),
                     commit_id: tag.commit_id.clone(),
                 }),
-                matches!(selection, Selection::Tag { name, .. } if name == &tag.name),
+                selected,
                 false,
                 tokens,
                 reading,
-                false,
             ));
         }
         list = list.push(tagged);
@@ -134,21 +144,22 @@ fn branch_list<'a>(
     if !shown_stashes.is_empty() {
         let mut saved = column![section_label(tokens, reading, "Stashes")].spacing(2);
         for stash in shown_stashes {
-            saved = saved.push(row_button(
+            let selected = matches!(
+                selection,
+                Selection::Stash { index, message }
+                    if *index == stash.index && message == &stash.message
+            );
+            saved = saved.push(ref_row(
+                STASH_MARK,
                 stash.message.clone(),
                 Message::Select(Selection::Stash {
                     index: stash.index,
                     message: stash.message.clone(),
                 }),
-                matches!(
-                    selection,
-                    Selection::Stash { index, message }
-                        if *index == stash.index && message == &stash.message
-                ),
+                selected,
                 false,
                 tokens,
                 reading,
-                false,
             ));
         }
         list = list.push(saved);
@@ -164,6 +175,66 @@ fn branch_list<'a>(
         );
     }
     list.into()
+}
+
+fn ref_row<'a>(
+    mark: &'static str,
+    label: String,
+    message: Message,
+    selected: bool,
+    accent: bool,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let mark_color = if accent {
+        tokens.accent_primary
+    } else if selected {
+        tokens.text_primary
+    } else {
+        tokens.text_muted
+    };
+    let label_color = if accent {
+        tokens.accent_primary
+    } else if selected {
+        tokens.text_primary
+    } else {
+        tokens.text_secondary
+    };
+    button(
+        row![
+            glyph(mark, reading.size, mark_color, &reading),
+            text(label)
+                .font(reading.font)
+                .size(reading.size)
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style {
+                    color: Some(label_color),
+                }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([4, 8])
+    .on_press(message)
+    .style(move |_theme, status| {
+        let hot = matches!(status, Status::Hovered | Status::Pressed);
+        iced::widget::button::Style {
+            background: Some(Background::Color(if selected || hot {
+                tokens.border
+            } else {
+                Color::TRANSPARENT
+            })),
+            text_color: label_color,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+        }
+    })
+    .into()
 }
 
 pub(crate) fn matches_query(name: &str, query: &str) -> bool {
