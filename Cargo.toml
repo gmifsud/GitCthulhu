@@ -13,6 +13,12 @@ members = [
 ]
 resolver = "2"
 
+# Debug builds keep our own crates unoptimised for fast rebuilds and good backtraces, but
+# optimise every dependency: iced's text shaping, tessellation, and gix are unusable at
+# opt-level 0 and made the debug binary feel frozen.
+[profile.dev.package."*"]
+opt-level = 3
+
 # Optimize for cross-platform release builds
 [profile.release]
 opt-level = 3
