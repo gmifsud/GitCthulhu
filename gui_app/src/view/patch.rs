@@ -12,7 +12,7 @@ pub(super) fn patch_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let mut body = column![].spacing(4).padding([4, 8]);
+    let mut body = column![].spacing(2).padding([4, 8]);
     if app.session().patch_pending {
         body = body.push(note("Loading…", tokens, reading));
     } else if let Some(error) = &app.session().patch_error {
