@@ -216,9 +216,10 @@ pub(crate) fn ribbon_commands(
                 false,
             ),
         ],
-        Selection::Remote { .. } => {
-            vec![item("Checkout", RibbonCommand::Checkout, false, false)]
-        }
+        Selection::Remote { .. } => vec![
+            item("Checkout", RibbonCommand::Checkout, false, false),
+            item("Create", RibbonCommand::CreateBranch, true, false),
+        ],
         Selection::Commit { .. } => vec![
             item("Cherry-pick", RibbonCommand::CherryPick, true, false),
             item("Reset", RibbonCommand::Reset, true, false),
@@ -369,8 +370,9 @@ mod tests {
             name: "origin/dev".to_string(),
         };
         let items = ribbon_commands(&selection, true, false);
-        assert_eq!(labels(&items), ["Checkout"]);
+        assert_eq!(labels(&items), ["Checkout", "Create"]);
         assert!(!items[0].enabled);
+        assert!(items[1].enabled);
         assert_eq!(context_label(&selection), "Remote");
     }
 
