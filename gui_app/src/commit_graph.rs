@@ -3,6 +3,8 @@
 //! Every commit row is the same height, so each row only draws its own slice of the
 //! graph and the slices join up into continuous lines.
 
+use std::cell::RefCell;
+
 use core_domain::DagNode;
 use iced::widget::canvas;
 use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
@@ -10,6 +12,7 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 use crate::theme::hex_color;
 
 /// Height of one commit row. Rows are single-line so graph segments meet exactly.
+/// Tall enough for a ref pill beside the message.
 pub(crate) const ROW_HEIGHT: f32 = 28.0;
 /// Horizontal distance between lane centres.
 const LANE_SPACING: f32 = 14.0;
@@ -101,50 +104,67 @@ fn lane_colour(lane: usize) -> Color {
 /// Canvas program that paints one row's slice of the graph.
 pub(crate) struct GraphCell(pub GraphRow);
 
+/// Tessellated geometry kept between frames, with the row it was built from.
+///
+/// `GraphCell` is rebuilt on every `view`, so the cache lives in the widget state,
+/// which iced keeps per position in the tree. It is thrown away when the row changes.
+#[derive(Default)]
+pub(crate) struct GraphCache {
+    geometry: canvas::Cache,
+    drawn: RefCell<Option<GraphRow>>,
+}
+
 impl<Message> canvas::Program<Message> for GraphCell {
-    type State = ();
+    type State = GraphCache;
 
     fn draw(
         &self,
-        _state: &(),
+        state: &GraphCache,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let row = &self.0;
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let bottom = bounds.height;
-        let dot = Point::new(lane_x(row.lane), bottom / 2.0);
-        let mut segment = |from: Point, to: Point, lane: usize| {
-            frame.stroke(
-                &canvas::Path::line(from, to),
-                canvas::Stroke::default()
-                    .with_color(lane_colour(lane))
-                    .with_width(LINE_WIDTH),
-            );
-        };
-
-        for &lane in &row.passing {
-            segment(
-                Point::new(lane_x(lane), 0.0),
-                Point::new(lane_x(lane), bottom),
-                lane,
-            );
+        if state.drawn.borrow().as_ref() != Some(row) {
+            state.geometry.clear();
+            *state.drawn.borrow_mut() = Some(row.clone());
         }
-        for &lane in &row.incoming {
-            segment(Point::new(lane_x(lane), 0.0), dot, lane);
-        }
-        for &lane in &row.outgoing {
-            segment(dot, Point::new(lane_x(lane), bottom), lane);
-        }
-        frame.fill(
-            &canvas::Path::circle(dot, DOT_RADIUS),
-            lane_colour(row.lane),
-        );
-
-        vec![frame.into_geometry()]
+        let geometry = state.geometry.draw(renderer, bounds.size(), |frame| {
+            paint_row(frame, row, bounds.height);
+        });
+        vec![geometry]
     }
+}
+
+fn paint_row(frame: &mut canvas::Frame, row: &GraphRow, bottom: f32) {
+    let dot = Point::new(lane_x(row.lane), bottom / 2.0);
+    let mut segment = |from: Point, to: Point, lane: usize| {
+        frame.stroke(
+            &canvas::Path::line(from, to),
+            canvas::Stroke::default()
+                .with_color(lane_colour(lane))
+                .with_width(LINE_WIDTH),
+        );
+    };
+
+    for &lane in &row.passing {
+        segment(
+            Point::new(lane_x(lane), 0.0),
+            Point::new(lane_x(lane), bottom),
+            lane,
+        );
+    }
+    for &lane in &row.incoming {
+        segment(Point::new(lane_x(lane), 0.0), dot, lane);
+    }
+    for &lane in &row.outgoing {
+        segment(dot, Point::new(lane_x(lane), bottom), lane);
+    }
+    frame.fill(
+        &canvas::Path::circle(dot, DOT_RADIUS),
+        lane_colour(row.lane),
+    );
 }
 
 #[cfg(test)]
