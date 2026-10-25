@@ -5,6 +5,7 @@ mod command;
 mod diff;
 mod stash;
 mod status;
+mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -14,12 +15,13 @@ use std::fmt::Display;
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
     Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag,
+    ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
 use gix::refs::TargetRef;
 use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
+use worktree::{parse_worktree_porcelain, require_worktree_path};
 
 pub(crate) fn unknown(error: impl Display) -> DomainError {
     DomainError::Unknown(error.to_string())
@@ -227,6 +229,44 @@ impl GitRepository for GitoxideAdapter {
         }
         tags.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(tags)
+    }
+
+    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {
+        self.open_repo()?;
+        let out = run_git_stdout(&self.repo_path, &["worktree", "list", "--porcelain"])?;
+        Ok(parse_worktree_porcelain(&out))
+    }
+
+    fn add_worktree(
+        &self,
+        path: &str,
+        branch: &str,
+        create_branch: bool,
+    ) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_worktree_path(path)?;
+        require_branch_name(branch)?;
+        if create_branch {
+            run_git(
+                &self.repo_path,
+                &["worktree", "add", "-b", branch, "--", path],
+            )
+        } else {
+            run_git(&self.repo_path, &["worktree", "add", "--", path, branch])
+        }
+    }
+
+    fn remove_worktree(&self, path: &str, force: bool) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_worktree_path(path)?;
+        if force {
+            run_git(
+                &self.repo_path,
+                &["worktree", "remove", "--force", "--", path],
+            )
+        } else {
+            run_git(&self.repo_path, &["worktree", "remove", "--", path])
+        }
     }
 
     /// Switch to a local branch with `git switch`.

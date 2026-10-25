@@ -43,6 +43,15 @@ pub struct Branch {
     pub tip: String,
 }
 
+/// One entry from `git worktree list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: String,
+    pub branch: String,
+    pub is_main: bool,
+    pub locked: bool,
+}
+
 /// How the current branch compares with its upstream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackingStatus {

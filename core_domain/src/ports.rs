@@ -1,6 +1,6 @@
 use super::{
     AppSettings, Branch, Commit, DagNode, DomainError, FileDisposition, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag,
+    ResetMode, Stash, Tag, Worktree,
 };
 
 /// The GitRepository port.
@@ -13,6 +13,17 @@ pub trait GitRepository {
     fn tags(&self) -> Result<Vec<Tag>, DomainError>;
     /// `git stash list`, in the order git prints it. `stash@{0}` is the newest.
     fn stashes(&self) -> Result<Vec<Stash>, DomainError>;
+    /// `git worktree list --porcelain`. The first row is the main worktree; prunable rows are omitted.
+    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError>;
+    /// `git worktree add`. With `create_branch`, makes `branch` at HEAD (`-b`); otherwise checks out the existing `branch`.
+    fn add_worktree(
+        &self,
+        path: &str,
+        branch: &str,
+        create_branch: bool,
+    ) -> Result<(), DomainError>;
+    /// `git worktree remove`. `force` also removes a worktree with uncommitted changes; git refuses the main one.
+    fn remove_worktree(&self, path: &str, force: bool) -> Result<(), DomainError>;
     fn checkout_branch(&self, branch_name: &str) -> Result<(), DomainError>;
     /// `git branch -- <name> <start_point>`. Does not check the new branch out.
     fn create_branch(&self, name: &str, start_point: &str) -> Result<(), DomainError>;

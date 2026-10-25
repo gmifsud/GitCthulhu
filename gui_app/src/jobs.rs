@@ -490,6 +490,20 @@ mod tests {
         fn tags(&self) -> Result<Vec<core_domain::Tag>, DomainError> {
             unreachable!("status panics first")
         }
+        fn worktrees(&self) -> Result<Vec<core_domain::Worktree>, DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn add_worktree(
+            &self,
+            _path: &str,
+            _branch: &str,
+            _create_branch: bool,
+        ) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn remove_worktree(&self, _path: &str, _force: bool) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
         fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }

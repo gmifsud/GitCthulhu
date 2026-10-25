@@ -4,7 +4,7 @@
 
 use core_domain::{
     Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus, Stash,
-    Tag,
+    Tag, Worktree,
 };
 
 /// Pre-configured fake that implements [`GitRepository`].
@@ -18,6 +18,9 @@ pub struct FakeGitRepository {
     pub branches_result: Result<Vec<Branch>, DomainError>,
     pub stashes_result: Result<Vec<Stash>, DomainError>,
     pub tags_result: Result<Vec<Tag>, DomainError>,
+    pub worktrees_result: Result<Vec<Worktree>, DomainError>,
+    pub add_worktree_result: Result<(), DomainError>,
+    pub remove_worktree_result: Result<(), DomainError>,
     pub checkout_result: Result<(), DomainError>,
     pub create_branch_result: Result<(), DomainError>,
     pub rename_branch_result: Result<(), DomainError>,
@@ -57,6 +60,9 @@ impl FakeGitRepository {
             branches_result: Ok(vec![]),
             stashes_result: Ok(vec![]),
             tags_result: Ok(vec![]),
+            worktrees_result: Ok(vec![]),
+            add_worktree_result: Ok(()),
+            remove_worktree_result: Ok(()),
             checkout_result: Ok(()),
             create_branch_result: Ok(()),
             rename_branch_result: Ok(()),
@@ -107,6 +113,23 @@ impl GitRepository for FakeGitRepository {
 
     fn tags(&self) -> Result<Vec<Tag>, DomainError> {
         self.tags_result.clone()
+    }
+
+    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {
+        self.worktrees_result.clone()
+    }
+
+    fn add_worktree(
+        &self,
+        _path: &str,
+        _branch: &str,
+        _create_branch: bool,
+    ) -> Result<(), DomainError> {
+        self.add_worktree_result.clone()
+    }
+
+    fn remove_worktree(&self, _path: &str, _force: bool) -> Result<(), DomainError> {
+        self.remove_worktree_result.clone()
     }
 
     fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
