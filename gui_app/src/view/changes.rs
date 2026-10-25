@@ -25,13 +25,13 @@ pub(super) fn changes_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let stageable = !marked_paths(&app.marked_files, true).is_empty();
-    let unstageable = !marked_paths(&app.marked_files, false).is_empty();
-    let chosen = app.marked_files.len();
+    let stageable = !marked_paths(&app.session().marked_files, true).is_empty();
+    let unstageable = !marked_paths(&app.session().marked_files, false).is_empty();
+    let chosen = app.session().marked_files.len();
     let mut changes = column![
         section_label(tokens, reading, "Changes"),
         row![
-            text_input("Commit message", &app.commit_message)
+            text_input("Commit message", &app.session().commit_message)
                 .on_input(Message::CommitMessageChanged)
                 .padding(6)
                 .width(Length::Fill)
@@ -40,8 +40,8 @@ pub(super) fn changes_pane<'a>(
                 "Suggest",
                 Message::SuggestCommit,
                 !app.agent_busy
-                    && !app.state.loading
-                    && (!app.marked_files.is_empty()
+                    && !app.session().state.loading
+                    && (!app.session().marked_files.is_empty()
                         || matches!(selection, Selection::File { .. })),
                 tokens,
                 reading,
@@ -63,7 +63,7 @@ pub(super) fn changes_pane<'a>(
             command_button(
                 "Select all",
                 Message::SelectAllFiles,
-                app.state.current_status.as_ref().is_some_and(|status| {
+                app.session().state.current_status.as_ref().is_some_and(|status| {
                     !status.staged_files.is_empty()
                         || !status.unstaged_files.is_empty()
                         || !status.untracked_files.is_empty()
@@ -81,14 +81,14 @@ pub(super) fn changes_pane<'a>(
             command_button(
                 "Stage",
                 Message::StageMarked,
-                stageable && !app.state.loading,
+                stageable && !app.session().state.loading,
                 tokens,
                 reading
             ),
             command_button(
                 "Unstage",
                 Message::UnstageMarked,
-                unstageable && !app.state.loading,
+                unstageable && !app.session().state.loading,
                 tokens,
                 reading,
             ),
@@ -110,7 +110,7 @@ pub(super) fn changes_pane<'a>(
     .spacing(4)
     .padding(6);
 
-    match &app.state.current_status {
+    match &app.session().state.current_status {
         None => {
             changes = changes.push(
                 text("Not loaded yet")
@@ -134,7 +134,7 @@ pub(super) fn changes_pane<'a>(
                 );
             }
             for section in sections {
-                let folded = app.collapsed_sections.contains(&section.place);
+                let folded = app.session().collapsed_sections.contains(&section.place);
                 let mut files = column![section_header(
                     section.title,
                     section.files.len(),
@@ -183,7 +183,7 @@ pub(super) fn changes_pane<'a>(
 }
 
 fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {
-    app.collapsed_dirs
+    app.session().collapsed_dirs
         .iter()
         .filter(|(entry_place, _)| *entry_place == place)
         .map(|(_, prefix)| prefix.clone())
@@ -276,6 +276,7 @@ fn change_line<'a>(
             name, path, place, ..
         } => {
             let marked = app
+                .session()
                 .marked_files
                 .iter()
                 .any(|mark| &mark.path == path && mark.place == *place);

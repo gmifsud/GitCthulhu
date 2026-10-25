@@ -31,9 +31,9 @@ use workspace::workspace;
 impl GitApp {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let tokens = self.tokens;
-        let reading = compact(reading(&self.state.settings));
+        let reading = compact(reading(&self.settings));
 
-        if self.adapter.is_none() {
+        if self.sessions.is_empty() {
             return welcome(self, tokens, reading);
         }
         if let Some((path, _)) = &self.confirm_discard {
@@ -52,13 +52,14 @@ impl GitApp {
             return settings_dialog(self, tokens);
         }
 
+        let session = self.session();
         let selection = visible_selection(
-            self.selection.as_ref(),
-            &self.state.branches,
-            &self.state.commits,
-            &self.state.stashes,
-            &self.state.tags,
-            self.state.current_status.as_ref(),
+            session.selection.as_ref(),
+            &session.state.branches,
+            &session.state.commits,
+            &session.state.stashes,
+            &session.state.tags,
+            session.state.current_status.as_ref(),
         );
         container(column![
             top_bar(self, tokens, reading),

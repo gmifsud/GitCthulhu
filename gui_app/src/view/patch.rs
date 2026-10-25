@@ -13,25 +13,25 @@ pub(super) fn patch_pane<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let mut body = column![].spacing(4).padding([4, 8]);
-    if app.patch_pending {
+    if app.session().patch_pending {
         body = body.push(note("Loading…", tokens, reading));
-    } else if let Some(error) = &app.patch_error {
+    } else if let Some(error) = &app.session().patch_error {
         body = body.push(note(error, tokens, reading));
-    } else if app.patches.is_empty() {
+    } else if app.session().patches.is_empty() {
         body = body.push(note("No changes", tokens, reading));
     } else {
-        let busy = app.state.loading;
-        let mut budget = app.diff_lines_limit;
-        let patches = visible_patches(&app.patches, app.focused_diff_path.as_deref());
+        let busy = app.session().state.loading;
+        let mut budget = app.session().diff_lines_limit;
+        let patches = visible_patches(&app.session().patches, app.session().focused_diff_path.as_deref());
         let hidden = {
             let total: usize = patches
                 .iter()
                 .flat_map(|patch| &patch.hunks)
                 .map(|hunk| hunk.lines.len())
                 .sum();
-            total.saturating_sub(app.diff_lines_limit)
+            total.saturating_sub(app.session().diff_lines_limit)
         };
-        if app.focused_diff_path.is_some() && patches.len() < app.patches.len() {
+        if app.session().focused_diff_path.is_some() && patches.len() < app.session().patches.len() {
             body = body.push(
                 row![
                     command_button(
@@ -42,7 +42,7 @@ pub(super) fn patch_pane<'a>(
                         reading,
                     ),
                     note(
-                        &format!("Showing 1 of {}", app.patches.len()),
+                        &format!("Showing 1 of {}", app.session().patches.len()),
                         tokens,
                         reading,
                     ),

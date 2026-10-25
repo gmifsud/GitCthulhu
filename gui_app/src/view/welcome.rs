@@ -28,13 +28,13 @@ pub(super) fn welcome<'a>(
                 .font(reading.font)
                 .size(reading.size),
         )
-        .on_press_maybe((!app.state.loading).then_some(Message::ChooseRepositoryFolder)),
+        .on_press_maybe((!app.opening).then_some(Message::ChooseRepositoryFolder)),
         button(
             text("Init Repository…")
                 .font(reading.font)
                 .size(reading.size),
         )
-        .on_press_maybe((!app.state.loading).then_some(Message::ChooseInitFolder)),
+        .on_press_maybe((!app.opening).then_some(Message::ChooseInitFolder)),
         text_input("https://…", &app.clone_url)
             .on_input(Message::CloneUrlChanged)
             .padding(8)
@@ -45,7 +45,7 @@ pub(super) fn welcome<'a>(
                 .size(reading.size),
         )
         .on_press_maybe(
-            (!app.state.loading && !app.clone_url.trim().is_empty())
+            (!app.opening && !app.clone_url.trim().is_empty())
                 .then_some(Message::ChooseCloneFolder),
         ),
     ]

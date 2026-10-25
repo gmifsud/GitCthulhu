@@ -138,10 +138,10 @@ fn diff<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let _ = layout;
-    let title = if app.patches.is_empty() {
+    let title = if app.session().patches.is_empty() {
         DIFF_TITLE.to_string()
     } else {
-        format!("{DIFF_TITLE} · {}", app.patches.len())
+        format!("{DIFF_TITLE} · {}", app.session().patches.len())
     };
     column![
         column![
@@ -183,7 +183,7 @@ fn detail_body<'a>(
     .width(Length::Fill);
 
     if let Selection::Commit { id } = selection {
-        if let Some(commit) = app.state.commits.iter().find(|commit| &commit.id == id) {
+        if let Some(commit) = app.session().state.commits.iter().find(|commit| &commit.id == id) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -243,7 +243,7 @@ fn commit_files_block<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let mut block = column![].spacing(2).padding([4, 12]);
-    if app.patch_pending {
+    if app.session().patch_pending {
         return block
             .push(
                 text("Loading files…")
@@ -255,7 +255,7 @@ fn commit_files_block<'a>(
             )
             .into();
     }
-    if let Some(error) = &app.patch_error {
+    if let Some(error) = &app.session().patch_error {
         return block
             .push(
                 text(error.clone())
@@ -267,7 +267,7 @@ fn commit_files_block<'a>(
             )
             .into();
     }
-    if app.patches.is_empty() {
+    if app.session().patches.is_empty() {
         return block
             .push(
                 text("No files in this commit")
@@ -280,13 +280,13 @@ fn commit_files_block<'a>(
             .into();
     }
 
-    let (total_added, total_removed) = app.patches.iter().fold((0, 0), |(a, r), patch| {
+    let (total_added, total_removed) = app.session().patches.iter().fold((0, 0), |(a, r), patch| {
         let (added, removed) = patch_stats(patch);
         (a + added, r + removed)
     });
     let title = format!(
         "Files changed ({})  +{total_added} −{total_removed}",
-        app.patches.len()
+        app.session().patches.len()
     );
     let mut heading = row![text(title)
         .font(reading.font)
@@ -296,16 +296,16 @@ fn commit_files_block<'a>(
         })]
     .spacing(8)
     .align_y(Alignment::Center);
-    if app.focused_diff_path.is_some() {
+    if app.session().focused_diff_path.is_some() {
         heading = heading.push(iced::widget::horizontal_space()).push(
             command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
         );
     }
     block = block.push(heading);
 
-    for patch in &app.patches {
+    for patch in &app.session().patches {
         let (added, removed) = patch_stats(patch);
-        let focused = app.focused_diff_path.as_deref() == Some(patch.path.as_str());
+        let focused = app.session().focused_diff_path.as_deref() == Some(patch.path.as_str());
         let stats = if patch.binary {
             "binary".to_string()
         } else {
@@ -433,7 +433,7 @@ fn files_rail<'a>(
 }
 
 fn working_change_count(app: &GitApp) -> usize {
-    app.state
+    app.session().state
         .current_status
         .as_ref()
         .map(|status| {

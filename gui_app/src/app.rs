@@ -1,9 +1,8 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use core_domain::{
-    AppSettings, AppState, Branch, DomainError, FileDisposition, Hunk, Patch, ResetMode, Stash,
-    ViewEvent,
+    AppSettings, DomainError, FileDisposition, Patch, ResetMode, Stash, ViewEvent, Worktree,
+    WorktreeTabRetention,
 };
 use iced::widget::{pane_grid, text_editor};
 use iced::Task;
@@ -16,16 +15,14 @@ use crate::jobs::{
     fetch_in_background, history_in_background, init_in_background, list_models_in_background,
     load_patch_in_background, load_repository_in_background, open_repository_in_background,
     pull_in_background, push_in_background, save_settings_in_background, stage_hunk_in_background,
-    stash_in_background, suggest_commit_in_background, BranchAction, HistoryAction, PatchQuery,
+    stash_in_background, suggest_commit_in_background, BranchAction, HistoryAction,
     SharedRepository, StashAction, WorktreeEdit,
 };
 use crate::layout::{self, LayoutPreset, RatioSlot, WorkspacePane};
-use crate::selection::{visible_selection, Selection};
+use crate::selection::Selection;
+use crate::session::{apply_retention, WorktreeSession, DIFF_LINES_PER_PAGE};
 use crate::theme::DesignTokens;
 use crate::{RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver};
-
-/// Diff lines drawn per "Show more" step. One widget per line, so this bounds layout cost.
-pub(crate) const DIFF_LINES_PER_PAGE: usize = 400;
 
 /// Repository handed from a background open into [`Message::RepositoryOpened`].
 ///
@@ -40,10 +37,19 @@ impl std::fmt::Debug for OpenedRepository {
 }
 
 pub(crate) struct GitApp {
-    pub(crate) state: AppState,
-    pub(crate) adapter: Option<SharedRepository>,
-    /// Folder opened in this window. `None` on the welcome screen.
-    pub(crate) repository_path: Option<String>,
+    /// One per open worktree tab. Empty on the welcome screen.
+    pub(crate) sessions: Vec<WorktreeSession>,
+    /// Index into `sessions` of the tab bound to the window.
+    pub(crate) active: usize,
+    /// Every worktree of the open repository. Populated by the explorer in WP1-c.
+    #[allow(dead_code)]
+    pub(crate) worktree_catalogue: Vec<Worktree>,
+    #[allow(dead_code)]
+    pub(crate) catalogue_error: Option<String>,
+    /// Authoritative, global settings. Fanned into each session's `AppState`.
+    pub(crate) settings: AppSettings,
+    /// True while a welcome-screen open/init/clone is in flight (no session yet).
+    pub(crate) opening: bool,
     pub(crate) panes: pane_grid::State<WorkspacePane>,
     pub(crate) layout: LayoutPreset,
     ratios: [layout::LayoutRatios; 3],
@@ -52,12 +58,7 @@ pub(crate) struct GitApp {
     pub(crate) files_rail_open: bool,
     pub(crate) branch_list_open: bool,
     pub(crate) branch_query: String,
-    pub(crate) marked_files: Vec<crate::changes::MarkedFile>,
     pub(crate) files_as_tree: bool,
-    /// Folder prefixes collapsed in Tree mode, keyed with their disposition.
-    pub(crate) collapsed_dirs: HashSet<(FileDisposition, String)>,
-    /// Staged / Unstaged / Untracked headers the user has folded shut.
-    pub(crate) collapsed_sections: HashSet<FileDisposition>,
     pub(crate) agent_models: Vec<String>,
     pub(crate) agent_models_error: Option<String>,
     pub(crate) agent_busy: bool,
@@ -69,18 +70,8 @@ pub(crate) struct GitApp {
     pub(crate) error: Option<String>,
     /// Status-bar error shows full text when true; first line only when false.
     pub(crate) error_expanded: bool,
-    pub(crate) commit_message: String,
     pub(crate) tokens: DesignTokens,
-    pub(crate) selection: Option<Selection>,
     pub(crate) settings_open: bool,
-    pub(crate) patches: Vec<Patch>,
-    /// When set, the Diff pane shows only this path (from a commit/tag file click).
-    pub(crate) focused_diff_path: Option<String>,
-    pub(crate) patch_error: Option<String>,
-    pub(crate) patch_pending: bool,
-    /// How many diff lines the diff pane draws before offering "Show more".
-    /// Every line is its own widget, so an unbounded diff stalls layout.
-    pub(crate) diff_lines_limit: usize,
     pub(crate) confirm_discard: Option<(String, FileDisposition)>,
     pub(crate) confirm_drop: Option<Stash>,
     pub(crate) branch_prompt: Option<BranchPrompt>,
@@ -88,7 +79,6 @@ pub(crate) struct GitApp {
     /// After a successful create, check out this local branch name.
     pub(crate) pending_checkout: Option<String>,
     pub(crate) clone_url: String,
-    patch_generation: u64,
     open_repository: RepositoryOpener,
     initialise: RepositoryInitialiser,
     clone_repository: RepositoryCloner,
@@ -101,15 +91,15 @@ pub(crate) enum Message {
     CheckoutBranch(String),
     CommitMessageChanged(String),
     EditWorktree(WorktreeEdit),
-    RepositoryLoaded(Vec<ViewEvent>),
-    CheckoutFinished(Result<(), DomainError>),
+    RepositoryLoaded(String, Vec<ViewEvent>),
+    CheckoutFinished(String, Result<(), DomainError>),
     Fetch,
-    FetchFinished(Result<(), DomainError>),
+    FetchFinished(String, Result<(), DomainError>),
     Push,
-    PushFinished(Result<(), DomainError>),
+    PushFinished(String, Result<(), DomainError>),
     Pull,
-    PullFinished(Result<(), DomainError>),
-    WorktreeEditFinished(WorktreeEdit, Result<(), DomainError>),
+    PullFinished(String, Result<(), DomainError>),
+    WorktreeEditFinished(String, WorktreeEdit, Result<(), DomainError>),
     /// Show the native folder dialog.
     ChooseRepositoryFolder,
     PaneResized(pane_grid::ResizeEvent),
@@ -174,13 +164,19 @@ pub(crate) enum Message {
     SettingsSaved,
     UiFontChosen(String),
     UiSizeChosen(u8),
-    PatchLoaded(u64, Result<Vec<Patch>, DomainError>),
+    /// The user picked a worktree tab retention mode in Settings.
+    WorktreeRetentionChosen(WorktreeTabRetention),
+    PatchLoaded {
+        path: String,
+        generation: u64,
+        result: Result<Vec<Patch>, DomainError>,
+    },
     /// Draw another page of diff lines in the diff pane.
     ShowMoreDiff,
     AskDiscard,
     CancelDiscard,
     ConfirmDiscard,
-    DiscardFinished(Result<(), DomainError>),
+    DiscardFinished(String, Result<(), DomainError>),
     StageHunk {
         path: String,
         index: usize,
@@ -189,7 +185,7 @@ pub(crate) enum Message {
         path: String,
         index: usize,
     },
-    HunkFinished(Result<(), DomainError>),
+    HunkFinished(String, Result<(), DomainError>),
     ChooseInitFolder,
     InitFolderChosen(Option<String>),
     InitRepository(String),
@@ -205,14 +201,14 @@ pub(crate) enum Message {
     AskDropStash,
     CancelDropStash,
     ConfirmDropStash,
-    StashFinished(Result<(), DomainError>),
+    StashFinished(String, Result<(), DomainError>),
     AskCreateBranch,
     AskRenameBranch,
     AskDeleteBranch,
     BranchNameChanged(String),
     ConfirmBranch,
     CancelBranch,
-    BranchFinished(Result<(), DomainError>),
+    BranchFinished(String, Result<(), DomainError>),
     AskCherryPick,
     AskReset,
     AskMerge,
@@ -222,7 +218,7 @@ pub(crate) enum Message {
     ConfirmReset(ResetMode),
     ConfirmMerge,
     ConfirmRebase,
-    HistoryFinished(Result<(), DomainError>),
+    HistoryFinished(String, Result<(), DomainError>),
 }
 
 /// A cherry-pick, reset, merge, or rebase waiting for confirmation.
@@ -265,16 +261,25 @@ impl GitApp {
         settings: AppSettings,
         save_settings: SettingsSaver,
     ) -> Self {
-        let mut state = AppState::new();
-        state.apply_event(ViewEvent::SettingsUpdated(settings));
+        let sessions = match (adapter, repository_path) {
+            (Some(adapter), path) => vec![WorktreeSession::new(
+                path.unwrap_or_default(),
+                adapter,
+                settings.clone(),
+            )],
+            _ => Vec::new(),
+        };
         let layout = LayoutPreset::DEFAULT;
         let ratios = layout::default_ratios();
         let panes = layout::new_panes(layout, &ratios[layout.index()]);
         let split_slots = layout::split_slots(&panes);
         Self {
-            state,
-            adapter,
-            repository_path,
+            sessions,
+            active: 0,
+            worktree_catalogue: Vec::new(),
+            catalogue_error: None,
+            settings,
+            opening: false,
             panes,
             layout,
             ratios,
@@ -282,10 +287,7 @@ impl GitApp {
             files_rail_open: true,
             branch_list_open: false,
             branch_query: String::new(),
-            marked_files: Vec::new(),
             files_as_tree: true,
-            collapsed_dirs: HashSet::new(),
-            collapsed_sections: HashSet::new(),
             agent_models: Vec::new(),
             agent_models_error: None,
             agent_busy: false,
@@ -296,27 +298,69 @@ impl GitApp {
             suggest_commit: unavailable_suggester(),
             error: None,
             error_expanded: false,
-            commit_message: String::new(),
             tokens: DesignTokens::deep_focus(),
-            selection: None,
             settings_open: false,
-            patches: Vec::new(),
-            focused_diff_path: None,
-            patch_error: None,
-            patch_pending: false,
-            diff_lines_limit: DIFF_LINES_PER_PAGE,
             confirm_discard: None,
             confirm_drop: None,
             branch_prompt: None,
             history_prompt: None,
             pending_checkout: None,
             clone_url: String::new(),
-            patch_generation: 0,
             open_repository,
             initialise,
             clone_repository,
             save_settings,
         }
+    }
+
+    /// The tab bound to the window. Panics on the welcome screen; call sites that can run
+    /// there use [`Self::active_session`] instead.
+    pub(crate) fn session(&self) -> &WorktreeSession {
+        &self.sessions[self.active]
+    }
+
+    pub(crate) fn session_mut(&mut self) -> &mut WorktreeSession {
+        &mut self.sessions[self.active]
+    }
+
+    fn active_session(&self) -> Option<&WorktreeSession> {
+        self.sessions.get(self.active)
+    }
+
+    fn active_session_mut(&mut self) -> Option<&mut WorktreeSession> {
+        self.sessions.get_mut(self.active)
+    }
+
+    /// The session whose path matches, used to route background finishes. An unknown path
+    /// (a closed or foreign tab) resolves to `None` so the finish is dropped.
+    fn session_mut_by_path(&mut self, path: &str) -> Option<&mut WorktreeSession> {
+        self.sessions.iter_mut().find(|session| session.path == path)
+    }
+
+    /// Switch to another tab, applying the retention policy to the session left behind.
+    /// Wired to the tab strip in WP1-c; exercised by tests until then.
+    #[allow(dead_code)]
+    fn activate(&mut self, index: usize) {
+        if index == self.active || index >= self.sessions.len() {
+            return;
+        }
+        let mode = self.settings.worktree_tab_retention;
+        apply_retention(&mut self.sessions[self.active], mode);
+        self.active = index;
+        // Modal prompts are global; clear them so a switch never carries one across.
+        self.confirm_discard = None;
+        self.confirm_drop = None;
+        self.branch_prompt = None;
+        self.history_prompt = None;
+        self.branch_list_open = false;
+        self.branch_query.clear();
+    }
+
+    #[cfg(test)]
+    fn active_path(&self) -> String {
+        self.active_session()
+            .map(|session| session.path.clone())
+            .unwrap_or_default()
     }
 
     fn install_layout(&mut self) {
@@ -330,74 +374,48 @@ impl GitApp {
     }
 
     fn start_patch(&mut self) -> Task<Message> {
-        self.diff_lines_limit = DIFF_LINES_PER_PAGE;
-        let query = match self.selection.clone() {
-            Some(Selection::Commit { id } | Selection::Tag { commit_id: id, .. }) => {
-                PatchQuery::Commit(id)
-            }
-            Some(Selection::File { path, place }) => PatchQuery::File { path, place },
-            _ => {
-                self.patches.clear();
-                self.patch_error = None;
-                self.patch_pending = false;
-                return Task::none();
-            }
-        };
-        let Some(repo) = self.adapter.clone() else {
+        let Some(session) = self.active_session_mut() else {
             return Task::none();
         };
-        self.patch_generation = self.patch_generation.wrapping_add(1);
-        let generation = self.patch_generation;
-        self.patches.clear();
-        self.patch_error = None;
-        self.patch_pending = true;
+        session.diff_lines_limit = DIFF_LINES_PER_PAGE;
+        let Some(query) = session.patch_query() else {
+            session.patches.clear();
+            session.patch_error = None;
+            session.patch_pending = false;
+            return Task::none();
+        };
+        let repo = session.adapter.clone();
+        session.patch_generation = session.patch_generation.wrapping_add(1);
+        let generation = session.patch_generation;
+        let path = session.path.clone();
+        session.patches.clear();
+        session.patch_error = None;
+        session.patch_pending = true;
         Task::perform(load_patch_in_background(repo, query), move |result| {
-            Message::PatchLoaded(generation, result)
+            Message::PatchLoaded {
+                path: path.clone(),
+                generation,
+                result,
+            }
         })
     }
 
-    fn reconcile_selection(&mut self) {
-        let Some(stored) = self.selection.clone() else {
-            return;
-        };
-        let visible = visible_selection(
-            Some(&stored),
-            &self.state.branches,
-            &self.state.commits,
-            &self.state.stashes,
-            &self.state.tags,
-            self.state.current_status.as_ref(),
-        );
-        if matches!(
-            stored,
-            Selection::File { .. }
-                | Selection::Commit { .. }
-                | Selection::Stash { .. }
-                | Selection::Tag { .. }
-        ) && matches!(visible, Selection::Branch { .. })
-        {
-            self.selection = None;
-            return;
+    /// Fan the authoritative settings into every open session's `AppState`.
+    fn apply_settings_to_sessions(&mut self) {
+        let settings = self.settings.clone();
+        for session in &mut self.sessions {
+            session
+                .state
+                .apply_event(ViewEvent::SettingsUpdated(settings.clone()));
         }
-        self.selection = Some(visible);
-    }
-
-    fn hunk_at(&self, path: &str, index: usize) -> Option<Hunk> {
-        self.patches
-            .iter()
-            .find(|patch| patch.path == path)
-            .and_then(|patch| patch.hunks.get(index))
-            .cloned()
     }
 
     fn store_agent(&mut self, token: String, model: String, persist: bool) -> Task<Message> {
-        let mut settings = self.state.settings.clone();
-        settings.agent_token = token;
-        settings.agent_model = model;
-        self.state
-            .apply_event(ViewEvent::SettingsUpdated(settings.clone()));
+        self.settings.agent_token = token;
+        self.settings.agent_model = model;
+        self.apply_settings_to_sessions();
         if persist {
-            self.persist_settings(settings)
+            self.persist_settings(self.settings.clone())
         } else {
             Task::none()
         }
@@ -416,7 +434,7 @@ impl GitApp {
         }
         self.agent_busy = true;
         self.agent_models_error = None;
-        let token = self.state.settings.agent_token.clone();
+        let token = self.settings.agent_token.clone();
         let list = std::sync::Arc::clone(&self.list_models);
         Task::perform(
             list_models_in_background(list, token),
@@ -425,7 +443,10 @@ impl GitApp {
     }
 
     fn suggest_commit_message(&mut self) -> Task<Message> {
-        if self.agent_busy || self.state.loading {
+        let busy = self
+            .active_session()
+            .is_none_or(|session| session.state.loading);
+        if self.agent_busy || busy {
             return Task::none();
         }
         let files = self.files_for_suggestion();
@@ -433,17 +454,17 @@ impl GitApp {
             self.error = Some("Select a file first.".to_string());
             return Task::none();
         }
-        let model = self.state.settings.agent_model.trim().to_string();
+        let model = self.settings.agent_model.trim().to_string();
         if model.is_empty() {
             self.error = Some("Choose a model under Settings.".to_string());
             return Task::none();
         }
-        let Some(repo) = self.adapter.clone() else {
+        let Some(repo) = self.active_session().map(|session| session.adapter.clone()) else {
             return Task::none();
         };
         self.agent_busy = true;
         self.error = None;
-        let token = self.state.settings.agent_token.clone();
+        let token = self.settings.agent_token.clone();
         let suggest = std::sync::Arc::clone(&self.suggest_commit);
         Task::perform(
             suggest_commit_in_background(repo, files, token, model, suggest),
@@ -452,26 +473,27 @@ impl GitApp {
     }
 
     fn files_for_suggestion(&self) -> Vec<(String, FileDisposition)> {
-        if !self.marked_files.is_empty() {
-            return self
+        let Some(session) = self.active_session() else {
+            return Vec::new();
+        };
+        if !session.marked_files.is_empty() {
+            return session
                 .marked_files
                 .iter()
                 .map(|mark| (mark.path.clone(), mark.place))
                 .collect();
         }
-        match &self.selection {
+        match &session.selection {
             Some(Selection::File { path, place }) => vec![(path.clone(), *place)],
             _ => Vec::new(),
         }
     }
 
     fn store_appearance(&mut self, font: &str, size: u8) -> Task<Message> {
-        let mut settings = self.state.settings.clone();
-        settings.ui_font = font_family(font).to_string();
-        settings.ui_size = font_size(size);
-        self.state
-            .apply_event(ViewEvent::SettingsUpdated(settings.clone()));
-        self.persist_settings(settings)
+        self.settings.ui_font = font_family(font).to_string();
+        self.settings.ui_size = font_size(size);
+        self.apply_settings_to_sessions();
+        self.persist_settings(self.settings.clone())
     }
 
     #[cfg(test)]
@@ -539,46 +561,65 @@ impl GitApp {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::RefreshRepository => self.begin_refresh(true),
-            Message::RepositoryLoaded(events) => {
+            Message::RepositoryLoaded(path, events) => {
+                let mut saw_error = None;
+                let Some(session) = self.session_mut_by_path(&path) else {
+                    return Task::none();
+                };
                 for event in events {
                     if let ViewEvent::ErrorOccurred(error) = &event {
-                        self.error.get_or_insert_with(|| error_message(error));
+                        saw_error.get_or_insert_with(|| error_message(error));
                     }
-                    self.state.apply_event(event);
+                    session.state.apply_event(event);
                 }
-                self.reconcile_selection();
-                self.retain_marks();
-                self.start_patch()
+                session.reconcile_selection();
+                session.retain_marks();
+                if let Some(message) = saw_error {
+                    self.error.get_or_insert(message);
+                }
+                if self.session().path == path {
+                    self.start_patch()
+                } else {
+                    Task::none()
+                }
             }
             Message::FocusFile { path, place } => {
-                self.marked_files = vec![MarkedFile {
-                    path: path.clone(),
-                    place,
-                }];
+                if let Some(session) = self.active_session_mut() {
+                    session.marked_files = vec![MarkedFile {
+                        path: path.clone(),
+                        place,
+                    }];
+                }
                 self.update(Message::Select(Selection::File { path, place }))
             }
             Message::ToggleFileMark { path, place } => {
-                if let Some(index) = self
-                    .marked_files
-                    .iter()
-                    .position(|mark| mark.path == path && mark.place == place)
-                {
-                    self.marked_files.remove(index);
-                } else {
-                    self.marked_files.push(MarkedFile {
-                        path: path.clone(),
-                        place,
-                    });
+                if let Some(session) = self.active_session_mut() {
+                    if let Some(index) = session
+                        .marked_files
+                        .iter()
+                        .position(|mark| mark.path == path && mark.place == place)
+                    {
+                        session.marked_files.remove(index);
+                    } else {
+                        session.marked_files.push(MarkedFile {
+                            path: path.clone(),
+                            place,
+                        });
+                    }
                 }
                 self.update(Message::Select(Selection::File { path, place }))
             }
             Message::SelectAllFiles => {
-                self.marked_files = self.all_changed_files();
-                if self.marked_files.is_empty() {
+                let Some(session) = self.active_session_mut() else {
+                    return Task::none();
+                };
+                session.marked_files = session.all_changed_files();
+                if session.marked_files.is_empty() {
                     return Task::none();
                 }
-                if !matches!(self.selection, Some(Selection::File { .. })) {
-                    let first = self.marked_files[0].clone();
+                let needs_file = !matches!(session.selection, Some(Selection::File { .. }));
+                if needs_file {
+                    let first = session.marked_files[0].clone();
                     return self.update(Message::Select(Selection::File {
                         path: first.path,
                         place: first.place,
@@ -587,7 +628,9 @@ impl GitApp {
                 Task::none()
             }
             Message::ClearFileSelection => {
-                self.marked_files.clear();
+                if let Some(session) = self.active_session_mut() {
+                    session.marked_files.clear();
+                }
                 self.update(Message::ShowWorkingTree)
             }
             Message::SetFileTree(as_tree) => {
@@ -595,24 +638,32 @@ impl GitApp {
                 Task::none()
             }
             Message::ToggleChangeDir { prefix, place } => {
-                let key = (place, prefix);
-                if !self.collapsed_dirs.remove(&key) {
-                    self.collapsed_dirs.insert(key);
+                if let Some(session) = self.active_session_mut() {
+                    let key = (place, prefix);
+                    if !session.collapsed_dirs.remove(&key) {
+                        session.collapsed_dirs.insert(key);
+                    }
                 }
                 Task::none()
             }
             Message::ToggleChangeSection(place) => {
-                if !self.collapsed_sections.remove(&place) {
-                    self.collapsed_sections.insert(place);
+                if let Some(session) = self.active_session_mut() {
+                    if !session.collapsed_sections.remove(&place) {
+                        session.collapsed_sections.insert(place);
+                    }
                 }
                 Task::none()
             }
             Message::FocusDiffPath(path) => {
-                self.focused_diff_path = Some(path);
+                if let Some(session) = self.active_session_mut() {
+                    session.focused_diff_path = Some(path);
+                }
                 Task::none()
             }
             Message::ClearDiffFocus => {
-                self.focused_diff_path = None;
+                if let Some(session) = self.active_session_mut() {
+                    session.focused_diff_path = None;
+                }
                 Task::none()
             }
             Message::ClearError => {
@@ -634,105 +685,85 @@ impl GitApp {
             Message::StageMarked => self.edit_marked(true),
             Message::UnstageMarked => self.edit_marked(false),
             Message::CheckoutBranch(branch) => {
-                let Some(repo) = self.adapter.clone() else {
+                let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if self.state.loading {
+                if session.state.loading {
                     return Task::none();
                 }
-                self.state.loading = true;
-                self.error = None;
-                self.selection = Some(Selection::Branch {
+                let repo = session.adapter.clone();
+                let path = session.path.clone();
+                let session = self.session_mut();
+                session.state.loading = true;
+                session.selection = Some(Selection::Branch {
                     name: branch.clone(),
                     current: false,
                 });
-                Task::perform(
-                    checkout_in_background(repo, branch),
-                    Message::CheckoutFinished,
-                )
+                self.error = None;
+                Task::perform(checkout_in_background(repo, branch), move |result| {
+                    Message::CheckoutFinished(path.clone(), result)
+                })
             }
-            Message::CheckoutFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::CheckoutFinished(path, result) => self.finish_reload(&path, result),
             Message::Fetch => {
-                let Some(repo) = self.adapter.clone() else {
+                let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if self.state.loading {
+                if session.state.loading {
                     return Task::none();
                 }
-                self.state.loading = true;
+                let repo = session.adapter.clone();
+                let path = session.path.clone();
+                self.session_mut().state.loading = true;
                 self.error = None;
-                Task::perform(fetch_in_background(repo), Message::FetchFinished)
+                Task::perform(fetch_in_background(repo), move |result| {
+                    Message::FetchFinished(path.clone(), result)
+                })
             }
-            Message::FetchFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::FetchFinished(path, result) => self.finish_reload(&path, result),
             Message::Push => {
-                let Some(repo) = self.adapter.clone() else {
+                let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if self.state.loading {
+                if session.state.loading {
                     return Task::none();
                 }
-                self.state.loading = true;
+                let repo = session.adapter.clone();
+                let path = session.path.clone();
+                self.session_mut().state.loading = true;
                 self.error = None;
-                Task::perform(push_in_background(repo), Message::PushFinished)
+                Task::perform(push_in_background(repo), move |result| {
+                    Message::PushFinished(path.clone(), result)
+                })
             }
-            Message::PushFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::PushFinished(path, result) => self.finish_reload(&path, result),
             Message::Pull => {
-                let Some(repo) = self.adapter.clone() else {
+                let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if self.state.loading {
+                if session.state.loading {
                     return Task::none();
                 }
-                self.state.loading = true;
+                let repo = session.adapter.clone();
+                let path = session.path.clone();
+                self.session_mut().state.loading = true;
                 self.error = None;
-                Task::perform(pull_in_background(repo), Message::PullFinished)
+                Task::perform(pull_in_background(repo), move |result| {
+                    Message::PullFinished(path.clone(), result)
+                })
             }
-            Message::PullFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::PullFinished(path, result) => self.finish_reload(&path, result),
             Message::CommitMessageChanged(message) => {
-                self.commit_message = message;
+                if let Some(session) = self.active_session_mut() {
+                    session.commit_message = message;
+                }
                 Task::none()
             }
             Message::EditWorktree(edit) => {
-                let Some(repo) = self.adapter.clone() else {
+                let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if self.state.loading {
+                if session.state.loading {
                     return Task::none();
                 }
                 if let WorktreeEdit::Commit(message) = &edit {
@@ -740,19 +771,24 @@ impl GitApp {
                         return Task::none();
                     }
                 }
-                self.state.loading = true;
+                let repo = session.adapter.clone();
+                let path = session.path.clone();
+                self.session_mut().state.loading = true;
                 self.error = None;
                 let report = edit.clone();
                 Task::perform(edit_in_background(repo, edit), move |result| {
-                    Message::WorktreeEditFinished(report.clone(), result)
+                    Message::WorktreeEditFinished(path.clone(), report.clone(), result)
                 })
             }
-            Message::WorktreeEditFinished(edit, result) => {
-                self.state.loading = false;
+            Message::WorktreeEditFinished(path, edit, result) => {
+                let Some(session) = self.session_mut_by_path(&path) else {
+                    return Task::none();
+                };
+                session.state.loading = false;
                 match result {
                     Ok(()) => {
                         if matches!(edit, WorktreeEdit::Commit(_)) {
-                            self.commit_message.clear();
+                            session.commit_message.clear();
                         }
                         Task::done(Message::RefreshRepository)
                     }
@@ -808,41 +844,48 @@ impl GitApp {
             Message::ChooseBranch(name) => {
                 self.branch_list_open = false;
                 self.branch_query.clear();
-                let current = self
+                let Some(session) = self.active_session() else {
+                    return Task::none();
+                };
+                let current = session
                     .state
                     .branches
                     .iter()
                     .any(|branch| !branch.is_remote && branch.is_head && branch.name == name);
                 if current {
-                    self.selection = Some(Selection::Branch { name, current: true });
+                    self.session_mut().selection =
+                        Some(Selection::Branch { name, current: true });
                     return Task::none();
                 }
-                if self.local_branch(&name).is_some() {
+                if self.has_local_branch(&name) {
                     return self.update(Message::CheckoutBranch(name));
                 }
-                self.selection = Some(Selection::Branch {
+                self.session_mut().selection = Some(Selection::Branch {
                     name,
                     current: false,
                 });
                 Task::none()
             }
             Message::ShowWorkingTree => {
-                self.focused_diff_path = None;
-                let name = self
+                let Some(session) = self.active_session_mut() else {
+                    return Task::none();
+                };
+                session.focused_diff_path = None;
+                let name = session
                     .state
                     .branches
                     .iter()
                     .find(|branch| branch.is_head && !branch.is_remote)
                     .map(|branch| branch.name.clone())
                     .unwrap_or_else(|| "Detached HEAD".to_string());
-                self.selection = Some(Selection::Branch {
+                session.selection = Some(Selection::Branch {
                     name,
                     current: true,
                 });
                 self.start_patch()
             }
             Message::ChooseRepositoryFolder => {
-                if self.state.loading {
+                if self.opening {
                     return Task::none();
                 }
                 Task::perform(
@@ -855,14 +898,14 @@ impl GitApp {
                 self.update(Message::OpenRepository(path))
             }
             Message::OpenRepository(path) => {
-                if self.state.loading {
+                if self.opening {
                     return Task::none();
                 }
                 if path.trim().is_empty() {
                     self.error = Some("Choose a repository folder.".to_string());
                     return Task::none();
                 }
-                self.state.loading = true;
+                self.opening = true;
                 self.error = None;
                 let open = Arc::clone(&self.open_repository);
                 Task::perform(
@@ -875,7 +918,7 @@ impl GitApp {
                 let initialise = Arc::clone(&self.initialise);
                 let clone_repository = Arc::clone(&self.clone_repository);
                 let save_settings = Arc::clone(&self.save_settings);
-                let settings = self.state.settings.clone();
+                let settings = self.settings.clone();
                 let list_models = Arc::clone(&self.list_models);
                 let suggest_commit = Arc::clone(&self.suggest_commit);
                 *self = Self::new(
@@ -892,12 +935,12 @@ impl GitApp {
                 Task::done(Message::RefreshRepository)
             }
             Message::RepositoryOpened(_, Err(error)) => {
-                self.state.loading = false;
+                self.opening = false;
                 self.error = Some(error_message(&error));
                 Task::none()
             }
             Message::ChooseInitFolder => {
-                if self.state.loading {
+                if self.opening {
                     return Task::none();
                 }
                 Task::perform(
@@ -908,14 +951,14 @@ impl GitApp {
             Message::InitFolderChosen(None) => Task::none(),
             Message::InitFolderChosen(Some(path)) => self.update(Message::InitRepository(path)),
             Message::InitRepository(path) => {
-                if self.state.loading {
+                if self.opening {
                     return Task::none();
                 }
                 if path.trim().is_empty() {
                     self.error = Some("Choose a folder to init.".to_string());
                     return Task::none();
                 }
-                self.state.loading = true;
+                self.opening = true;
                 self.error = None;
                 let initialise = Arc::clone(&self.initialise);
                 let finished = path.clone();
@@ -924,11 +967,11 @@ impl GitApp {
                 })
             }
             Message::InitFinished(path, Ok(())) => {
-                self.state.loading = false;
+                self.opening = false;
                 self.update(Message::OpenRepository(path))
             }
             Message::InitFinished(_, Err(error)) => {
-                self.state.loading = false;
+                self.opening = false;
                 self.error = Some(error_message(&error));
                 Task::none()
             }
@@ -937,7 +980,7 @@ impl GitApp {
                 Task::none()
             }
             Message::ChooseCloneFolder => {
-                if self.state.loading || self.clone_url.trim().is_empty() {
+                if self.opening || self.clone_url.trim().is_empty() {
                     return Task::none();
                 }
                 let url = self.clone_url.clone();
@@ -948,10 +991,10 @@ impl GitApp {
             }
             Message::CloneFolderChosen(_, None) => Task::none(),
             Message::CloneFolderChosen(url, Some(parent)) => {
-                if self.state.loading {
+                if self.opening {
                     return Task::none();
                 }
-                self.state.loading = true;
+                self.opening = true;
                 self.error = None;
                 let clone_repository = Arc::clone(&self.clone_repository);
                 Task::perform(
@@ -960,22 +1003,24 @@ impl GitApp {
                 )
             }
             Message::CloneFinished(Ok(path)) => {
-                self.state.loading = false;
+                self.opening = false;
                 self.update(Message::OpenRepository(path))
             }
             Message::CloneFinished(Err(error)) => {
-                self.state.loading = false;
+                self.opening = false;
                 self.error = Some(error_message(&error));
                 Task::none()
             }
             Message::Select(selection) => {
                 self.branch_list_open = false;
                 self.branch_query.clear();
-                self.selection = Some(selection);
-                self.focused_diff_path = None;
                 self.confirm_discard = None;
                 self.confirm_drop = None;
                 self.branch_prompt = None;
+                if let Some(session) = self.active_session_mut() {
+                    session.selection = Some(selection);
+                    session.focused_diff_path = None;
+                }
                 self.start_patch()
             }
             Message::OpenSettings => {
@@ -989,10 +1034,10 @@ impl GitApp {
             Message::RefreshAgentModels => self.refresh_models(),
             Message::AgentTokenChanged(token) => {
                 // Keep typing responsive: update state only; persist on CloseSettings.
-                self.store_agent(token, self.state.settings.agent_model.clone(), false)
+                self.store_agent(token, self.settings.agent_model.clone(), false)
             }
             Message::AgentModelChosen(model) => {
-                self.store_agent(self.state.settings.agent_token.clone(), model, true)
+                self.store_agent(self.settings.agent_token.clone(), model, true)
             }
             Message::AgentModelsLoaded(result) => {
                 self.agent_busy = false;
@@ -1001,12 +1046,12 @@ impl GitApp {
                 match result.ids {
                     Ok(mut ids) => {
                         self.agent_models_error = None;
-                        let current = self.state.settings.agent_model.clone();
+                        let current = self.settings.agent_model.clone();
                         let persist = if !current.is_empty() && !ids.iter().any(|id| id == &current)
                         {
                             ids.insert(0, current);
                             Task::none()
-                        } else if self.state.settings.agent_model.is_empty() {
+                        } else if self.settings.agent_model.is_empty() {
                             let chosen = ids
                                 .iter()
                                 .find(|id| id.as_str() == AppSettings::DEFAULT_AGENT_MODEL)
@@ -1016,7 +1061,7 @@ impl GitApp {
                                         .cloned()
                                         .unwrap_or_else(|| AppSettings::DEFAULT_AGENT_MODEL.into())
                                 });
-                            self.store_agent(self.state.settings.agent_token.clone(), chosen, true)
+                            self.store_agent(self.settings.agent_token.clone(), chosen, true)
                         } else {
                             Task::none()
                         };
@@ -1035,7 +1080,11 @@ impl GitApp {
                 self.terminal.record(result.exchange);
                 self.sync_terminal_log();
                 match result.subject {
-                    Ok(subject) => self.commit_message = subject,
+                    Ok(subject) => {
+                        if let Some(session) = self.active_session_mut() {
+                            session.commit_message = subject;
+                        }
+                    }
                     Err(error) => self.error = Some(error_message(&error)),
                 }
                 Task::none()
@@ -1057,47 +1106,57 @@ impl GitApp {
             }
             Message::CloseSettings => {
                 self.settings_open = false;
-                self.persist_settings(self.state.settings.clone())
+                self.persist_settings(self.settings.clone())
             }
             Message::SettingsSaved => Task::none(),
             Message::UiFontChosen(font) => {
-                self.store_appearance(&font, self.state.settings.ui_size)
+                self.store_appearance(&font, self.settings.ui_size)
             }
             Message::UiSizeChosen(size) => {
-                let font = self.state.settings.ui_font.clone();
+                let font = self.settings.ui_font.clone();
                 self.store_appearance(&font, size)
             }
-            Message::PatchLoaded(generation, result) => {
-                if generation != self.patch_generation {
+            Message::WorktreeRetentionChosen(mode) => {
+                self.settings.worktree_tab_retention = mode;
+                self.apply_settings_to_sessions();
+                self.persist_settings(self.settings.clone())
+            }
+            Message::PatchLoaded {
+                path,
+                generation,
+                result,
+            } => {
+                let Some(session) = self.session_mut_by_path(&path) else {
+                    return Task::none();
+                };
+                if generation != session.patch_generation {
                     return Task::none();
                 }
-                self.patch_pending = false;
+                session.patch_pending = false;
                 match result {
                     Ok(patches) => {
-                        self.patches = patches;
-                        self.patch_error = None;
+                        session.patches = patches;
+                        session.patch_error = None;
                     }
                     Err(error) => {
-                        self.patches.clear();
-                        self.patch_error = Some(error_message(&error));
+                        session.patches.clear();
+                        session.patch_error = Some(error_message(&error));
                     }
                 }
                 Task::none()
             }
             Message::ShowMoreDiff => {
-                self.diff_lines_limit = self.diff_lines_limit.saturating_add(DIFF_LINES_PER_PAGE);
+                if let Some(session) = self.active_session_mut() {
+                    session.diff_lines_limit =
+                        session.diff_lines_limit.saturating_add(DIFF_LINES_PER_PAGE);
+                }
                 Task::none()
             }
             Message::AskDiscard => {
-                let visible = visible_selection(
-                    self.selection.as_ref(),
-                    &self.state.branches,
-                    &self.state.commits,
-                    &self.state.stashes,
-                    &self.state.tags,
-                    self.state.current_status.as_ref(),
-                );
-                if let Selection::File { path, place } = visible {
+                let Some(session) = self.active_session() else {
+                    return Task::none();
+                };
+                if let Selection::File { path, place } = session.shown_selection() {
                     self.confirm_discard = Some((path, place));
                 }
                 Task::none()
@@ -1110,58 +1169,37 @@ impl GitApp {
                 let Some((path, place)) = self.confirm_discard.clone() else {
                     return Task::none();
                 };
-                let Some(repo) = self.adapter.clone() else {
+                let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if self.state.loading {
+                if session.state.loading {
                     return Task::none();
                 }
+                let repo = session.adapter.clone();
+                let session_path = session.path.clone();
                 self.confirm_discard = None;
-                self.state.loading = true;
+                self.session_mut().state.loading = true;
                 self.error = None;
                 Task::perform(
                     discard_in_background(repo, path, place),
-                    Message::DiscardFinished,
+                    move |result| Message::DiscardFinished(session_path.clone(), result),
                 )
             }
-            Message::DiscardFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::DiscardFinished(path, result) => self.finish_reload(&path, result),
             Message::StageHunk { path, index } => self.edit_hunk(path, index, true),
             Message::DiscardHunk { path, index } => self.edit_hunk(path, index, false),
-            Message::HunkFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::HunkFinished(path, result) => self.finish_reload(&path, result),
             Message::StashPush => self.run_stash(StashAction::Push),
             Message::StashApply(index) => self.run_stash(StashAction::Apply(index)),
             Message::StashPop(index) => self.run_stash(StashAction::Pop(index)),
             Message::AskDropStash => {
-                if self.state.loading {
+                let Some(session) = self.active_session() else {
+                    return Task::none();
+                };
+                if session.state.loading {
                     return Task::none();
                 }
-                let visible = visible_selection(
-                    self.selection.as_ref(),
-                    &self.state.branches,
-                    &self.state.commits,
-                    &self.state.stashes,
-                    &self.state.tags,
-                    self.state.current_status.as_ref(),
-                );
-                if let Selection::Stash { index, message } = visible {
+                if let Selection::Stash { index, message } = session.shown_selection() {
                     self.confirm_discard = None;
                     self.confirm_drop = Some(Stash { index, message });
                 }
@@ -1175,11 +1213,13 @@ impl GitApp {
                 let Some(stash) = self.confirm_drop.clone() else {
                     return Task::none();
                 };
-                let still_there = self
-                    .state
-                    .stashes
-                    .iter()
-                    .any(|entry| entry.index == stash.index && entry.message == stash.message);
+                let still_there = self.active_session().is_some_and(|session| {
+                    session
+                        .state
+                        .stashes
+                        .iter()
+                        .any(|entry| entry.index == stash.index && entry.message == stash.message)
+                });
                 if !still_there {
                     self.confirm_drop = None;
                     self.error = Some("That stash is no longer there.".to_string());
@@ -1187,16 +1227,7 @@ impl GitApp {
                 }
                 self.run_stash(StashAction::Drop(stash.index))
             }
-            Message::StashFinished(result) => {
-                self.state.loading = false;
-                match result {
-                    Ok(()) => Task::done(Message::RefreshRepository),
-                    Err(error) => {
-                        self.error = Some(error_message(&error));
-                        Task::none()
-                    }
-                }
-            }
+            Message::StashFinished(path, result) => self.finish_reload(&path, result),
             Message::AskCreateBranch => self.ask_branch(BranchAsk::Create),
             Message::AskRenameBranch => self.ask_branch(BranchAsk::Rename),
             Message::AskDeleteBranch => self.ask_branch(BranchAsk::Delete),
@@ -1214,8 +1245,10 @@ impl GitApp {
                 Task::none()
             }
             Message::ConfirmBranch => self.confirm_branch(),
-            Message::BranchFinished(result) => {
-                self.state.loading = false;
+            Message::BranchFinished(path, result) => {
+                if let Some(session) = self.session_mut_by_path(&path) {
+                    session.state.loading = false;
+                }
                 match result {
                     Ok(()) => {
                         if let Some(name) = self.pending_checkout.take() {
@@ -1243,8 +1276,10 @@ impl GitApp {
             Message::ConfirmReset(mode) => self.confirm_reset(mode),
             Message::ConfirmMerge => self.confirm_merge(),
             Message::ConfirmRebase => self.confirm_rebase(),
-            Message::HistoryFinished(result) => {
-                self.state.loading = false;
+            Message::HistoryFinished(path, result) => {
+                if let Some(session) = self.session_mut_by_path(&path) {
+                    session.state.loading = false;
+                }
                 match result {
                     Ok(()) => self.begin_refresh(true),
                     Err(error) => {
@@ -1256,35 +1291,55 @@ impl GitApp {
         }
     }
 
-    fn begin_refresh(&mut self, clear_error: bool) -> Task<Message> {
-        let Some(repo) = self.adapter.clone() else {
+    /// Stop the session's spinner, then reload on success or surface git's message.
+    /// A finish for a closed or unknown path is dropped.
+    fn finish_reload(&mut self, path: &str, result: Result<(), DomainError>) -> Task<Message> {
+        let Some(session) = self.session_mut_by_path(path) else {
             return Task::none();
         };
-        if self.state.loading {
+        session.state.loading = false;
+        match result {
+            Ok(()) => Task::done(Message::RefreshRepository),
+            Err(error) => {
+                self.error = Some(error_message(&error));
+                Task::none()
+            }
+        }
+    }
+
+    fn begin_refresh(&mut self, clear_error: bool) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
             return Task::none();
         }
-        self.state.loading = true;
+        let repo = session.adapter.clone();
+        let path = session.path.clone();
+        self.session_mut().state.loading = true;
         if clear_error {
             self.error = None;
         }
-        Task::perform(
-            load_repository_in_background(repo),
-            Message::RepositoryLoaded,
-        )
+        Task::perform(load_repository_in_background(repo), move |events| {
+            Message::RepositoryLoaded(path.clone(), events)
+        })
     }
 
     fn ask_branch(&mut self, ask: BranchAsk) -> Task<Message> {
-        if self.adapter.is_none() || self.state.loading {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
             return Task::none();
         }
-        let visible = self.shown_selection();
+        let visible = session.shown_selection();
         let prompt = match ask {
             BranchAsk::Create => {
                 let start = match &visible {
-                    Selection::Branch { name, .. } if self.local_branch(name).is_some() => {
+                    Selection::Branch { name, .. } if session.local_branch(name).is_some() => {
                         name.clone()
                     }
-                    Selection::Remote { name } if self.remote_branch(name).is_some() => {
+                    Selection::Remote { name } if session.remote_branch(name).is_some() => {
                         name.clone()
                     }
                     Selection::Branch { .. } => "HEAD".to_string(),
@@ -1299,7 +1354,7 @@ impl GitApp {
                 let Selection::Branch { name, .. } = visible else {
                     return Task::none();
                 };
-                if self.local_branch(&name).is_none() {
+                if session.local_branch(&name).is_none() {
                     return Task::none();
                 }
                 BranchPrompt::Rename {
@@ -1311,7 +1366,7 @@ impl GitApp {
                 let Selection::Branch { name, current } = visible else {
                     return Task::none();
                 };
-                if current || self.local_branch(&name).is_none() {
+                if current || session.local_branch(&name).is_none() {
                     return Task::none();
                 }
                 BranchPrompt::Delete { name }
@@ -1338,7 +1393,7 @@ impl GitApp {
                 if name.is_empty() {
                     return Task::none();
                 }
-                if start != "HEAD" && self.local_branch(&start).is_none() {
+                if start != "HEAD" && !self.has_local_branch(&start) {
                     return self.branch_is_gone();
                 }
                 BranchAction::Create { name, start }
@@ -1348,18 +1403,18 @@ impl GitApp {
                 if to.is_empty() || to == from {
                     return Task::none();
                 }
-                if self.local_branch(&from).is_none() {
+                if !self.has_local_branch(&from) {
                     return self.branch_is_gone();
                 }
                 BranchAction::Rename { from, to }
             }
-            BranchPrompt::Delete { name } => match self.local_branch(&name) {
-                Some(branch) if branch.is_head => {
+            BranchPrompt::Delete { name } => match self.local_branch_is_head(&name) {
+                Some(true) => {
                     self.branch_prompt = None;
                     self.error = Some("The current branch cannot be deleted.".to_string());
                     return Task::none();
                 }
-                Some(_) => BranchAction::Delete { name },
+                Some(false) => BranchAction::Delete { name },
                 None => return self.branch_is_gone(),
             },
         };
@@ -1373,22 +1428,26 @@ impl GitApp {
         Task::none()
     }
 
-    fn local_branch(&self, name: &str) -> Option<&Branch> {
-        self.state
-            .branches
-            .iter()
-            .find(|branch| !branch.is_remote && branch.name == name)
+    fn has_local_branch(&self, name: &str) -> bool {
+        self.active_session()
+            .is_some_and(|session| session.local_branch(name).is_some())
     }
 
-    fn remote_branch(&self, name: &str) -> Option<&Branch> {
-        self.state
-            .branches
-            .iter()
-            .find(|branch| branch.is_remote && branch.name == name)
+    fn local_branch_is_head(&self, name: &str) -> Option<bool> {
+        self.active_session()
+            .and_then(|session| session.local_branch(name).map(|branch| branch.is_head))
+    }
+
+    fn commit_is_loaded(&self, id: &str) -> bool {
+        self.active_session()
+            .is_some_and(|session| session.commit_loaded(id))
     }
 
     fn edit_marked(&mut self, stage: bool) -> Task<Message> {
-        let paths = marked_paths(&self.marked_files, stage);
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        let paths = marked_paths(&session.marked_files, stage);
         if paths.is_empty() {
             Task::none()
         } else if stage {
@@ -1398,59 +1457,15 @@ impl GitApp {
         }
     }
 
-    fn all_changed_files(&self) -> Vec<MarkedFile> {
-        let Some(status) = &self.state.current_status else {
-            return Vec::new();
-        };
-        let mut marks = Vec::new();
-        for (files, place) in [
-            (&status.staged_files, FileDisposition::Staged),
-            (&status.unstaged_files, FileDisposition::Unstaged),
-            (&status.untracked_files, FileDisposition::Untracked),
-        ] {
-            for path in files {
-                marks.push(MarkedFile {
-                    path: path.clone(),
-                    place,
-                });
-            }
-        }
-        marks
-    }
-
-    fn retain_marks(&mut self) {
-        let Some(status) = &self.state.current_status else {
-            self.marked_files.clear();
-            return;
-        };
-        self.marked_files.retain(|mark| {
-            let files = match mark.place {
-                FileDisposition::Staged => &status.staged_files,
-                FileDisposition::Unstaged => &status.unstaged_files,
-                FileDisposition::Untracked => &status.untracked_files,
-            };
-            files.iter().any(|path| path == &mark.path)
-        });
-    }
-
-    fn shown_selection(&self) -> Selection {
-        visible_selection(
-            self.selection.as_ref(),
-            &self.state.branches,
-            &self.state.commits,
-            &self.state.stashes,
-            &self.state.tags,
-            self.state.current_status.as_ref(),
-        )
-    }
-
     fn run_branch(&mut self, action: BranchAction) -> Task<Message> {
-        let Some(repo) = self.adapter.clone() else {
+        let Some(session) = self.active_session() else {
             return Task::none();
         };
-        if self.state.loading {
+        if session.state.loading {
             return Task::none();
         }
+        let repo = session.adapter.clone();
+        let path = session.path.clone();
         self.pending_checkout = match &action {
             BranchAction::Create { name, .. } => Some(name.clone()),
             BranchAction::Rename { .. } | BranchAction::Delete { .. } => None,
@@ -1459,22 +1474,27 @@ impl GitApp {
         self.history_prompt = None;
         self.confirm_discard = None;
         self.confirm_drop = None;
-        self.state.loading = true;
+        self.session_mut().state.loading = true;
         self.error = None;
-        Task::perform(branch_in_background(repo, action), Message::BranchFinished)
+        Task::perform(branch_in_background(repo, action), move |result| {
+            Message::BranchFinished(path.clone(), result)
+        })
     }
 
     fn ask_history(&mut self, ask: HistoryAsk) -> Task<Message> {
-        if self.adapter.is_none() || self.state.loading {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
             return Task::none();
         }
-        let visible = self.shown_selection();
+        let visible = session.shown_selection();
         let prompt = match ask {
             HistoryAsk::CherryPick | HistoryAsk::Reset => {
                 let Selection::Commit { id } = visible else {
                     return Task::none();
                 };
-                if !self.commit_loaded(&id) {
+                if !session.commit_loaded(&id) {
                     return Task::none();
                 }
                 if matches!(ask, HistoryAsk::CherryPick) {
@@ -1487,7 +1507,7 @@ impl GitApp {
                 let Selection::Branch { name, current } = visible else {
                     return Task::none();
                 };
-                if current || self.local_branch(&name).is_none() {
+                if current || session.local_branch(&name).is_none() {
                     return Task::none();
                 }
                 if matches!(ask, HistoryAsk::Merge) {
@@ -1508,7 +1528,7 @@ impl GitApp {
         let Some(HistoryPrompt::CherryPick { id }) = self.history_prompt.clone() else {
             return Task::none();
         };
-        if !self.commit_loaded(&id) {
+        if !self.commit_is_loaded(&id) {
             return self.commit_is_gone();
         }
         self.run_history(HistoryAction::CherryPick { id })
@@ -1518,7 +1538,7 @@ impl GitApp {
         let Some(HistoryPrompt::Reset { id }) = self.history_prompt.clone() else {
             return Task::none();
         };
-        if !self.commit_loaded(&id) {
+        if !self.commit_is_loaded(&id) {
             return self.commit_is_gone();
         }
         self.run_history(HistoryAction::Reset { id, mode })
@@ -1539,8 +1559,8 @@ impl GitApp {
     }
 
     fn confirm_branch_history(&mut self, name: String, merge: bool) -> Task<Message> {
-        match self.local_branch(&name) {
-            Some(branch) if branch.is_head => {
+        match self.local_branch_is_head(&name) {
+            Some(true) => {
                 self.history_prompt = None;
                 self.error = Some(if merge {
                     "The current branch cannot be merged.".to_string()
@@ -1549,7 +1569,7 @@ impl GitApp {
                 });
                 Task::none()
             }
-            Some(_) => {
+            Some(false) => {
                 if merge {
                     self.run_history(HistoryAction::Merge { name })
                 } else {
@@ -1560,10 +1580,6 @@ impl GitApp {
         }
     }
 
-    fn commit_loaded(&self, id: &str) -> bool {
-        self.state.commits.iter().any(|commit| commit.id == id)
-    }
-
     fn commit_is_gone(&mut self) -> Task<Message> {
         self.history_prompt = None;
         self.error = Some("That commit is no longer there.".to_string());
@@ -1571,49 +1587,56 @@ impl GitApp {
     }
 
     fn run_history(&mut self, action: HistoryAction) -> Task<Message> {
-        let Some(repo) = self.adapter.clone() else {
+        let Some(session) = self.active_session() else {
             return Task::none();
         };
-        if self.state.loading {
+        if session.state.loading {
             return Task::none();
         }
+        let repo = session.adapter.clone();
+        let path = session.path.clone();
         self.history_prompt = None;
         self.branch_prompt = None;
         self.confirm_discard = None;
         self.confirm_drop = None;
-        self.state.loading = true;
+        self.session_mut().state.loading = true;
         self.error = None;
-        Task::perform(
-            history_in_background(repo, action),
-            Message::HistoryFinished,
-        )
+        Task::perform(history_in_background(repo, action), move |result| {
+            Message::HistoryFinished(path.clone(), result)
+        })
     }
 
     fn run_stash(&mut self, action: StashAction) -> Task<Message> {
-        let Some(repo) = self.adapter.clone() else {
+        let Some(session) = self.active_session() else {
             return Task::none();
         };
-        if self.state.loading {
+        if session.state.loading {
             return Task::none();
         }
+        let repo = session.adapter.clone();
+        let path = session.path.clone();
         self.confirm_drop = None;
         self.confirm_discard = None;
-        self.state.loading = true;
+        self.session_mut().state.loading = true;
         self.error = None;
-        Task::perform(stash_in_background(repo, action), Message::StashFinished)
+        Task::perform(stash_in_background(repo, action), move |result| {
+            Message::StashFinished(path.clone(), result)
+        })
     }
 
     fn edit_hunk(&mut self, path: String, index: usize, stage: bool) -> Task<Message> {
-        let Some(repo) = self.adapter.clone() else {
+        let Some(session) = self.active_session() else {
             return Task::none();
         };
-        if self.state.loading {
+        if session.state.loading {
             return Task::none();
         }
-        let Some(hunk) = self.hunk_at(&path, index) else {
+        let Some(hunk) = session.hunk_at(&path, index) else {
             return Task::none();
         };
-        let place = self
+        let repo = session.adapter.clone();
+        let session_path = session.path.clone();
+        let place = session
             .selection
             .as_ref()
             .and_then(|selection| match selection {
@@ -1621,17 +1644,17 @@ impl GitApp {
                 _ => None,
             })
             .unwrap_or(FileDisposition::Unstaged);
-        self.state.loading = true;
+        self.session_mut().state.loading = true;
         self.error = None;
         if stage {
-            Task::perform(
-                stage_hunk_in_background(repo, path, hunk),
-                Message::HunkFinished,
-            )
+            let finish_path = session_path.clone();
+            Task::perform(stage_hunk_in_background(repo, path, hunk), move |result| {
+                Message::HunkFinished(finish_path.clone(), result)
+            })
         } else {
             Task::perform(
                 discard_hunk_in_background(repo, path, hunk, place),
-                Message::HunkFinished,
+                move |result| Message::HunkFinished(session_path.clone(), result),
             )
         }
     }
@@ -1664,7 +1687,10 @@ impl GitApp {
         if self.error.is_some() {
             return self.update(Message::ClearError);
         }
-        if self.focused_diff_path.is_some() {
+        if self
+            .active_session()
+            .is_some_and(|session| session.focused_diff_path.is_some())
+        {
             return self.update(Message::ClearDiffFocus);
         }
         Task::none()
@@ -1775,14 +1801,15 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(populated_repo()));
         let _ = app.update(Message::RefreshRepository);
         let _ = app.update(Message::RepositoryLoaded(
+            app.active_path(),
             load_repository(&populated_repo()),
         ));
-        assert!(!app.state.loading);
-        assert!(app.state.current_status.is_some());
-        assert_eq!(app.state.commits.len(), 2);
-        assert_eq!(app.state.dag_nodes.len(), 2);
+        assert!(!app.session_mut().state.loading);
+        assert!(app.session_mut().state.current_status.is_some());
+        assert_eq!(app.session_mut().state.commits.len(), 2);
+        assert_eq!(app.session_mut().state.dag_nodes.len(), 2);
         assert_eq!(
-            app.state.branches,
+            app.session_mut().state.branches,
             vec![branch("main", true), branch("feature/x", false)]
         );
     }
@@ -1790,12 +1817,12 @@ mod tests {
     #[test]
     fn with_repo_opens_the_repository_view() {
         let app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        assert!(app.adapter.is_some());
+        assert_eq!(app.sessions.len(), 1);
     }
 
     #[test]
     fn welcome_has_no_repository() {
-        assert!(GitApp::welcome().adapter.is_none());
+        assert!(GitApp::welcome().sessions.is_empty());
     }
 
     #[test]
@@ -1811,24 +1838,24 @@ mod tests {
 
         let _ = app.update(Message::OpenRepository(r"D:\repo".to_string()));
 
-        assert!(app.state.loading);
-        assert!(app.adapter.is_none());
+        assert!(app.opening);
+        assert!(app.sessions.is_empty());
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn repository_opened_replaces_the_welcome_screen() {
         let mut app = GitApp::welcome();
-        app.state.loading = true;
+        app.opening = true;
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\repo".to_string(),
             Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
         ));
 
-        assert!(app.adapter.is_some());
+        assert!(!app.sessions.is_empty());
         assert_eq!(app.error, None);
-        assert_eq!(app.repository_path.as_deref(), Some(r"D:\repo"));
+        assert_eq!(app.session().path, r"D:\repo");
     }
 
     #[test]
@@ -1838,7 +1865,7 @@ mod tests {
             ids: Ok(vec!["kilo-auto/free".to_string()]),
             exchange: crate::ProviderExchange::kilo("connected"),
         });
-        app.state.loading = true;
+        app.opening = true;
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\repo".to_string(),
@@ -1847,7 +1874,7 @@ mod tests {
 
         let listed = (app.list_models)(String::new());
         assert_eq!(listed.exchange.text, "connected");
-        assert!(app.adapter.is_some());
+        assert!(!app.sessions.is_empty());
     }
 
     struct ObservedSplit {
@@ -2172,7 +2199,7 @@ mod tests {
     #[test]
     fn choosing_another_branch_checks_it_out() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.state.branches = vec![branch("dev", true), branch("feature", false)];
+        app.session_mut().state.branches = vec![branch("dev", true), branch("feature", false)];
         app.branch_list_open = true;
         app.branch_query = "feat".to_string();
 
@@ -2180,9 +2207,9 @@ mod tests {
 
         assert!(!app.branch_list_open);
         assert!(app.branch_query.is_empty());
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(
-            app.selection,
+            app.session_mut().selection,
             Some(Selection::Branch {
                 name: "feature".to_string(),
                 current: false,
@@ -2193,15 +2220,15 @@ mod tests {
     #[test]
     fn choosing_the_current_branch_only_closes_the_list() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.state.branches = vec![branch("dev", true), branch("feature", false)];
+        app.session_mut().state.branches = vec![branch("dev", true), branch("feature", false)];
         app.branch_list_open = true;
 
         let _ = app.update(Message::ChooseBranch("dev".to_string()));
 
         assert!(!app.branch_list_open);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(
-            app.selection,
+            app.session_mut().selection,
             Some(Selection::Branch {
                 name: "dev".to_string(),
                 current: true,
@@ -2218,14 +2245,14 @@ mod tests {
         });
 
         let _ = app.update(Message::ConfirmBranch);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(app.pending_checkout.as_deref(), Some("topic"));
 
-        let _ = app.update(Message::BranchFinished(Ok(())));
+        let _ = app.update(Message::BranchFinished(app.active_path(), Ok(())));
         assert!(app.pending_checkout.is_none());
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(
-            app.selection,
+            app.session_mut().selection,
             Some(Selection::Branch {
                 name: "topic".to_string(),
                 current: false,
@@ -2236,7 +2263,7 @@ mod tests {
     #[test]
     fn creating_from_a_remote_uses_that_ref_as_the_start() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.state.branches = vec![
+        app.session_mut().state.branches = vec![
             branch("main", true),
             Branch {
                 name: "origin/main".to_string(),
@@ -2245,7 +2272,7 @@ mod tests {
                 tip: String::new(),
             },
         ];
-        app.selection = Some(Selection::Remote {
+        app.session_mut().selection = Some(Selection::Remote {
             name: "origin/main".to_string(),
         });
 
@@ -2266,16 +2293,16 @@ mod tests {
         let _ = app.update(Message::SuggestCommit);
         assert!(!app.agent_busy);
         assert_eq!(app.error.as_deref(), Some("Select a file first."));
-        assert!(app.commit_message.is_empty());
+        assert!(app.session_mut().commit_message.is_empty());
     }
 
     #[test]
     fn the_agent_token_is_kept_on_the_settings() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::AgentTokenChanged("kilo-token".to_string()));
-        assert_eq!(app.state.settings.agent_token, "kilo-token");
+        assert_eq!(app.session_mut().state.settings.agent_token, "kilo-token");
         assert_eq!(
-            app.state.settings.agent_model,
+            app.session_mut().state.settings.agent_model,
             AppSettings::DEFAULT_AGENT_MODEL
         );
     }
@@ -2283,7 +2310,7 @@ mod tests {
     #[test]
     fn select_all_marks_every_change_and_clear_drops_them() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.state.current_status = Some(core_domain::RepoStatus {
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
             staged_files: vec!["a.rs".to_string()],
             unstaged_files: vec!["b.rs".to_string()],
             untracked_files: vec![],
@@ -2291,31 +2318,31 @@ mod tests {
         });
 
         let _ = app.update(Message::SelectAllFiles);
-        assert_eq!(app.marked_files.len(), 2);
+        assert_eq!(app.session_mut().marked_files.len(), 2);
 
         let _ = app.update(Message::ToggleFileMark {
             path: "b.rs".to_string(),
             place: FileDisposition::Unstaged,
         });
-        assert_eq!(app.marked_files.len(), 1);
+        assert_eq!(app.session_mut().marked_files.len(), 1);
 
         let _ = app.update(Message::ClearFileSelection);
-        assert!(app.marked_files.is_empty());
-        assert!(matches!(app.selection, Some(Selection::Branch { .. })));
+        assert!(app.session_mut().marked_files.is_empty());
+        assert!(matches!(app.session_mut().selection, Some(Selection::Branch { .. })));
     }
 
     #[test]
     fn repository_open_failure_shows_an_error_on_the_welcome_screen() {
         let mut app = GitApp::welcome();
-        app.state.loading = true;
+        app.opening = true;
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\repo".to_string(),
             Err(DomainError::Unknown("cannot open that folder".into())),
         ));
 
-        assert!(app.adapter.is_none());
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
+        assert!(!app.opening);
         assert_eq!(app.error.as_deref(), Some("cannot open that folder"));
     }
 
@@ -2333,7 +2360,7 @@ mod tests {
 
         let _ = app.update(Message::OpenRepository("  ".to_string()));
 
-        assert!(app.adapter.is_none());
+        assert!(app.sessions.is_empty());
         assert_eq!(app.error.as_deref(), Some("Choose a repository folder."));
     }
 
@@ -2351,7 +2378,7 @@ mod tests {
 
         let _ = app.update(Message::RepositoryFolderChosen(None));
 
-        assert!(app.adapter.is_none());
+        assert!(app.sessions.is_empty());
         assert_eq!(app.error, None);
     }
 
@@ -2366,12 +2393,12 @@ mod tests {
             AppSettings::default(),
             ignore_settings(),
         );
-        app.state.loading = true;
+        app.opening = true;
         app.error = Some("still showing".to_string());
 
         let _ = app.update(Message::OpenRepository(r"D:\repo".to_string()));
 
-        assert!(app.adapter.is_none());
+        assert!(app.sessions.is_empty());
         assert_eq!(app.error.as_deref(), Some("still showing"));
     }
 
@@ -2379,14 +2406,14 @@ mod tests {
     fn refresh_marks_state_as_loading() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::RefreshRepository);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
     }
 
     #[test]
     fn refresh_on_the_welcome_screen_does_nothing() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::RefreshRepository);
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2396,7 +2423,7 @@ mod tests {
             ..FakeGitRepository::ok()
         };
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        let _ = app.update(Message::RepositoryLoaded(load_repository(&missing)));
+        let _ = app.update(Message::RepositoryLoaded(app.active_path(), load_repository(&missing)));
         assert_eq!(app.error.as_deref(), Some("Not a Git repository."));
     }
 
@@ -2404,7 +2431,7 @@ mod tests {
     fn checkout_on_the_welcome_screen_does_nothing() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::CheckoutBranch("main".to_string()));
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2412,14 +2439,14 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.error = Some("previous failure".to_string());
         let _ = app.update(Message::CheckoutBranch("feature".to_string()));
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn checkout_is_ignored_while_another_operation_runs() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::CheckoutBranch("feature".to_string()));
         assert_eq!(app.error.as_deref(), Some("still showing"));
@@ -2428,21 +2455,21 @@ mod tests {
     #[test]
     fn successful_checkout_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        let _ = app.update(Message::CheckoutFinished(Ok(())));
-        assert!(!app.state.loading);
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::CheckoutFinished(app.active_path(), Ok(())));
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn failed_checkout_shows_why() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         let reason = "error: Your local changes would be overwritten by checkout".to_string();
-        let _ = app.update(Message::CheckoutFinished(Err(DomainError::Unknown(
+        let _ = app.update(Message::CheckoutFinished(app.active_path(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, Some(reason));
     }
 
@@ -2450,7 +2477,7 @@ mod tests {
     fn fetch_on_the_welcome_screen_does_nothing() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::Fetch);
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2458,14 +2485,14 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.error = Some("previous failure".to_string());
         let _ = app.update(Message::Fetch);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn fetch_is_ignored_while_another_operation_runs() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::Fetch);
         assert_eq!(app.error.as_deref(), Some("still showing"));
@@ -2474,21 +2501,21 @@ mod tests {
     #[test]
     fn successful_fetch_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        let _ = app.update(Message::FetchFinished(Ok(())));
-        assert!(!app.state.loading);
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::FetchFinished(app.active_path(), Ok(())));
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn failed_fetch_shows_git_message() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         let reason = "fatal: No remote repository specified.".to_string();
-        let _ = app.update(Message::FetchFinished(Err(DomainError::Unknown(
+        let _ = app.update(Message::FetchFinished(app.active_path(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, Some(reason));
     }
 
@@ -2496,7 +2523,7 @@ mod tests {
     fn push_on_the_welcome_screen_does_nothing() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::Push);
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2504,14 +2531,14 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.error = Some("previous failure".to_string());
         let _ = app.update(Message::Push);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn push_is_ignored_while_another_operation_runs() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::Push);
         assert_eq!(app.error.as_deref(), Some("still showing"));
@@ -2520,21 +2547,21 @@ mod tests {
     #[test]
     fn successful_push_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        let _ = app.update(Message::PushFinished(Ok(())));
-        assert!(!app.state.loading);
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::PushFinished(app.active_path(), Ok(())));
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn failed_push_shows_git_message() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         let reason = "fatal: The current branch main has no upstream branch.".to_string();
-        let _ = app.update(Message::PushFinished(Err(DomainError::Unknown(
+        let _ = app.update(Message::PushFinished(app.active_path(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, Some(reason));
     }
 
@@ -2542,7 +2569,7 @@ mod tests {
     fn pull_on_the_welcome_screen_does_nothing() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::Pull);
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2550,14 +2577,14 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.error = Some("previous failure".to_string());
         let _ = app.update(Message::Pull);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn pull_is_ignored_while_another_operation_runs() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::Pull);
         assert_eq!(app.error.as_deref(), Some("still showing"));
@@ -2566,21 +2593,21 @@ mod tests {
     #[test]
     fn successful_pull_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        let _ = app.update(Message::PullFinished(Ok(())));
-        assert!(!app.state.loading);
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::PullFinished(app.active_path(), Ok(())));
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn failed_pull_shows_git_message() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         let reason = "fatal: Not possible to fast-forward, aborting.".to_string();
-        let _ = app.update(Message::PullFinished(Err(DomainError::Unknown(
+        let _ = app.update(Message::PullFinished(app.active_path(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, Some(reason));
     }
 
@@ -2590,7 +2617,7 @@ mod tests {
         let _ = app.update(Message::EditWorktree(WorktreeEdit::Stage(vec![
             "a.txt".to_string()
         ])));
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2600,14 +2627,14 @@ mod tests {
         let _ = app.update(Message::EditWorktree(WorktreeEdit::Stage(vec![
             "a.txt".to_string()
         ])));
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
 
     #[test]
     fn edit_is_ignored_while_another_operation_runs() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::EditWorktree(WorktreeEdit::Unstage(vec![
             "a.txt".to_string()
@@ -2622,47 +2649,50 @@ mod tests {
         let _ = app.update(Message::EditWorktree(WorktreeEdit::Commit(
             "  \t".to_string(),
         )));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error.as_deref(), Some("previous failure"));
     }
 
     #[test]
     fn successful_commit_clears_the_message_and_stops_loading() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        app.commit_message = "record the change".to_string();
+        app.session_mut().state.loading = true;
+        app.session_mut().commit_message = "record the change".to_string();
         let _ = app.update(Message::WorktreeEditFinished(
+            app.active_path(),
             WorktreeEdit::Commit("record the change".to_string()),
             Ok(()),
         ));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
-        assert_eq!(app.commit_message, "");
+        assert_eq!(app.session_mut().commit_message, "");
     }
 
     #[test]
     fn successful_stage_keeps_the_commit_message() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        app.commit_message = "still drafting".to_string();
+        app.session_mut().state.loading = true;
+        app.session_mut().commit_message = "still drafting".to_string();
         let _ = app.update(Message::WorktreeEditFinished(
+            app.active_path(),
             WorktreeEdit::Stage(vec!["a.txt".to_string()]),
             Ok(()),
         ));
-        assert!(!app.state.loading);
-        assert_eq!(app.commit_message, "still drafting");
+        assert!(!app.session_mut().state.loading);
+        assert_eq!(app.session_mut().commit_message, "still drafting");
     }
 
     #[test]
     fn failed_edit_shows_why() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
+        app.session_mut().state.loading = true;
         let reason = "error: hook declined to update".to_string();
         let _ = app.update(Message::WorktreeEditFinished(
+            app.active_path(),
             WorktreeEdit::Commit("record the change".to_string()),
             Err(DomainError::Unknown(reason.clone())),
         ));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, Some(reason));
     }
 
@@ -2672,16 +2702,16 @@ mod tests {
         let _ = app.update(Message::CommitMessageChanged(
             "record the change".to_string(),
         ));
-        assert_eq!(app.commit_message, "record the change");
-        assert!(!app.state.loading);
+        assert_eq!(app.session_mut().commit_message, "record the change");
+        assert!(!app.session_mut().state.loading);
     }
 
     #[test]
     fn a_blank_init_path_does_not_start() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::InitRepository("  ".to_string()));
-        assert!(!app.state.loading);
-        assert!(app.adapter.is_none());
+        assert!(!app.opening);
+        assert!(app.sessions.is_empty());
         assert!(app.error.is_some());
     }
 
@@ -2689,15 +2719,15 @@ mod tests {
     fn init_failure_stays_on_the_welcome_screen() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::InitRepository(r"D:\fresh".to_string()));
-        assert!(app.state.loading);
+        assert!(app.opening);
         let _ = app.update(Message::InitFinished(
             r"D:\fresh".to_string(),
             Err(DomainError::Unknown(
                 "Already a Git repository.".to_string(),
             )),
         ));
-        assert!(app.adapter.is_none());
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
+        assert!(!app.opening);
         assert_eq!(app.error.as_deref(), Some("Already a Git repository."));
     }
 
@@ -2705,13 +2735,13 @@ mod tests {
     fn init_then_opens_the_repository() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::InitFinished(r"D:\fresh".to_string(), Ok(())));
-        assert!(app.state.loading);
-        assert!(app.adapter.is_none());
+        assert!(app.opening);
+        assert!(app.sessions.is_empty());
         let _ = app.update(Message::RepositoryOpened(
             r"D:\fresh".to_string(),
             Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
         ));
-        assert!(app.adapter.is_some());
+        assert!(!app.sessions.is_empty());
         assert_eq!(app.error, None);
     }
 
@@ -2719,8 +2749,8 @@ mod tests {
     fn an_empty_clone_url_does_not_start() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::ChooseCloneFolder);
-        assert!(!app.state.loading);
-        assert!(app.adapter.is_none());
+        assert!(!app.opening);
+        assert!(app.sessions.is_empty());
     }
 
     #[test]
@@ -2730,12 +2760,12 @@ mod tests {
             "https://example.com/repo.git".to_string(),
             Some(r"D:\parent".to_string()),
         ));
-        assert!(app.state.loading);
+        assert!(app.opening);
         let _ = app.update(Message::CloneFinished(Err(DomainError::Unknown(
             "repo already exists in D:\\parent".to_string(),
         ))));
-        assert!(app.adapter.is_none());
-        assert!(!app.state.loading);
+        assert!(app.sessions.is_empty());
+        assert!(!app.opening);
         assert_eq!(
             app.error.as_deref(),
             Some("repo already exists in D:\\parent")
@@ -2746,20 +2776,20 @@ mod tests {
     fn clone_then_opens_the_created_directory() {
         let mut app = GitApp::welcome();
         let _ = app.update(Message::CloneFinished(Ok(r"D:\parent\repo".to_string())));
-        assert!(app.state.loading);
+        assert!(app.opening);
         let _ = app.update(Message::RepositoryOpened(
             r"D:\parent\repo".to_string(),
             Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
         ));
-        assert!(app.adapter.is_some());
-        assert_eq!(app.repository_path.as_deref(), Some(r"D:\parent\repo"));
+        assert!(!app.sessions.is_empty());
+        assert_eq!(app.session().path, r"D:\parent\repo");
     }
 
     #[test]
     fn stash_push_starts_loading_and_is_ignored_while_busy() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::StashPush);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::StashApply(0));
         assert_eq!(app.error.as_deref(), Some("still showing"));
@@ -2768,22 +2798,22 @@ mod tests {
     #[test]
     fn dropping_a_stash_waits_for_confirm() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.stashes = vec![Stash {
+        app.session_mut().state.stashes = vec![Stash {
             index: 0,
             message: "WIP on dev".to_string(),
         }];
-        app.selection = Some(Selection::Stash {
+        app.session_mut().selection = Some(Selection::Stash {
             index: 0,
             message: "WIP on dev".to_string(),
         });
 
         let _ = app.update(Message::AskDropStash);
         assert_eq!(app.confirm_drop.as_ref().map(|stash| stash.index), Some(0));
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
 
         let _ = app.update(Message::ConfirmDropStash);
         assert!(app.confirm_drop.is_none());
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
     }
 
     #[test]
@@ -2793,21 +2823,21 @@ mod tests {
             index: 0,
             message: "WIP on dev".to_string(),
         });
-        app.state.stashes = vec![Stash {
+        app.session_mut().state.stashes = vec![Stash {
             index: 0,
             message: "On main: other".to_string(),
         }];
 
         let _ = app.update(Message::ConfirmDropStash);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert!(app.confirm_drop.is_none());
         assert_eq!(app.error.as_deref(), Some("That stash is no longer there."));
     }
 
     fn on_branch(name: &str, current: bool) -> GitApp {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.branches = vec![branch(name, current)];
-        app.selection = Some(Selection::Branch {
+        app.session_mut().state.branches = vec![branch(name, current)];
+        app.session_mut().selection = Some(Selection::Branch {
             name: name.to_string(),
             current,
         });
@@ -2825,15 +2855,15 @@ mod tests {
                 name: String::new(),
             })
         );
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
 
         let _ = app.update(Message::ConfirmBranch);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
 
         let _ = app.update(Message::BranchNameChanged(" topic ".to_string()));
         let _ = app.update(Message::ConfirmBranch);
         assert!(app.branch_prompt.is_none());
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
     }
 
     #[test]
@@ -2848,11 +2878,11 @@ mod tests {
             })
         );
         let _ = app.update(Message::ConfirmBranch);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
 
         let _ = app.update(Message::BranchNameChanged("feature-2".to_string()));
         let _ = app.update(Message::ConfirmBranch);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert!(app.branch_prompt.is_none());
     }
 
@@ -2861,14 +2891,14 @@ mod tests {
         let mut app = on_branch("main", true);
         let _ = app.update(Message::AskDeleteBranch);
         assert!(app.branch_prompt.is_none());
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
     }
 
     #[test]
     fn deleting_another_branch_waits_for_confirm() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.branches = vec![branch("main", true), branch("feature", false)];
-        app.selection = Some(Selection::Branch {
+        app.session_mut().state.branches = vec![branch("main", true), branch("feature", false)];
+        app.session_mut().selection = Some(Selection::Branch {
             name: "feature".to_string(),
             current: false,
         });
@@ -2880,7 +2910,7 @@ mod tests {
             })
         );
         let _ = app.update(Message::ConfirmBranch);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert!(app.branch_prompt.is_none());
     }
 
@@ -2891,7 +2921,7 @@ mod tests {
             name: "main".to_string(),
         });
         let _ = app.update(Message::ConfirmBranch);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert!(app.branch_prompt.is_none());
         assert_eq!(
             app.error.as_deref(),
@@ -2907,7 +2937,7 @@ mod tests {
             name: "topic".to_string(),
         });
         let _ = app.update(Message::ConfirmBranch);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert_eq!(
             app.error.as_deref(),
             Some("That branch is no longer there.")
@@ -2921,28 +2951,28 @@ mod tests {
             name: "v1".to_string(),
             commit_id: "abc1234".to_string(),
         }));
-        assert!(app.patch_pending);
-        assert!(app.patches.is_empty());
+        assert!(app.session_mut().patch_pending);
+        assert!(app.session_mut().patches.is_empty());
     }
 
     #[test]
     fn a_missing_tag_is_cleared_when_the_repository_reloads() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.selection = Some(Selection::Tag {
+        app.session_mut().selection = Some(Selection::Tag {
             name: "gone".to_string(),
             commit_id: "abc1234".to_string(),
         });
-        let _ = app.update(Message::RepositoryLoaded(load_repository(
+        let _ = app.update(Message::RepositoryLoaded(app.active_path(), load_repository(
             &FakeGitRepository::ok(),
         )));
-        assert!(app.selection.is_none());
+        assert!(app.session_mut().selection.is_none());
     }
 
     #[test]
     fn cherry_pick_waits_for_confirm_and_a_missing_commit_is_refused() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.commits = vec![commit("abc1234")];
-        app.selection = Some(Selection::Commit {
+        app.session_mut().state.commits = vec![commit("abc1234")];
+        app.session_mut().selection = Some(Selection::Commit {
             id: "abc1234".to_string(),
         });
         let _ = app.update(Message::AskCherryPick);
@@ -2952,9 +2982,9 @@ mod tests {
                 id: "abc1234".to_string(),
             })
         );
-        app.state.commits.clear();
+        app.session_mut().state.commits.clear();
         let _ = app.update(Message::ConfirmCherryPick);
-        assert!(!app.state.loading);
+        assert!(!app.session_mut().state.loading);
         assert!(app.history_prompt.is_none());
         assert_eq!(
             app.error.as_deref(),
@@ -2965,8 +2995,8 @@ mod tests {
     #[test]
     fn reset_hard_starts_after_confirm() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.commits = vec![commit("abc1234")];
-        app.selection = Some(Selection::Commit {
+        app.session_mut().state.commits = vec![commit("abc1234")];
+        app.session_mut().selection = Some(Selection::Commit {
             id: "abc1234".to_string(),
         });
         let _ = app.update(Message::AskReset);
@@ -2975,7 +3005,7 @@ mod tests {
             Some(HistoryPrompt::Reset { .. })
         ));
         let _ = app.update(Message::ConfirmReset(ResetMode::Hard));
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
         assert!(app.history_prompt.is_none());
     }
 
@@ -2987,8 +3017,8 @@ mod tests {
         assert!(current.history_prompt.is_none());
 
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.branches = vec![branch("main", true), branch("feature", false)];
-        app.selection = Some(Selection::Branch {
+        app.session_mut().state.branches = vec![branch("main", true), branch("feature", false)];
+        app.session_mut().selection = Some(Selection::Branch {
             name: "feature".to_string(),
             current: false,
         });
@@ -3000,28 +3030,83 @@ mod tests {
             })
         );
         let _ = app.update(Message::ConfirmMerge);
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
 
         let mut rebase = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        rebase.state.branches = vec![branch("main", true), branch("feature", false)];
-        rebase.selection = Some(Selection::Branch {
+        rebase.session_mut().state.branches = vec![branch("main", true), branch("feature", false)];
+        rebase.session_mut().selection = Some(Selection::Branch {
             name: "feature".to_string(),
             current: false,
         });
         let _ = rebase.update(Message::AskRebase);
         let _ = rebase.update(Message::ConfirmRebase);
-        assert!(rebase.state.loading);
+        assert!(rebase.session_mut().state.loading);
         assert!(rebase.history_prompt.is_none());
     }
 
     #[test]
     fn a_failed_history_command_keeps_git_message_and_reloads() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.state.loading = true;
-        let _ = app.update(Message::HistoryFinished(Err(DomainError::Unknown(
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::HistoryFinished(app.active_path(), Err(DomainError::Unknown(
             "conflict in a.txt".to_string(),
         ))));
         assert_eq!(app.error.as_deref(), Some("conflict in a.txt"));
-        assert!(app.state.loading);
+        assert!(app.session_mut().state.loading);
+    }
+
+    #[test]
+    fn a_finish_for_an_unknown_path_is_dropped() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.loading = true;
+
+        // A finish routed to a closed or foreign tab must not touch the active session.
+        let _ = app.update(Message::CheckoutFinished(r"D:\other".to_string(), Ok(())));
+
+        assert!(app.session().state.loading);
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn activating_another_tab_leaves_the_first_session_untouched() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.commits = vec![commit("aaaaaaa1")];
+        app.session_mut().commit_message = "draft".to_string();
+        app.session_mut().selection = Some(Selection::Commit {
+            id: "aaaaaaa1".to_string(),
+        });
+        app.sessions.push(WorktreeSession::new(
+            r"D:\second".to_string(),
+            std::sync::Arc::new(FakeGitRepository::ok()),
+            AppSettings::default(),
+        ));
+
+        app.activate(1);
+
+        assert_eq!(app.active, 1);
+        // The first session keeps its history; activating never reloaded it.
+        assert_eq!(app.sessions[0].state.commits.len(), 1);
+        assert!(!app.sessions[0].state.loading);
+        // Default Partial retention keeps message and marks, clears the selection.
+        assert_eq!(app.sessions[0].commit_message, "draft");
+        assert!(app.sessions[0].selection.is_none());
+        // The newly active session was not sent a load job.
+        assert!(!app.sessions[1].state.loading);
+    }
+
+    #[test]
+    fn path_only_retention_clears_the_leaving_session_message() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.settings.worktree_tab_retention = WorktreeTabRetention::PathOnly;
+        app.session_mut().commit_message = "draft".to_string();
+        app.sessions.push(WorktreeSession::new(
+            r"D:\second".to_string(),
+            std::sync::Arc::new(FakeGitRepository::ok()),
+            AppSettings::default(),
+        ));
+
+        app.activate(1);
+
+        assert!(app.sessions[0].commit_message.is_empty());
     }
 }

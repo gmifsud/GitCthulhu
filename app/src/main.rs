@@ -43,6 +43,7 @@ fn save_appearance(store: Arc<ConfyConfigStore>) -> gui_app::SettingsSaver {
         stored.ui_size = incoming.ui_size;
         stored.agent_token = incoming.agent_token;
         stored.agent_model = incoming.agent_model;
+        stored.worktree_tab_retention = incoming.worktree_tab_retention;
         let _ = store.save_settings(&stored);
     })
 }

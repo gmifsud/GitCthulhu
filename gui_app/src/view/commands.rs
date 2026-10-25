@@ -46,8 +46,9 @@ pub(super) fn command_place(command: RibbonCommand) -> CommandPlace {
 }
 
 pub(super) fn can_commit(app: &GitApp) -> bool {
-    !app.commit_message.trim().is_empty()
+    !app.session().commit_message.trim().is_empty()
         && app
+            .session()
             .state
             .current_status
             .as_ref()
@@ -55,7 +56,7 @@ pub(super) fn can_commit(app: &GitApp) -> bool {
 }
 
 pub(super) fn can_stash(app: &GitApp) -> bool {
-    app.state
+    app.session().state
         .current_status
         .as_ref()
         .is_some_and(|status| !status.staged_files.is_empty() || !status.unstaged_files.is_empty())
@@ -83,7 +84,7 @@ pub(super) fn command_buttons(
     items
         .iter()
         .map(|item| {
-            let enabled = item.enabled && !app.state.loading;
+            let enabled = item.enabled && !app.session().state.loading;
             let message = command_message(item.command, selection, app);
             if item.primary {
                 accent_button(item.label, message, enabled, tokens, reading)
@@ -111,7 +112,7 @@ fn command_message(command: RibbonCommand, selection: &Selection, app: &GitApp) 
         RibbonCommand::Unstage => stage_message(app, selection, false),
         RibbonCommand::Discard => Message::AskDiscard,
         RibbonCommand::Commit => {
-            Message::EditWorktree(WorktreeEdit::Commit(app.commit_message.clone()))
+            Message::EditWorktree(WorktreeEdit::Commit(app.session().commit_message.clone()))
         }
         RibbonCommand::Stash => Message::StashPush,
         RibbonCommand::Apply => match selection {
@@ -134,7 +135,7 @@ fn command_message(command: RibbonCommand, selection: &Selection, app: &GitApp) 
 }
 
 fn stage_message(app: &GitApp, selection: &Selection, stage: bool) -> Message {
-    let marked = marked_paths(&app.marked_files, stage);
+    let marked = marked_paths(&app.session().marked_files, stage);
     if !marked.is_empty() {
         return if stage {
             Message::EditWorktree(WorktreeEdit::Stage(marked))

@@ -18,11 +18,11 @@ pub(super) fn branch_switcher<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let name = current_branch_name(&app.state.branches);
+    let name = current_branch_name(&app.session().state.branches);
     let mut switcher = column![branch_chip(
         name,
         Message::ToggleBranchList,
-        !app.state.loading,
+        !app.session().state.loading,
         app.branch_list_open,
         tokens,
         reading,
@@ -41,9 +41,9 @@ pub(super) fn branch_switcher<'a>(
         );
         switcher = switcher.push(
             container(scrollable(branch_list(
-                &app.state.branches,
-                &app.state.stashes,
-                &app.state.tags,
+                &app.session().state.branches,
+                &app.session().state.stashes,
+                &app.session().state.tags,
                 selection,
                 query,
                 tokens,

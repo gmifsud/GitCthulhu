@@ -1,14 +1,34 @@
 use crate::app::{GitApp, Message};
 use crate::appearance::UI_FONTS;
 use crate::theme::DesignTokens;
-use core_domain::AppSettings;
+use core_domain::{AppSettings, WorktreeTabRetention};
+
+/// Wraps [`WorktreeTabRetention`] so the Settings pick list can show friendly labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetentionChoice(WorktreeTabRetention);
+
+const RETENTION_CHOICES: [RetentionChoice; 3] = [
+    RetentionChoice(WorktreeTabRetention::Full),
+    RetentionChoice(WorktreeTabRetention::Partial),
+    RetentionChoice(WorktreeTabRetention::PathOnly),
+];
+
+impl std::fmt::Display for RetentionChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            WorktreeTabRetention::Full => "Everything",
+            WorktreeTabRetention::Partial => "Message and marks",
+            WorktreeTabRetention::PathOnly => "Path only",
+        })
+    }
+}
 use iced::widget::{column, container, pick_list, row, slider, text, text_input};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
 use super::chrome::{accent_button, command_button, field_style, reading};
 
 pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Element<'a, Message> {
-    let settings = &app.state.settings;
+    let settings = &app.settings;
     let reading = reading(settings);
     let selected = UI_FONTS
         .iter()
@@ -100,6 +120,24 @@ pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Elem
             tokens,
             reading,
         ),
+        text("Worktree Tabs")
+            .font(reading.font)
+            .size(reading.size)
+            .style(move |_| text::Style {
+                color: Some(tokens.accent_primary),
+            }),
+        text("Keep when leaving a tab")
+            .font(reading.font)
+            .size(reading.size)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_secondary),
+            }),
+        pick_list(
+            RETENTION_CHOICES,
+            Some(RetentionChoice(settings.worktree_tab_retention)),
+            |choice| Message::WorktreeRetentionChosen(choice.0),
+        )
+        .width(Length::Fill),
         accent_button("Close", Message::CloseSettings, true, tokens, reading),
     ]
     .spacing(12)
@@ -147,7 +185,7 @@ fn model_choices(app: &GitApp) -> Vec<String> {
     if !app.agent_models.is_empty() {
         return app.agent_models.clone();
     }
-    let saved = app.state.settings.agent_model.trim();
+    let saved = app.settings.agent_model.trim();
     vec![if saved.is_empty() {
         AppSettings::DEFAULT_AGENT_MODEL.to_string()
     } else {

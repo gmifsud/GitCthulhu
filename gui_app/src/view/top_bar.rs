@@ -32,12 +32,12 @@ pub(super) fn top_bar<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let branch_name = current_branch_name(&app.state.branches);
+    let branch_name = current_branch_name(&app.session().state.branches);
     let branch_selection = Selection::Branch {
         name: branch_name.clone(),
         current: true,
     };
-    let summary = crate::tracking::tracking_summary(app.state.current_status.as_ref());
+    let summary = crate::tracking::tracking_summary(app.session().state.current_status.as_ref());
     let top_commands = placed_commands(
         &branch_selection,
         can_commit(app),
@@ -49,13 +49,11 @@ pub(super) fn top_bar<'a>(
         .spacing(CLUSTER_SPACING)
         .align_y(Alignment::Center)
         .width(Length::Fill);
-    if let Some(path) = &app.repository_path {
-        left = left.push(repository_path(path, tokens, reading));
-    }
+    left = left.push(repository_path(&app.session().path, tokens, reading));
     left = left.push(branch_chip(
         branch_name,
         Message::ToggleBranchList,
-        !app.state.loading,
+        !app.session().state.loading,
         app.branch_list_open,
         tokens,
         reading,
@@ -73,7 +71,7 @@ pub(super) fn top_bar<'a>(
     right = right.push(quiet_button(
         OPEN_REPOSITORY,
         Message::ChooseRepositoryFolder,
-        !app.state.loading,
+        !app.session().state.loading,
         tokens,
         reading,
     ));

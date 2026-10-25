@@ -9,6 +9,7 @@ mod jobs;
 mod layout;
 mod ref_pills;
 mod selection;
+mod session;
 mod terminal;
 mod theme;
 mod tracking;

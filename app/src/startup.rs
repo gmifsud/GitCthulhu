@@ -91,6 +91,7 @@ mod tests {
             ui_size: AppSettings::DEFAULT_UI_SIZE,
             agent_token: String::new(),
             agent_model: AppSettings::DEFAULT_AGENT_MODEL.to_string(),
+            worktree_tab_retention: Default::default(),
         }
     }
 

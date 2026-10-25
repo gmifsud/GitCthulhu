@@ -128,6 +128,19 @@ pub enum DomainError {
     Unknown(String),
 }
 
+/// What a worktree tab keeps when the user switches away from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeTabRetention {
+    /// Keep the commit message, file marks, and selection.
+    Full,
+    /// Keep the commit message and file marks; clear the selection.
+    #[default]
+    Partial,
+    /// Clear the commit message, file marks, and selection.
+    PathOnly,
+}
+
 /// User-defined settings for the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
@@ -143,6 +156,8 @@ pub struct AppSettings {
     pub agent_token: String,
     /// Model id sent to the Kilo gateway, such as `kilo-auto/free`.
     pub agent_model: String,
+    /// What a worktree tab keeps when the user switches to another tab.
+    pub worktree_tab_retention: WorktreeTabRetention,
 }
 
 impl AppSettings {
@@ -163,6 +178,7 @@ impl Default for AppSettings {
             ui_size: Self::DEFAULT_UI_SIZE,
             agent_token: String::new(),
             agent_model: Self::DEFAULT_AGENT_MODEL.to_string(),
+            worktree_tab_retention: WorktreeTabRetention::default(),
         }
     }
 }

@@ -32,10 +32,11 @@ pub(super) fn history_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let shown_nodes = &app.state.dag_nodes[..app.state.dag_nodes.len().min(COMMIT_PAGE_SIZE)];
+    let shown_nodes = &app.session().state.dag_nodes[..app.session().state.dag_nodes.len().min(COMMIT_PAGE_SIZE)];
     let rows = graph_rows(shown_nodes);
     let lanes_width = Length::Fixed(graph_width(&rows).max(MIN_GRAPH_COL_WIDTH));
     let commits_by_id: HashMap<&str, &Commit> = app
+        .session()
         .state
         .commits
         .iter()
@@ -54,6 +55,7 @@ pub(super) fn history_pane<'a>(
             Selection::Branch { current: true, .. } | Selection::File { .. }
         );
         let head = app
+            .session()
             .state
             .branches
             .iter()
@@ -96,7 +98,7 @@ pub(super) fn history_pane<'a>(
         };
         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
         let age = relative_age_compact(now, commit.timestamp);
-        let pills = refs_at(&commit.id, &app.state.branches, &app.state.tags);
+        let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
         let label = row![
             canvas(GraphCell(graph_row))
                 .width(lanes_width)
@@ -307,7 +309,7 @@ pub(crate) fn relative_age_compact(now: i64, then: i64) -> String {
 }
 
 fn working_tree_dirty(app: &GitApp) -> bool {
-    app.state.current_status.as_ref().is_some_and(|status| {
+    app.session().state.current_status.as_ref().is_some_and(|status| {
         !status.staged_files.is_empty()
             || !status.unstaged_files.is_empty()
             || !status.untracked_files.is_empty()
