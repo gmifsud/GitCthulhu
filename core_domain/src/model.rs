@@ -43,6 +43,15 @@ pub struct Branch {
     pub tip: String,
 }
 
+/// One entry from `git worktree list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: String,
+    pub branch: String,
+    pub is_main: bool,
+    pub locked: bool,
+}
+
 /// How the current branch compares with its upstream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackingStatus {
@@ -108,6 +117,8 @@ pub struct RepoStatus {
     pub untracked_files: Vec<String>,
     /// `None` when the current branch has no upstream, or `HEAD` is detached or unborn.
     pub tracking: Option<TrackingStatus>,
+    /// Peeled `HEAD` commit id when born; `None` when unborn. Used for focus-current when detached.
+    pub head_commit_id: Option<String>,
 }
 
 /// Domain errors that can occur during Git operations.
@@ -117,6 +128,19 @@ pub enum DomainError {
     AccessDenied,
     AuthenticationFailed,
     Unknown(String),
+}
+
+/// What a worktree tab keeps when the user switches away from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeTabRetention {
+    /// Keep the commit message, file marks, and selection.
+    Full,
+    /// Keep the commit message and file marks; clear the selection.
+    #[default]
+    Partial,
+    /// Clear the commit message, file marks, and selection.
+    PathOnly,
 }
 
 /// User-defined settings for the application.
@@ -134,6 +158,8 @@ pub struct AppSettings {
     pub agent_token: String,
     /// Model id sent to the Kilo gateway, such as `kilo-auto/free`.
     pub agent_model: String,
+    /// What a worktree tab keeps when the user switches to another tab.
+    pub worktree_tab_retention: WorktreeTabRetention,
 }
 
 impl AppSettings {
@@ -154,6 +180,7 @@ impl Default for AppSettings {
             ui_size: Self::DEFAULT_UI_SIZE,
             agent_token: String::new(),
             agent_model: Self::DEFAULT_AGENT_MODEL.to_string(),
+            worktree_tab_retention: WorktreeTabRetention::default(),
         }
     }
 }

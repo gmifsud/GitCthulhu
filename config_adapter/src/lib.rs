@@ -1,7 +1,7 @@
 //! config_adapter
 //! Implements the ConfigStore port for persisting user-defined settings using confy.
 
-use core_domain::{AppSettings, ConfigStore, DomainError};
+use core_domain::{AppSettings, ConfigStore, DomainError, WorktreeTabRetention};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -21,6 +21,9 @@ struct AppSettingsDto {
     pub agent_token: String,
     #[serde(default = "default_agent_model")]
     pub agent_model: String,
+    /// Absent in settings written before worktree tabs existed.
+    #[serde(default)]
+    pub worktree_tab_retention: WorktreeTabRetention,
 }
 
 fn default_ui_font() -> String {
@@ -45,6 +48,7 @@ impl Default for AppSettingsDto {
             ui_size: default_ui_size(),
             agent_token: String::new(),
             agent_model: default_agent_model(),
+            worktree_tab_retention: WorktreeTabRetention::default(),
         }
     }
 }
@@ -59,6 +63,7 @@ impl From<AppSettingsDto> for AppSettings {
             ui_size: dto.ui_size,
             agent_token: dto.agent_token,
             agent_model: dto.agent_model,
+            worktree_tab_retention: dto.worktree_tab_retention,
         }
     }
 }
@@ -73,6 +78,7 @@ impl From<&AppSettings> for AppSettingsDto {
             ui_size: domain.ui_size,
             agent_token: domain.agent_token.clone(),
             agent_model: domain.agent_model.clone(),
+            worktree_tab_retention: domain.worktree_tab_retention,
         }
     }
 }
@@ -194,6 +200,24 @@ mod tests {
             assert_eq!(settings.ui_size, AppSettings::DEFAULT_UI_SIZE);
             assert_eq!(settings.agent_token, "");
             assert_eq!(settings.agent_model, AppSettings::DEFAULT_AGENT_MODEL);
+            assert_eq!(settings.worktree_tab_retention, WorktreeTabRetention::Partial);
+        });
+    }
+
+    #[test]
+    fn worktree_tab_retention_defaults_to_partial_and_round_trips() {
+        with_store("retention", |store| {
+            let mut settings = store.load_settings().expect("default");
+            assert_eq!(settings.worktree_tab_retention, WorktreeTabRetention::Partial);
+            for mode in [
+                WorktreeTabRetention::Full,
+                WorktreeTabRetention::PathOnly,
+                WorktreeTabRetention::Partial,
+            ] {
+                settings.worktree_tab_retention = mode;
+                store.save_settings(&settings).expect("save");
+                assert_eq!(store.load_settings().expect("reload"), settings);
+            }
         });
     }
 

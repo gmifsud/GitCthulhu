@@ -12,7 +12,7 @@ Desktop Git client. The window is iced. Git work goes through a port; one adapte
 
 **Welcome screen.** `GitApp` with no adapter. Shown when there is no command-line path and no remembered repository that can still be opened. Open Repository asks for a folder, then the composition root's opener builds the port and stores that path.
 
-**Repository view.** `GitApp` holding `Arc<dyn GitRepository + Send + Sync>`. Shown when a path was passed on the command line, after Open Repository succeeds, or when the remembered folder is still a repository. Loads status, the newest 50 commits from every local branch, and branches as soon as the window has a repository.
+**Repository view.** `GitApp` holding one or more sessions, each with an `Arc<dyn GitRepository + Send + Sync>`. Shown when a path was passed on the command line, after Open Repository succeeds, or when the remembered folder is still a repository. Loads status, the newest 50 commits from every local branch, and branches as soon as the window has a repository.
 
 **View event.** `ViewEvent`. The only input to `AppState::apply_event`. Status, log, branches, settings, and errors. The reducer does not call an adapter or choose the next task. The window does.
 
@@ -24,9 +24,23 @@ Desktop Git client. The window is iced. Git work goes through a port; one adapte
 
 Open a repository from the command line or from the welcome screen's folder dialog. Init a folder that is not already a repository, or clone a URL into a new directory under a chosen parent, then open that path the same way. Clone uses the user's `git clone` and does not sign in to a provider. Reopen the last of those paths on the next launch when it is still a repository. The header shows that path and an Open… control, so a second folder replaces the one on screen. Show branches, a 50-commit graph of every local branch (and a detached HEAD), the changes list, and one line for the current branch: its upstream and how many commits it is ahead or behind. Check out a local branch. Stage, unstage, and commit whole paths. Fetch the default remote, push the current branch to its upstream, and pull with `--ff-only`, using the user's git. Stash tracked changes from the branch ribbon, and apply, pop, or drop one stash from the refs list. Drop asks first. Untracked files stay in the worktree. Create a branch at the selected tip without checking it out, rename a local branch, and delete a merged branch that is not current. Delete asks first. An unmerged branch is left, with git's own message. Tags that point at a commit appear in the refs list, and only when there is at least one. Selecting a tag reads that commit's patch. The refs, history, and changes columns can be dragged wider or narrower. Refs and changes can each collapse to a rail on that side and open again at the width they had. A commit can be cherry-picked onto the current branch, or the current branch can be reset to it: soft, mixed, or hard. Hard discards the worktree. Another local branch can be merged with `--no-ff`, or the current branch can be rebased onto it. Each of those asks first. A conflict shows git's message and reloads the repository.
 
-## Later: several repositories and worktrees
+## Worktree sessions
 
-One window still holds one `GitRepository`. `last_repo_path` is a single path. A later session can keep a list of paths in the composition root and open one of them through the same opener. A git worktree is another path (`git worktree list`); it opens the same way. The window does not grow a second adapter, and `gui_app` still does not name one.
+**Session.** `WorktreeSession` in `gui_app`. One open worktree path with its own `GitRepository` port and its own `AppState` (status, commits, branches, stashes, tags) plus its UI state: selection, commit message, marked files, and the loaded diff. `GitApp` holds a list of sessions and the index of the active one. Switching tabs moves that index; it does not reload. A background job names the session path it started on, and its result is dropped if that tab has since closed.
+
+**Tab strip.** Sits under the top bar, one tab per open session. Click to switch, close a tab with its close control (the last tab stays, and so does a tab with a job running). A `+` control opens a picker over the catalogue.
+
+**Catalogue.** The list from `git worktree list --porcelain`, read through `GitRepository::worktrees` and shown in the Files column's Worktrees section. A linked worktree opens into a tab from there or from the picker. Create adds a worktree for a named branch at a chosen folder, creating the branch when asked. Remove asks first and has a force option for a dirty tree. The main worktree cannot be removed.
+
+**Retention.** The setting for what a tab keeps when you leave it: full (message, marks, selection), partial (message and marks; selection cleared, the default), or path only (nothing but the path). Set in Settings and stored with the other settings.
+
+**Opener.** `RepositoryOpener` is for Open… and remembers the folder as `last_repo_path`. `WorktreeOpener` is for tabs and does not, so opening a linked worktree never changes which repository the next launch reopens. The composition root builds both; `gui_app` names neither adapter.
+
+**WIP rows.** The history graph shows one Working changes row for each open session that has staged, unstaged, or untracked paths, at the top in tab order. The pill carries that session's branch, or the folder name when HEAD is detached. Pressing a row switches to its session and shows its working tree. A worktree with no tab has no row.
+
+### Later: several repositories
+
+A session is a worktree of the repository that was opened. Unrelated clones in one window are not covered. `last_repo_path` is still a single path. A later session could keep a list of repositories in the composition root and open each through the same opener.
 
 ## Later: the changes list
 

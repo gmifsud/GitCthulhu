@@ -1,48 +1,85 @@
 use std::collections::HashSet;
 
 use crate::app::{GitApp, Message};
-use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow};
+use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow, ChangeSection};
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
+use iced::widget::{button, column, container, row, text, text_input};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
-use super::chrome::{
-    accent_button, command_button, field_style, fold_mark, glyph, panel_style, section_label,
-    Reading,
-};
+use super::chrome::{field_style, fold_mark, glyph, icon_button, Reading};
 
 /// Rows drawn per section. Each row is two buttons, so a huge untracked set would stall layout.
 /// "Select all" still covers every file; only the drawing is bounded.
 const FILE_ROWS_SHOWN: usize = 500;
 
-pub(super) fn changes_pane<'a>(
+/// Working-tree staging for the right files navigator (no left-rail chrome).
+pub(crate) fn wip_working_tree_block<'a>(
     app: &'a GitApp,
     selection: &Selection,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let stageable = !marked_paths(&app.marked_files, true).is_empty();
-    let unstageable = !marked_paths(&app.marked_files, false).is_empty();
-    let chosen = app.marked_files.len();
-    let mut changes = column![
-        section_label(tokens, reading, "Changes"),
+    let status = app.session().state.current_status.as_ref();
+    let file_count = status
+        .map(|status| {
+            change_sections(status)
+                .iter()
+                .map(|section| section.files.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    let title = if file_count == 0 {
+        "Working tree".to_string()
+    } else if file_count == 1 {
+        "Working tree · 1 file".to_string()
+    } else {
+        format!("Working tree · {file_count} files")
+    };
+
+    let mut changes = column![text(title)
+        .font(reading.font)
+        .size((reading.size - 2.0).max(11.0))
+        .style(move |_| text::Style {
+            color: Some(tokens.text_muted),
+        })]
+    .spacing(4)
+    .padding([6, 12]);
+    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
+    changes = changes.push(wip_file_sections(app, selection, status, tokens, reading));
+    changes.into()
+}
+
+fn wip_toolbar<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let stageable = !marked_paths(&app.session().marked_files, true).is_empty();
+    let unstageable = !marked_paths(&app.session().marked_files, false).is_empty();
+    let chosen = app.session().marked_files.len();
+    column![
         row![
-            text_input("Commit message", &app.commit_message)
+            text_input("Commit message", &app.session().commit_message)
                 .on_input(Message::CommitMessageChanged)
                 .padding(6)
                 .width(Length::Fill)
                 .style(field_style(tokens)),
-            command_button(
-                "Suggest",
+            icon_button(
+                "✦",
+                "Suggest commit message",
+                "changes-suggest",
+                app.tip_ready("changes-suggest"),
                 Message::SuggestCommit,
                 !app.agent_busy
-                    && !app.state.loading
-                    && (!app.marked_files.is_empty()
+                    && !app.session().state.loading
+                    && (!app.session().marked_files.is_empty()
                         || matches!(selection, Selection::File { .. })),
+                false,
                 tokens,
                 reading,
             ),
@@ -50,50 +87,78 @@ pub(super) fn changes_pane<'a>(
         .spacing(6)
         .align_y(iced::Alignment::Center),
         row![
-            if app.files_as_tree {
-                command_button("List", Message::SetFileTree(false), true, tokens, reading)
-            } else {
-                accent_button("List", Message::SetFileTree(false), true, tokens, reading)
-            },
-            if app.files_as_tree {
-                accent_button("Tree", Message::SetFileTree(true), true, tokens, reading)
-            } else {
-                command_button("Tree", Message::SetFileTree(true), true, tokens, reading)
-            },
-            command_button(
+            icon_button(
+                "☰",
+                "List view",
+                "changes-list",
+                app.tip_ready("changes-list"),
+                Message::SetFileTree(false),
+                true,
+                !app.files_as_tree,
+                tokens,
+                reading,
+            ),
+            icon_button(
+                "▤",
+                "Tree view",
+                "changes-tree",
+                app.tip_ready("changes-tree"),
+                Message::SetFileTree(true),
+                true,
+                app.files_as_tree,
+                tokens,
+                reading,
+            ),
+            icon_button(
+                "☑",
                 "Select all",
+                "changes-select-all",
+                app.tip_ready("changes-select-all"),
                 Message::SelectAllFiles,
-                app.state.current_status.as_ref().is_some_and(|status| {
+                app.session().state.current_status.as_ref().is_some_and(|status| {
                     !status.staged_files.is_empty()
                         || !status.unstaged_files.is_empty()
                         || !status.untracked_files.is_empty()
                 }),
+                false,
                 tokens,
                 reading,
             ),
-            command_button(
-                "Clear",
+            icon_button(
+                "◻",
+                "Clear selection",
+                "changes-clear",
+                app.tip_ready("changes-clear"),
                 Message::ClearFileSelection,
                 chosen > 0,
+                false,
                 tokens,
                 reading,
             ),
-            command_button(
-                "Stage",
+            icon_button(
+                "+",
+                "Stage marked",
+                "changes-stage",
+                app.tip_ready("changes-stage"),
                 Message::StageMarked,
-                stageable && !app.state.loading,
+                stageable && !app.session().state.loading,
+                false,
                 tokens,
-                reading
+                reading,
             ),
-            command_button(
-                "Unstage",
+            icon_button(
+                "−",
+                "Unstage marked",
+                "changes-unstage",
+                app.tip_ready("changes-unstage"),
                 Message::UnstageMarked,
-                unstageable && !app.state.loading,
+                unstageable && !app.session().state.loading,
+                false,
                 tokens,
                 reading,
             ),
         ]
-        .spacing(6),
+        .spacing(4),
         text(if chosen == 0 {
             "Nothing selected".to_string()
         } else if chosen == 1 {
@@ -108,23 +173,32 @@ pub(super) fn changes_pane<'a>(
         }),
     ]
     .spacing(4)
-    .padding(6);
+    .into()
+}
 
-    match &app.state.current_status {
+fn wip_file_sections<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    status: Option<&core_domain::RepoStatus>,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let mut sections_col = column![].spacing(4);
+    match status {
         None => {
-            changes = changes.push(
+            sections_col = sections_col.push(
                 text("Not loaded yet")
                     .font(reading.font)
                     .size(reading.size)
                     .style(move |_| text::Style {
                         color: Some(tokens.text_muted),
                     }),
-            )
+            );
         }
         Some(status) => {
             let sections = change_sections(status);
             if sections.is_empty() {
-                changes = changes.push(
+                sections_col = sections_col.push(
                     text("Working tree clean")
                         .font(reading.font)
                         .size(reading.size)
@@ -134,56 +208,61 @@ pub(super) fn changes_pane<'a>(
                 );
             }
             for section in sections {
-                let folded = app.collapsed_sections.contains(&section.place);
-                let mut files = column![section_header(
-                    section.title,
-                    section.files.len(),
-                    folded,
-                    section.place,
-                    tokens,
-                    reading,
-                )]
-                .spacing(0);
-                if !folded {
-                    let collapsed = collapsed_prefixes(app, section.place);
-                    let rows =
-                        change_rows(section.files, section.place, app.files_as_tree, &collapsed);
-                    let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
-                    for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
-                        files = files.push(change_line(
-                            row_item,
-                            section.place,
-                            app,
-                            selection,
-                            tokens,
-                            reading,
-                        ));
-                    }
-                    if hidden > 0 {
-                        files = files.push(
-                            text(format!("… and {hidden} more"))
-                                .font(reading.font)
-                                .size((reading.size - 2.0).max(11.0))
-                                .style(move |_| text::Style {
-                                    color: Some(tokens.text_muted),
-                                }),
-                        );
-                    }
-                }
-                changes = changes.push(files);
+                sections_col =
+                    sections_col.push(section_block(app, selection, section, tokens, reading));
             }
         }
     }
+    sections_col.into()
+}
 
-    container(scrollable(changes))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_theme: &Theme| panel_style(tokens, true))
-        .into()
+fn section_block<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    section: ChangeSection<'_>,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let folded = app.session().collapsed_sections.contains(&section.place);
+    let mut files = column![section_header(
+        section.title,
+        section.files.len(),
+        folded,
+        section.place,
+        tokens,
+        reading,
+    )]
+    .spacing(0);
+    if !folded {
+        let collapsed = collapsed_prefixes(app, section.place);
+        let rows = change_rows(section.files, section.place, app.files_as_tree, &collapsed);
+        let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
+        for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
+            files = files.push(change_line(
+                row_item,
+                section.place,
+                app,
+                selection,
+                tokens,
+                reading,
+            ));
+        }
+        if hidden > 0 {
+            files = files.push(
+                text(format!("… and {hidden} more"))
+                    .font(reading.font)
+                    .size((reading.size - 2.0).max(11.0))
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_muted),
+                    }),
+            );
+        }
+    }
+    files.into()
 }
 
 fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {
-    app.collapsed_dirs
+    app.session().collapsed_dirs
         .iter()
         .filter(|(entry_place, _)| *entry_place == place)
         .map(|(_, prefix)| prefix.clone())
@@ -276,6 +355,7 @@ fn change_line<'a>(
             name, path, place, ..
         } => {
             let marked = app
+                .session()
                 .marked_files
                 .iter()
                 .any(|mark| &mark.path == path && mark.place == *place);

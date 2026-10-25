@@ -146,10 +146,10 @@ Wire the top-bar search to `graph_query` with a pure `matches_commit(&Commit, &s
 Each step compiles and passes `cargo test` alone. Order is a dependency order, not a preference.
 
 1. [x] **Spec amendments** — worktree spec updated 2026-10-25 with the four review items (session owns `AppState`; `WorktreeOpener` without `remember`; path-routed finishes; tab strip is sessions only).
-2. [ ] **WP1-a Domain + port** — `Worktree` model; `worktrees` / `add_worktree` / `remove_worktree` on `GitRepository`; porcelain parser with tests; fake fields; adapter temp-repo tests (list after init, add, remove, force remove of a dirty tree).
-3. [ ] **WP1-b Sessions** — `WorktreeSession`, `GitApp::session()/session_mut()`, `apply_retention`, `WorktreeTabRetention` on `AppSettings` + Settings UI, path-routed finishes (incremental or consolidated `Finished`). Tests: switch leaves the other session untouched; finish for a closed session is dropped; retention round-trips through save/load.
-4. [ ] **WP1-c Chrome** — tab strip under the top bar; explorer Worktrees section in the Files column; `+` picker; create modal; remove confirm with force checkbox; composition-root `WorktreeOpener`. Test: `last_repo_path` unchanged after a tab open.
-5. [ ] **WP1-d** — WIP row per open session in the graph; `CONTEXT.md` rewrite of "Later: several repositories and worktrees".
+2. [x] **WP1-a Domain + port** — `Worktree` model; `worktrees` / `add_worktree` / `remove_worktree` on `GitRepository`; porcelain parser with tests; fake fields; adapter temp-repo tests (list after init, add, remove, force remove of a dirty tree).
+3. [x] **WP1-b Sessions** — `WorktreeSession`, `GitApp::session()/session_mut()`, `apply_retention`, `WorktreeTabRetention` on `AppSettings` + Settings UI, path-routed finishes (incremental or consolidated `Finished`). Tests: switch leaves the other session untouched; finish for a closed session is dropped; retention round-trips through save/load.
+4. [x] **WP1-c Chrome** — tab strip under the top bar; explorer Worktrees section in the Files column; `+` picker; create modal; remove confirm with force checkbox; composition-root `WorktreeOpener`. Test: `last_repo_path` unchanged after a tab open.
+5. [x] **WP1-d** — WIP row per open session in the graph; `CONTEXT.md` rewrite of "Later: several repositories and worktrees".
 6. [ ] **WP2 Compare** — `FileChange`, `Comparison`, `compare`, `range_patch`; adapter + fake + temp-repo tests (ahead/behind, rename detection, empty range); `PatchQuery::Range`; `Compare` ribbon command; inspector Compare mode.
 7. [ ] **WP3 Split diff** — `pair_lines`, `word_diff`, hidden-line bars, per-file header, `diff_split` setting. Tests on the pure functions; pair-budget test.
 8. [ ] **WP4 Graph polish** — `graph_query` wiring, `matches_commit`, avatar initial, optional curved lane joins.

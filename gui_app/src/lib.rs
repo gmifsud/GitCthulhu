@@ -5,10 +5,13 @@ mod app;
 mod appearance;
 mod changes;
 mod commit_graph;
+mod context_menu;
 mod jobs;
 mod layout;
+mod reachability;
 mod ref_pills;
 mod selection;
+mod session;
 mod terminal;
 mod theme;
 mod tracking;
@@ -25,6 +28,11 @@ use iced::{Task, Theme};
 /// Opens a repository path into the port the window already speaks.
 /// Implemented by the composition root so this crate never names an adapter.
 pub type RepositoryOpener =
+    Arc<dyn Fn(&str) -> Result<Arc<dyn GitRepository + Send + Sync>, DomainError> + Send + Sync>;
+
+/// Opens a linked worktree into a tab. Unlike [`RepositoryOpener`] it must not remember the path:
+/// `last_repo_path` stays the repository the user chose with Open….
+pub type WorktreeOpener =
     Arc<dyn Fn(&str) -> Result<Arc<dyn GitRepository + Send + Sync>, DomainError> + Send + Sync>;
 
 /// `git init` in a folder. The window opens the path afterwards through [`RepositoryOpener`].
@@ -51,6 +59,7 @@ pub fn run(
     repo: Box<dyn GitRepository + Send + Sync>,
     repository_path: String,
     open: RepositoryOpener,
+    open_worktree: WorktreeOpener,
     initialise: RepositoryInitialiser,
     clone_repository: RepositoryCloner,
     settings: AppSettings,
@@ -69,6 +78,7 @@ pub fn run(
                         Arc::from(repo),
                         Some(repository_path),
                         Arc::clone(&open),
+                        Arc::clone(&open_worktree),
                         Arc::clone(&initialise),
                         Arc::clone(&clone_repository),
                         settings.clone(),
@@ -84,8 +94,10 @@ pub fn run(
 }
 
 /// Run on the welcome screen. Open Repository uses `open` after the folder dialog.
+#[allow(clippy::too_many_arguments)]
 pub fn run_welcome(
     open: RepositoryOpener,
+    open_worktree: WorktreeOpener,
     initialise: RepositoryInitialiser,
     clone_repository: RepositoryCloner,
     settings: AppSettings,
@@ -102,6 +114,7 @@ pub fn run_welcome(
                 {
                     let mut app = GitApp::welcome_with(
                         open,
+                        open_worktree,
                         initialise,
                         clone_repository,
                         settings,

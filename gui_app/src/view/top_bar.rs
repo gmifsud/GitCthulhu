@@ -32,12 +32,12 @@ pub(super) fn top_bar<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let branch_name = current_branch_name(&app.state.branches);
+    let branch_name = current_branch_name(&app.session().state.branches);
     let branch_selection = Selection::Branch {
         name: branch_name.clone(),
         current: true,
     };
-    let summary = crate::tracking::tracking_summary(app.state.current_status.as_ref());
+    let summary = crate::tracking::tracking_summary(app.session().state.current_status.as_ref());
     let top_commands = placed_commands(
         &branch_selection,
         can_commit(app),
@@ -49,14 +49,12 @@ pub(super) fn top_bar<'a>(
         .spacing(CLUSTER_SPACING)
         .align_y(Alignment::Center)
         .width(Length::Fill);
-    if let Some(path) = &app.repository_path {
-        left = left.push(repository_path(path, tokens, reading));
-    }
+    left = left.push(repository_path(&app.session().path, tokens, reading));
     left = left.push(branch_chip(
         branch_name,
         Message::ToggleBranchList,
-        !app.state.loading,
-        app.branch_list_open,
+        !app.session().state.loading,
+        app.files_rail_open && !app.session().explorer_collapsed.local,
         tokens,
         reading,
     ));
@@ -69,11 +67,12 @@ pub(super) fn top_bar<'a>(
     for button in command_buttons(&top_commands, &branch_selection, app, tokens, reading) {
         right = right.push(button);
     }
+    right = right.push(hunk_segment(app.hunk_mode, tokens));
     right = right.push(layout_segment(app.layout, tokens));
     right = right.push(quiet_button(
         OPEN_REPOSITORY,
         Message::ChooseRepositoryFolder,
-        !app.state.loading,
+        !app.session().state.loading,
         tokens,
         reading,
     ));
@@ -187,6 +186,80 @@ fn search_field<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Messa
             radius: SEG_RADIUS.into(),
         },
         shadow: Shadow::default(),
+    })
+    .into()
+}
+
+fn hunk_segment<'a>(current: crate::layout::HunkMode, tokens: DesignTokens) -> Element<'a, Message> {
+    container(
+        row![
+            hunk_button(crate::layout::HunkMode::Beside, current, tokens),
+            hunk_button(crate::layout::HunkMode::Wide, current, tokens),
+            hunk_button(crate::layout::HunkMode::Focus, current, tokens),
+        ]
+        .spacing(0),
+    )
+    .style(move |_theme: &Theme| container::Style {
+        background: Some(Background::Color(tokens.chip)),
+        text_color: Some(tokens.text_primary),
+        border: Border {
+            color: tokens.chip_border,
+            width: 1.0,
+            radius: SEG_RADIUS.into(),
+        },
+        shadow: Shadow::default(),
+    })
+    .into()
+}
+
+fn hunk_button<'a>(
+    mode: crate::layout::HunkMode,
+    current: crate::layout::HunkMode,
+    tokens: DesignTokens,
+) -> Element<'a, Message> {
+    let active = mode == current;
+    let ink = if active {
+        Color::BLACK
+    } else {
+        tokens.text_primary
+    };
+    let label = match mode {
+        crate::layout::HunkMode::Beside => "B",
+        crate::layout::HunkMode::Wide => "W",
+        crate::layout::HunkMode::Focus => "F",
+    };
+    iced::widget::button(
+        text(label)
+            .size(11.0)
+            .style(move |_| text::Style { color: Some(ink) }),
+    )
+    .padding([4, 6])
+    .on_press(Message::SetHunkMode(mode))
+    .style(move |_theme, status| {
+        let hot = matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        );
+        iced::widget::button::Style {
+            background: Some(Background::Color(if active {
+                tokens.accent_primary
+            } else if hot {
+                tokens.bg_raised
+            } else {
+                tokens.chip
+            })),
+            text_color: ink,
+            border: Border {
+                color: if active {
+                    tokens.accent_primary
+                } else {
+                    tokens.chip_border
+                },
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            shadow: Shadow::default(),
+        }
     })
     .into()
 }

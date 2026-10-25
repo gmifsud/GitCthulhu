@@ -1,0 +1,293 @@
+# Review Task 3
+BASE: decd0d6
+HEAD: d399d27
+## Commits
+d399d27 feat: graph pills-first columns with hash last
+
+## Stat
+ gui_app/src/view/history.rs | 104 +++++++++++++++++++++++++++-----------------
+ 1 file changed, 64 insertions(+), 40 deletions(-)
+
+## Diff
+diff --git a/gui_app/src/view/history.rs b/gui_app/src/view/history.rs
+index 864f3b5..63ea24c 100644
+--- a/gui_app/src/view/history.rs
++++ b/gui_app/src/view/history.rs
+@@ -3,31 +3,35 @@ use crate::commit_graph::{graph_rows, graph_width, GraphCell, ROW_HEIGHT};
+ use crate::context_menu::ContextTarget;
+ use crate::jobs::COMMIT_PAGE_SIZE;
+ use crate::reachability::{filter_dag_nodes, session_head_tip};
+ use crate::ref_pills::{refs_at, RefPill, RefPillKind};
+ use crate::selection::{short_hash, Selection};
+ use crate::session::{basename, WorktreeSession};
+ use crate::theme::DesignTokens;
+ use core_domain::{Commit, DagNode};
+ use iced::widget::button::Status;
+ use iced::widget::text::Wrapping;
+-use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text};
++use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, Space};
+ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
+ use std::collections::HashMap;
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+ use super::chrome::{icon_button, panel_style, Reading};
+ 
+ const COL_GAP: f32 = 10.0;
+-const HASH_WIDTH: f32 = 64.0;
++const HASH_WIDTH: f32 = 72.0;
+ const WHEN_WIDTH: f32 = 56.0;
+-const AUTHOR_WIDTH: f32 = 120.0;
++const AUTHOR_WIDTH: f32 = 100.0;
++const MIN_MESSAGE_WIDTH: f32 = 120.0;
++const PILLS_MIN_WIDTH: f32 = 48.0;
++const MESSAGE_FILL: u16 = 3;
++const PILLS_FILL: u16 = 1;
+ /// Floor for the lane canvas so Graph never collapses into Description on resize.
+ const MIN_GRAPH_COL_WIDTH: f32 = 40.0;
+ const HEADER_SIZE: f32 = 11.0;
+ const PILL_PAD_Y: f32 = 1.0;
+ const PILL_PAD_X: f32 = 6.0;
+ const PILL_RADIUS: f32 = 3.0;
+ const PILL_GAP: f32 = 4.0;
+ 
+ pub(super) fn history_pane<'a>(
+     app: &'a GitApp,
+@@ -91,74 +95,75 @@ pub(super) fn history_pane<'a>(
+         }
+         let selected = index == app.active
+             && matches!(
+                 selection,
+                 Selection::Branch { current: true, .. } | Selection::File { .. }
+             );
+         let head = wip_label(session);
+         commit_rows = commit_rows.push(
+             button(
+                 row![
+-                    container(text(""))
+-                        .width(lanes_width)
+-                        .height(Length::Fixed(ROW_HEIGHT)),
+-                    single_line("WIP", Length::Fixed(HASH_WIDTH), reading, tokens, true),
+-                    description_cell(
+-                        Some(RefPill {
++                    pills_cell(
++                        &[RefPill {
+                             label: format!("wip ┬╖ {head}"),
+                             kind: RefPillKind::Head,
+-                        }),
+-                        "Working changes",
++                        }],
+                         tokens,
+                         reading,
+                     ),
++                    container(text(""))
++                        .width(lanes_width)
++                        .height(Length::Fixed(ROW_HEIGHT)),
++                    message_cell("Working changes", tokens, reading),
+                     single_line("", Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
+                     single_line("", Length::Fixed(WHEN_WIDTH), reading, tokens, false),
++                    single_line("", Length::Fixed(HASH_WIDTH), reading, tokens, true),
+                 ]
+                 .spacing(COL_GAP)
+                 .height(Length::Fixed(ROW_HEIGHT))
+                 .align_y(Alignment::Center),
+             )
+             .width(Length::Fill)
+             .padding(0)
+             .on_press(Message::ShowSessionWorkingTree(index))
+             .style(move |_theme, status| commit_style(tokens, status, selected)),
+         );
+     }
+ 
+     for (node, graph_row) in shown_nodes.iter().zip(rows) {
+         let Some(&commit) = commits_by_id.get(node.commit_id.as_str()) else {
+             continue;
+         };
+         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
+         let age = relative_age_compact(now, commit.timestamp);
+         let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
+         let label = row![
++            pills_cell(&pills, tokens, reading),
+             canvas(GraphCell(graph_row))
+                 .width(lanes_width)
+                 .height(Length::Fixed(ROW_HEIGHT)),
+-            single_line(
+-                short_hash(&commit.id),
+-                Length::Fixed(HASH_WIDTH),
+-                reading,
+-                tokens,
+-                true
+-            ),
+-            description_with_pills(&pills, &commit.message, tokens, reading),
++            message_cell(&commit.message, tokens, reading),
+             single_line(
+                 &commit.author,
+                 Length::Fixed(AUTHOR_WIDTH),
+                 reading,
+                 tokens,
+                 false
+             ),
+             single_line(&age, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
++            single_line(
++                short_hash(&commit.id),
++                Length::Fixed(HASH_WIDTH),
++                reading,
++                tokens,
++                true
++            ),
+         ]
+         .spacing(COL_GAP)
+         .height(Length::Fixed(ROW_HEIGHT))
+         .align_y(Alignment::Center);
+         let id = commit.id.clone();
+         let right_target = ContextTarget::Commit {
+             id: commit.id.clone(),
+         };
+         commit_rows = commit_rows.push(
+             mouse_area(
+@@ -200,33 +205,40 @@ pub(super) fn history_pane<'a>(
+ }
+ 
+ fn column_headers<'a>(
+     app: &'a GitApp,
+     lanes_width: Length,
+     focus: bool,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     row![
++        header_cell("Refs", Length::FillPortion(PILLS_FILL), tokens, reading),
+         container(
+             text("Graph")
+                 .font(reading.font)
+                 .size(HEADER_SIZE)
++                .wrapping(Wrapping::None)
+                 .style(move |_| text::Style {
+                     color: Some(tokens.text_muted),
+                 }),
+         )
+         .width(lanes_width),
+-        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
+-        header_cell("Description", Length::Fill, tokens, reading),
++        header_cell(
++            "Description",
++            Length::FillPortion(MESSAGE_FILL),
++            tokens,
++            reading,
++        ),
+         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
+         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
++        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
+         icon_button(
+             "ΓùÄ",
+             if focus {
+                 "Show all branches"
+             } else {
+                 "Focus current branch"
+             },
+             "graph-focus",
+             app.tip_ready("graph-focus"),
+             Message::ToggleFocusCurrentBranch,
+@@ -245,71 +257,83 @@ fn column_headers<'a>(
+ fn header_cell<'a>(
+     label: &'static str,
+     width: Length,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     container(
+         text(label)
+             .font(reading.font)
+             .size(HEADER_SIZE)
++            .wrapping(Wrapping::None)
+             .style(move |_| text::Style {
+                 color: Some(tokens.text_muted),
+             }),
+     )
+     .width(width)
+     .into()
+ }
+ 
+-fn description_with_pills<'a>(
++fn pills_cell<'a>(
+     pills: &[RefPill],
+-    message: &str,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     let mut cell = row![].spacing(PILL_GAP).align_y(Alignment::Center);
+     for pill in pills.iter().take(4) {
+         cell = cell.push(ref_pill(pill, tokens, reading));
+     }
+     if pills.len() > 4 {
+         cell = cell.push(
+             text(format!("+{}", pills.len() - 4))
+                 .font(reading.font)
+                 .size((reading.size - 2.0).max(11.0))
++                .wrapping(Wrapping::None)
+                 .style(move |_| text::Style {
+                     color: Some(tokens.text_muted),
+                 }),
+         );
+     }
+-    cell = cell.push(
+-        text(message.to_string())
+-            .font(reading.font)
+-            .size(reading.size)
+-            .wrapping(Wrapping::None)
+-            .style(move |_| text::Style {
+-                color: Some(tokens.text_primary),
+-            }),
+-    );
+-    container(cell)
+-        .width(Length::Fill)
+-        .clip(true)
+-        .into()
++    fill_column_with_min(PILLS_MIN_WIDTH, PILLS_FILL, cell)
+ }
+ 
+-fn description_cell<'a>(
+-    pill: Option<RefPill>,
++fn message_cell<'a>(
+     message: &str,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+-    let pills = pill.into_iter().collect::<Vec<_>>();
+-    description_with_pills(&pills, message, tokens, reading)
++    let body = text(message.to_string())
++        .font(reading.font)
++        .size(reading.size)
++        .wrapping(Wrapping::None)
++        .style(move |_| text::Style {
++            color: Some(tokens.text_primary),
++        });
++    fill_column_with_min(MIN_MESSAGE_WIDTH, MESSAGE_FILL, body)
++}
++
++fn fill_column_with_min<'a>(
++    min_width: f32,
++    portion: u16,
++    content: impl Into<Element<'a, Message>>,
++) -> Element<'a, Message> {
++    container(
++        row![
++            Space::new(Length::Fixed(min_width), Length::Fixed(0.0)),
++            content.into(),
++        ]
++        .spacing(0.0)
++        .align_y(Alignment::Center),
++    )
++    .width(Length::FillPortion(portion))
++    .clip(true)
++    .into()
+ }
+ 
+ fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+     let (fg, bg, border) = match pill.kind {
+         RefPillKind::Head => (tokens.bg_app, tokens.accent_primary, tokens.accent_primary),
+         RefPillKind::Local => (tokens.text_secondary, tokens.chip, tokens.chip_border),
+         RefPillKind::Remote => (tokens.text_muted, tokens.bg_raised, tokens.border),
+         RefPillKind::Tag => (tokens.added, tokens.chip, tokens.added),
+     };
+     container(
+

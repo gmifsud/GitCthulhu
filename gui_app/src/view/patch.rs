@@ -12,26 +12,26 @@ pub(super) fn patch_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let mut body = column![].spacing(4).padding([4, 8]);
-    if app.patch_pending {
+    let mut body = column![].spacing(2).padding([4, 8]);
+    if app.session().patch_pending {
         body = body.push(note("Loading…", tokens, reading));
-    } else if let Some(error) = &app.patch_error {
+    } else if let Some(error) = &app.session().patch_error {
         body = body.push(note(error, tokens, reading));
-    } else if app.patches.is_empty() {
+    } else if app.session().patches.is_empty() {
         body = body.push(note("No changes", tokens, reading));
     } else {
-        let busy = app.state.loading;
-        let mut budget = app.diff_lines_limit;
-        let patches = visible_patches(&app.patches, app.focused_diff_path.as_deref());
+        let busy = app.session().state.loading;
+        let mut budget = app.session().diff_lines_limit;
+        let patches = visible_patches(&app.session().patches, app.session().focused_diff_path.as_deref());
         let hidden = {
             let total: usize = patches
                 .iter()
                 .flat_map(|patch| &patch.hunks)
                 .map(|hunk| hunk.lines.len())
                 .sum();
-            total.saturating_sub(app.diff_lines_limit)
+            total.saturating_sub(app.session().diff_lines_limit)
         };
-        if app.focused_diff_path.is_some() && patches.len() < app.patches.len() {
+        if app.session().focused_diff_path.is_some() && patches.len() < app.session().patches.len() {
             body = body.push(
                 row![
                     command_button(
@@ -42,7 +42,7 @@ pub(super) fn patch_pane<'a>(
                         reading,
                     ),
                     note(
-                        &format!("Showing 1 of {}", app.patches.len()),
+                        &format!("Showing 1 of {}", app.session().patches.len()),
                         tokens,
                         reading,
                     ),
@@ -175,6 +175,7 @@ pub(crate) fn patch_stats(patch: &Patch) -> (usize, usize) {
 
 const SHOW_MORE_LABEL: &str = "Show more lines";
 const LINE_NO_WIDTH: f32 = 40.0;
+const MARK_WIDTH: f32 = 12.0;
 
 /// Old/new start (and optional counts) from a unified hunk header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,10 +255,15 @@ fn diff_line<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let (mark, color, tint) = match line.kind {
-        DiffLineKind::Added => ("+", tokens.added, tokens.added_bg),
-        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed_bg),
-        DiffLineKind::Context => (" ", tokens.text_secondary, Color::TRANSPARENT),
+    let (mark, text_color, mark_color, tint) = match line.kind {
+        DiffLineKind::Added => ("+", tokens.added, tokens.added, tokens.added_bg),
+        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed, tokens.removed_bg),
+        DiffLineKind::Context => (
+            " ",
+            tokens.text_secondary,
+            tokens.text_muted,
+            Color::TRANSPARENT,
+        ),
     };
     let gutter = tokens.text_muted;
     container(
@@ -278,19 +284,30 @@ fn diff_line<'a>(
                 .style(move |_| text::Style {
                     color: Some(gutter),
                 }),
-            text(format!("{mark}{}", line.text))
+            text(mark)
+                .font(reading.mono)
+                .size(reading.size)
+                .width(Length::Fixed(MARK_WIDTH))
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style {
+                    color: Some(mark_color),
+                }),
+            text(line.text.clone())
                 .font(reading.mono)
                 .size(reading.size)
                 .wrapping(Wrapping::None)
-                .style(move |_| text::Style { color: Some(color) }),
+                .style(move |_| text::Style {
+                    color: Some(text_color),
+                }),
         ]
-        .spacing(6)
+        .spacing(2)
         .align_y(Alignment::Center),
     )
+    .padding([1, 4])
     .width(Length::Fill)
     .style(move |_theme: &Theme| container::Style {
         background: Some(Background::Color(tint)),
-        text_color: Some(color),
+        text_color: Some(text_color),
         border: Border::default(),
         shadow: Shadow::default(),
     })

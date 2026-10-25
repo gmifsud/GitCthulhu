@@ -29,7 +29,7 @@ pub(super) fn status_bar<'a>(
     } else {
         STATUS_BAR_HEIGHT
     };
-    let mut bar = row![loading_dot(app.state.loading, tokens)]
+    let mut bar = row![loading_dot(app.session().state.loading, tokens)]
         .spacing(STATUS_GAP)
         .align_y(if expanded {
             Alignment::Start
@@ -43,7 +43,7 @@ pub(super) fn status_bar<'a>(
         bar = bar.push(error_cluster(error, app.error_expanded, quiet, tokens, reading));
     } else {
         bar = bar.push(status_text(
-            if app.state.loading {
+            if app.session().state.loading {
                 "Loading…".to_string()
             } else {
                 READY.to_string()
@@ -56,13 +56,13 @@ pub(super) fn status_bar<'a>(
 
     bar = bar.push(horizontal_space());
     bar = bar.push(status_text(
-        commit_count_label(app.state.commits.len()),
+        commit_count_label(app.session().state.commits.len()),
         quiet,
         tokens,
         reading,
     ));
     bar = bar.push(status_text(
-        upstream_name(app.state.current_status.as_ref()),
+        upstream_name(app.session().state.current_status.as_ref()),
         quiet,
         tokens,
         reading,
@@ -263,6 +263,7 @@ mod tests {
                 unstaged_files: vec![],
                 untracked_files: vec![],
                 tracking: None,
+                head_commit_id: None,
             })),
             "No upstream"
         );
@@ -276,6 +277,7 @@ mod tests {
                     ahead: 1,
                     behind: 0,
                 }),
+                head_commit_id: None,
             })),
             "origin/dev ↑1"
         );

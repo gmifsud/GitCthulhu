@@ -5,6 +5,7 @@ use core_domain::AppSettings;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, text};
+// mouse_area + tooltip used by icon_button
 use iced::{
     font::Family, Alignment, Background, Border, Color, Element, Font, Length, Shadow, Theme,
 };
@@ -159,20 +160,6 @@ pub(super) fn branch_chip<'a>(
     .into()
 }
 
-pub(super) fn section_label<'a>(
-    tokens: DesignTokens,
-    reading: Reading,
-    title: &'static str,
-) -> Element<'a, Message> {
-    text(title)
-        .font(reading.font)
-        .size((reading.size - 2.0).max(11.0))
-        .style(move |_| text::Style {
-            color: Some(tokens.text_muted),
-        })
-        .into()
-}
-
 pub(super) fn panel_style(tokens: DesignTokens, ruled: bool) -> container::Style {
     container::Style {
         background: Some(Background::Color(if ruled {
@@ -263,6 +250,77 @@ pub(super) fn command_button<'a>(
         .padding([2, 6])
         .on_press_maybe(enabled.then_some(message))
         .style(move |_theme, status| bordered_button(tokens, status, enabled, false))
+        .into()
+}
+
+/// Compact symbol control for working-area toolbars.
+///
+/// Always wraps in `tooltip` so the hover target is never remounted when the
+/// two-second tip becomes ready (that remount was clearing hover and flickering).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn icon_button<'a>(
+    mark: &'static str,
+    title: impl Into<String>,
+    tip_key: impl Into<String>,
+    tip_ready: bool,
+    message: Message,
+    enabled: bool,
+    accent: bool,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    use iced::widget::{mouse_area, tooltip};
+
+    let title = title.into();
+    let tip_key = tip_key.into();
+    let size = (reading.size + 1.0).max(12.0);
+    let ink = if accent && enabled {
+        tokens.text_primary
+    } else if enabled {
+        tokens.text_secondary
+    } else {
+        tokens.text_muted
+    };
+    let control = button(glyph(mark, size, ink, &reading))
+        .padding([3, 5])
+        .on_press_maybe(enabled.then_some(message))
+        .style(move |_theme, status| bordered_button(tokens, status, enabled, accent));
+
+    let sensed = mouse_area(control)
+        .on_enter(Message::IconTipEnter {
+            key: tip_key.clone(),
+            title: title.clone(),
+        })
+        .on_exit(Message::IconTipLeave { key: tip_key });
+
+    let tip: Element<'a, Message> = if tip_ready {
+        container(
+            text(title)
+                .font(reading.font)
+                .size((reading.size - 1.0).max(10.0)),
+        )
+        .padding([4, 8])
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.bg_app)),
+            text_color: Some(tokens.text_primary),
+            border: Border {
+                color: tokens.border,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+        })
+        .into()
+    } else {
+        // Keep a zero-size tip so the outer `tooltip` wrapper never swaps away.
+        container(text("").size(1.0))
+            .width(Length::Fixed(0.0))
+            .height(Length::Fixed(0.0))
+            .into()
+    };
+
+    tooltip(sensed, tip, tooltip::Position::Bottom)
+        .gap(4)
         .into()
 }
 

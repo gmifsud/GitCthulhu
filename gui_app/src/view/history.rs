@@ -1,23 +1,28 @@
 use crate::app::{GitApp, Message};
 use crate::commit_graph::{graph_rows, graph_width, GraphCell, ROW_HEIGHT};
+use crate::context_menu::ContextTarget;
 use crate::jobs::COMMIT_PAGE_SIZE;
+use crate::reachability::{filter_dag_nodes, session_head_tip};
 use crate::ref_pills::{refs_at, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
+use crate::session::{basename, WorktreeSession};
 use crate::theme::DesignTokens;
-use core_domain::Commit;
+use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas, column, container, row, scrollable, text};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::chrome::{panel_style, Reading};
+use super::chrome::{icon_button, panel_style, Reading};
 
 const COL_GAP: f32 = 10.0;
-const HASH_WIDTH: f32 = 64.0;
+const HASH_WIDTH: f32 = 72.0;
 const WHEN_WIDTH: f32 = 56.0;
-const AUTHOR_WIDTH: f32 = 120.0;
+const AUTHOR_WIDTH: f32 = 100.0;
+const MESSAGE_FILL: u16 = 3;
+const PILLS_FILL: u16 = 1;
 /// Floor for the lane canvas so Graph never collapses into Description on resize.
 const MIN_GRAPH_COL_WIDTH: f32 = 40.0;
 const HEADER_SIZE: f32 = 11.0;
@@ -32,10 +37,39 @@ pub(super) fn history_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let shown_nodes = &app.state.dag_nodes[..app.state.dag_nodes.len().min(COMMIT_PAGE_SIZE)];
+    let session = app.session();
+    let focus = session.focus_current_branch;
+    let head_tip = session_head_tip(
+        &session.state.branches,
+        session
+            .state
+            .current_status
+            .as_ref()
+            .and_then(|status| status.head_commit_id.as_deref()),
+    );
+    let filtered_owned: Vec<DagNode> = if focus {
+        head_tip
+            .as_deref()
+            .map(|tip| {
+                filter_dag_nodes(tip, &session.state.commits, &session.state.dag_nodes)
+                    .into_iter()
+                    .take(COMMIT_PAGE_SIZE)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let page_end = session.state.dag_nodes.len().min(COMMIT_PAGE_SIZE);
+    let shown_nodes: &[DagNode] = if focus {
+        &filtered_owned
+    } else {
+        &session.state.dag_nodes[..page_end]
+    };
     let rows = graph_rows(shown_nodes);
     let lanes_width = Length::Fixed(graph_width(&rows).max(MIN_GRAPH_COL_WIDTH));
-    let commits_by_id: HashMap<&str, &Commit> = app
+    let commits_by_id: HashMap<&str, &Commit> = session
         .state
         .commits
         .iter()
@@ -46,38 +80,41 @@ pub(super) fn history_pane<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let mut commit_rows = column![column_headers(lanes_width, tokens, reading)];
+    let mut commit_rows = column![column_headers(app, lanes_width, focus, tokens, reading)];
 
-    if working_tree_dirty(app) {
-        let selected = matches!(
-            selection,
-            Selection::Branch { current: true, .. } | Selection::File { .. }
-        );
-        let head = app
-            .state
-            .branches
-            .iter()
-            .find(|branch| branch.is_head)
-            .map(|branch| branch.name.as_str())
-            .unwrap_or("HEAD");
+    // One WIP row per open session with changes, in tab order. Only the active tab's row can
+    // be selected: the selection belongs to that session. Focus-current hides other sessions.
+    for (index, session) in app.sessions.iter().enumerate() {
+        if focus && index != app.active {
+            continue;
+        }
+        if !session_dirty(session) {
+            continue;
+        }
+        let selected = index == app.active
+            && matches!(
+                selection,
+                Selection::Branch { current: true, .. } | Selection::File { .. }
+            );
+        let head = wip_label(session);
         commit_rows = commit_rows.push(
             button(
                 row![
-                    container(text(""))
-                        .width(lanes_width)
-                        .height(Length::Fixed(ROW_HEIGHT)),
-                    single_line("WIP", Length::Fixed(HASH_WIDTH), reading, tokens, true),
-                    description_cell(
-                        Some(RefPill {
+                    pills_cell(
+                        &[RefPill {
                             label: format!("wip · {head}"),
                             kind: RefPillKind::Head,
-                        }),
-                        "Working changes",
+                        }],
                         tokens,
                         reading,
                     ),
+                    container(text(""))
+                        .width(lanes_width)
+                        .height(Length::Fixed(ROW_HEIGHT)),
+                    message_cell("Working changes", tokens, reading),
                     single_line("", Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
                     single_line("", Length::Fixed(WHEN_WIDTH), reading, tokens, false),
+                    single_line("", Length::Fixed(HASH_WIDTH), reading, tokens, true),
                 ]
                 .spacing(COL_GAP)
                 .height(Length::Fixed(ROW_HEIGHT))
@@ -85,7 +122,7 @@ pub(super) fn history_pane<'a>(
             )
             .width(Length::Fill)
             .padding(0)
-            .on_press(Message::ShowWorkingTree)
+            .on_press(Message::ShowSessionWorkingTree(index))
             .style(move |_theme, status| commit_style(tokens, status, selected)),
         );
     }
@@ -96,19 +133,13 @@ pub(super) fn history_pane<'a>(
         };
         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
         let age = relative_age_compact(now, commit.timestamp);
-        let pills = refs_at(&commit.id, &app.state.branches, &app.state.tags);
+        let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
         let label = row![
+            pills_cell(&pills, tokens, reading),
             canvas(GraphCell(graph_row))
                 .width(lanes_width)
                 .height(Length::Fixed(ROW_HEIGHT)),
-            single_line(
-                &short_hash(&commit.id),
-                Length::Fixed(HASH_WIDTH),
-                reading,
-                tokens,
-                true
-            ),
-            description_with_pills(&pills, &commit.message, tokens, reading),
+            message_cell(&commit.message, tokens, reading),
             single_line(
                 &commit.author,
                 Length::Fixed(AUTHOR_WIDTH),
@@ -117,22 +148,43 @@ pub(super) fn history_pane<'a>(
                 false
             ),
             single_line(&age, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
+            single_line(
+                short_hash(&commit.id),
+                Length::Fixed(HASH_WIDTH),
+                reading,
+                tokens,
+                true
+            ),
         ]
         .spacing(COL_GAP)
         .height(Length::Fixed(ROW_HEIGHT))
         .align_y(Alignment::Center);
+        let id = commit.id.clone();
+        let right_target = ContextTarget::Commit {
+            id: commit.id.clone(),
+        };
         commit_rows = commit_rows.push(
-            button(label)
-                .width(Length::Fill)
-                .padding(0)
-                .on_press(Message::Select(Selection::Commit {
-                    id: commit.id.clone(),
-                }))
-                .style(move |_theme, status| commit_style(tokens, status, selected)),
+            mouse_area(
+                button(label)
+                    .width(Length::Fill)
+                    .padding(0)
+                    .on_press(Message::Select(Selection::Commit { id }))
+                    .style(move |_theme, status| commit_style(tokens, status, selected)),
+            )
+            .on_right_press(Message::OpenContextMenu {
+                target: right_target,
+            }),
         );
     }
 
-    if shown_nodes.is_empty() && !working_tree_dirty(app) {
+    let any_wip = if focus {
+        app.sessions
+            .get(app.active)
+            .is_some_and(session_dirty)
+    } else {
+        app.sessions.iter().any(session_dirty)
+    };
+    if shown_nodes.is_empty() && !any_wip {
         commit_rows = commit_rows.push(
             text("No commits yet")
                 .font(reading.font)
@@ -151,24 +203,48 @@ pub(super) fn history_pane<'a>(
 }
 
 fn column_headers<'a>(
+    app: &'a GitApp,
     lanes_width: Length,
+    focus: bool,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
     row![
+        header_cell("Refs", Length::FillPortion(PILLS_FILL), tokens, reading),
         container(
             text("Graph")
                 .font(reading.font)
                 .size(HEADER_SIZE)
+                .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
                     color: Some(tokens.text_muted),
                 }),
         )
         .width(lanes_width),
-        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
-        header_cell("Description", Length::Fill, tokens, reading),
+        header_cell(
+            "Description",
+            Length::FillPortion(MESSAGE_FILL),
+            tokens,
+            reading,
+        ),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
+        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
+        icon_button(
+            "◎",
+            if focus {
+                "Show all branches"
+            } else {
+                "Focus current branch"
+            },
+            "graph-focus",
+            app.tip_ready("graph-focus"),
+            Message::ToggleFocusCurrentBranch,
+            true,
+            focus,
+            tokens,
+            reading,
+        ),
     ]
     .spacing(COL_GAP)
     .padding([4, 0])
@@ -186,6 +262,7 @@ fn header_cell<'a>(
         text(label)
             .font(reading.font)
             .size(HEADER_SIZE)
+            .wrapping(Wrapping::None)
             .style(move |_| text::Style {
                 color: Some(tokens.text_muted),
             }),
@@ -194,9 +271,8 @@ fn header_cell<'a>(
     .into()
 }
 
-fn description_with_pills<'a>(
+fn pills_cell<'a>(
     pills: &[RefPill],
-    message: &str,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -209,34 +285,35 @@ fn description_with_pills<'a>(
             text(format!("+{}", pills.len() - 4))
                 .font(reading.font)
                 .size((reading.size - 2.0).max(11.0))
+                .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
                     color: Some(tokens.text_muted),
                 }),
         );
     }
-    cell = cell.push(
-        text(message.to_string())
-            .font(reading.font)
-            .size(reading.size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_primary),
-            }),
-    );
     container(cell)
-        .width(Length::Fill)
+        .width(Length::FillPortion(PILLS_FILL))
         .clip(true)
         .into()
 }
 
-fn description_cell<'a>(
-    pill: Option<RefPill>,
+fn message_cell<'a>(
     message: &str,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let pills = pill.into_iter().collect::<Vec<_>>();
-    description_with_pills(&pills, message, tokens, reading)
+    let body = text(message.to_string())
+        .font(reading.font)
+        .size(reading.size)
+        .wrapping(Wrapping::None)
+        .style(move |_| text::Style {
+            color: Some(tokens.text_primary),
+        });
+    // Share remaining width with pills; clip long subjects.
+    container(body)
+        .width(Length::FillPortion(MESSAGE_FILL))
+        .clip(true)
+        .into()
 }
 
 fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -306,12 +383,24 @@ pub(crate) fn relative_age_compact(now: i64, then: i64) -> String {
     format!("{}y", days / 365)
 }
 
-fn working_tree_dirty(app: &GitApp) -> bool {
-    app.state.current_status.as_ref().is_some_and(|status| {
+fn session_dirty(session: &WorktreeSession) -> bool {
+    session.state.current_status.as_ref().is_some_and(|status| {
         !status.staged_files.is_empty()
             || !status.unstaged_files.is_empty()
             || !status.untracked_files.is_empty()
     })
+}
+
+/// Name shown on a session's WIP pill: its checked-out branch, else the folder name (a
+/// detached HEAD or a session whose branches have not loaded yet).
+fn wip_label(session: &WorktreeSession) -> String {
+    session
+        .state
+        .branches
+        .iter()
+        .find(|branch| branch.is_head && !branch.is_remote)
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| basename(&session.path).to_string())
 }
 
 fn single_line<'a>(
@@ -361,6 +450,42 @@ fn commit_style(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_at(path: &str, dirty: bool, head: Option<&str>) -> WorktreeSession {
+        let mut session = WorktreeSession::test_stub();
+        session.path = path.to_string();
+        session.state.current_status = Some(core_domain::RepoStatus {
+            staged_files: Vec::new(),
+            unstaged_files: if dirty { vec!["a.rs".to_string()] } else { Vec::new() },
+            untracked_files: Vec::new(),
+            tracking: None,
+            head_commit_id: None,
+        });
+        session.state.branches = head
+            .map(|name| {
+                vec![core_domain::Branch {
+                    name: name.to_string(),
+                    is_remote: false,
+                    is_head: true,
+                    tip: "abc".to_string(),
+                }]
+            })
+            .unwrap_or_default();
+        session
+    }
+
+    #[test]
+    fn only_sessions_with_changes_are_dirty() {
+        assert!(session_dirty(&session_at(r"D:\a", true, Some("main"))));
+        assert!(!session_dirty(&session_at(r"D:\a", false, Some("main"))));
+        assert!(!session_dirty(&WorktreeSession::test_stub()));
+    }
+
+    #[test]
+    fn wip_label_is_the_branch_else_the_folder_name() {
+        assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, Some("feature"))), "feature");
+        assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, None)), "wt");
+    }
 
     #[test]
     fn relative_age_steps_up_units() {

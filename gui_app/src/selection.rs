@@ -299,6 +299,7 @@ mod tests {
             unstaged_files: owned(unstaged),
             untracked_files: owned(untracked),
             tracking: None,
+            head_commit_id: None,
         }
     }
 

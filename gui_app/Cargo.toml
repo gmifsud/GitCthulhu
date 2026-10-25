@@ -11,7 +11,7 @@ path = "src/lib.rs"
 # No adapter crates here: concrete adapters are wired by the `app` crate.
 [dependencies]
 core_domain = { path = "../core_domain" }
-iced = { version = "0.13", features = ["advanced", "canvas"] } # Pure Rust reactive GUI; canvas draws the commit graph, advanced colours the terminal
+iced = { version = "0.13", features = ["advanced", "canvas", "tokio"] } # Pure Rust reactive GUI; canvas draws the commit graph, advanced colours the terminal; tokio powers delayed icon tips
 rfd = "0.17.2"
 
 [dev-dependencies]

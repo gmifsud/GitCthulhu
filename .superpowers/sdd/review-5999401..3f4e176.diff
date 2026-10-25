@@ -1,0 +1,628 @@
+# Review package: 5999401939b3b07a3d7484f430924afca9fa5830..3f4e176d0016c8246a6b432794c82d536ee2f6fc
+
+## Commits
+3f4e176 feat: add Worktree port and git worktree porcelain adapter
+
+## Files changed
+ core_domain/src/model.rs    |   9 +++
+ core_domain/src/ports.rs    |  13 +++-
+ git_adapter/src/lib.rs      |  42 ++++++++++++-
+ git_adapter/src/tests.rs    | 140 ++++++++++++++++++++++++++++++++++++++++++++
+ git_adapter/src/worktree.rs | 135 ++++++++++++++++++++++++++++++++++++++++++
+ gui_app/src/jobs.rs         |  14 +++++
+ test_support/src/lib.rs     |  25 +++++++-
+ 7 files changed, 375 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/core_domain/src/model.rs b/core_domain/src/model.rs
+index 26e3f83..964f183 100644
+--- a/core_domain/src/model.rs
++++ b/core_domain/src/model.rs
+@@ -36,20 +36,29 @@ pub struct Stash {
+ /// Represents a Git branch.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct Branch {
+     pub name: String,
+     pub is_remote: bool,
+     pub is_head: bool,
+     /// Peeled commit id this branch currently points at (full hex).
+     pub tip: String,
+ }
+ 
++/// One entry from `git worktree list`.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Worktree {
++    pub path: String,
++    pub branch: String,
++    pub is_main: bool,
++    pub locked: bool,
++}
++
+ /// How the current branch compares with its upstream.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct TrackingStatus {
+     /// Short upstream name, such as `origin/main`.
+     pub upstream: String,
+     pub ahead: usize,
+     pub behind: usize,
+ }
+ 
+ /// Where a changed path sits, which decides the diff and the discard command.
+diff --git a/core_domain/src/ports.rs b/core_domain/src/ports.rs
+index e7a5d5c..f348b77 100644
+--- a/core_domain/src/ports.rs
++++ b/core_domain/src/ports.rs
+@@ -1,25 +1,36 @@
+ use super::{
+     AppSettings, Branch, Commit, DagNode, DomainError, FileDisposition, Hunk, Patch, RepoStatus,
+-    ResetMode, Stash, Tag,
++    ResetMode, Stash, Tag, Worktree,
+ };
+ 
+ /// The GitRepository port.
+ /// Adapters such as `git_adapter` implement this trait.
+ pub trait GitRepository {
+     fn status(&self) -> Result<RepoStatus, DomainError>;
+     fn log(&self, max_count: Option<usize>) -> Result<Vec<Commit>, DomainError>;
+     fn branches(&self) -> Result<Vec<Branch>, DomainError>;
+     /// Tags that peel to a commit, sorted by name. The section is empty when there are none.
+     fn tags(&self) -> Result<Vec<Tag>, DomainError>;
+     /// `git stash list`, in the order git prints it. `stash@{0}` is the newest.
+     fn stashes(&self) -> Result<Vec<Stash>, DomainError>;
++    /// `git worktree list --porcelain`. The first row is the main worktree; prunable rows are omitted.
++    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError>;
++    /// `git worktree add`. With `create_branch`, makes `branch` at HEAD (`-b`); otherwise checks out the existing `branch`.
++    fn add_worktree(
++        &self,
++        path: &str,
++        branch: &str,
++        create_branch: bool,
++    ) -> Result<(), DomainError>;
++    /// `git worktree remove`. `force` also removes a worktree with uncommitted changes; git refuses the main one.
++    fn remove_worktree(&self, path: &str, force: bool) -> Result<(), DomainError>;
+     fn checkout_branch(&self, branch_name: &str) -> Result<(), DomainError>;
+     /// `git branch -- <name> <start_point>`. Does not check the new branch out.
+     fn create_branch(&self, name: &str, start_point: &str) -> Result<(), DomainError>;
+     /// `git branch -m -- <from> <to>`. Renaming the current branch moves HEAD with it.
+     fn rename_branch(&self, from: &str, to: &str) -> Result<(), DomainError>;
+     /// `git branch -d -- <name>`. Refuses the current branch and a branch that is not merged.
+     fn delete_branch(&self, name: &str) -> Result<(), DomainError>;
+     /// `git cherry-pick -- <commit>`. `commit` is a hex object id.
+     fn cherry_pick(&self, commit_id: &str) -> Result<(), DomainError>;
+     /// `git reset --soft`, `--mixed`, or `--hard` to a hex object id.
+diff --git a/git_adapter/src/lib.rs b/git_adapter/src/lib.rs
+index f5c0b8d..ceb0a3b 100644
+--- a/git_adapter/src/lib.rs
++++ b/git_adapter/src/lib.rs
+@@ -1,32 +1,34 @@
+ //! Implements the `GitRepository` port using `gix` (gitoxide).
+ //! Porcelain that gix 0.66 cannot do safely goes through [`command`].
+ 
+ mod command;
+ mod diff;
+ mod stash;
+ mod status;
++mod worktree;
+ 
+ #[cfg(test)]
+ mod tests;
+ 
+ use std::fmt::Display;
+ 
+ use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
+ use core_domain::{
+     Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus,
+-    ResetMode, Stash, Tag,
++    ResetMode, Stash, Tag, Worktree,
+ };
+ use diff::{parse_patches, patch_from_worktree, render_hunk};
+ use gix::bstr::BString;
+ use gix::refs::TargetRef;
+ use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
++use worktree::{parse_worktree_porcelain, require_worktree_path};
+ 
+ pub(crate) fn unknown(error: impl Display) -> DomainError {
+     DomainError::Unknown(error.to_string())
+ }
+ 
+ pub struct GitoxideAdapter {
+     repo_path: String,
+ }
+ 
+ impl GitoxideAdapter {
+@@ -222,20 +224,58 @@ impl GitRepository for GitoxideAdapter {
+             };
+             tags.push(Tag {
+                 name,
+                 commit_id: commit.id().to_string(),
+             });
+         }
+         tags.sort_by(|left, right| left.name.cmp(&right.name));
+         Ok(tags)
+     }
+ 
++    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {
++        self.open_repo()?;
++        let out = run_git_stdout(&self.repo_path, &["worktree", "list", "--porcelain"])?;
++        Ok(parse_worktree_porcelain(&out))
++    }
++
++    fn add_worktree(
++        &self,
++        path: &str,
++        branch: &str,
++        create_branch: bool,
++    ) -> Result<(), DomainError> {
++        self.open_repo()?;
++        require_worktree_path(path)?;
++        require_branch_name(branch)?;
++        if create_branch {
++            run_git(
++                &self.repo_path,
++                &["worktree", "add", "-b", branch, "--", path],
++            )
++        } else {
++            run_git(&self.repo_path, &["worktree", "add", "--", path, branch])
++        }
++    }
++
++    fn remove_worktree(&self, path: &str, force: bool) -> Result<(), DomainError> {
++        self.open_repo()?;
++        require_worktree_path(path)?;
++        if force {
++            run_git(
++                &self.repo_path,
++                &["worktree", "remove", "--force", "--", path],
++            )
++        } else {
++            run_git(&self.repo_path, &["worktree", "remove", "--", path])
++        }
++    }
++
+     /// Switch to a local branch with `git switch`.
+     ///
+     /// gix 0.66 keeps the checkout options a correct worktree update needs (filters,
+     /// attributes, line endings) private, so this delegates to git, which also refuses
+     /// to overwrite uncommitted changes. `--no-guess` stops a remote branch name from
+     /// silently creating a new local tracking branch.
+     fn checkout_branch(&self, branch_name: &str) -> Result<(), DomainError> {
+         self.open_repo()?;
+         if branch_name.is_empty() || branch_name.starts_with('-') {
+             return Err(DomainError::Unknown(format!(
+diff --git a/git_adapter/src/tests.rs b/git_adapter/src/tests.rs
+index 8be405b..4d30940 100644
+--- a/git_adapter/src/tests.rs
++++ b/git_adapter/src/tests.rs
+@@ -1313,10 +1313,150 @@ fn cherry_pick_reset_merge_and_rebase_use_the_selected_commit_or_branch() {
+ 
+ fn local_names(adapter: &GitoxideAdapter) -> Vec<String> {
+     adapter
+         .branches()
+         .expect("branches")
+         .into_iter()
+         .filter(|branch| !branch.is_remote)
+         .map(|branch| branch.name)
+         .collect()
+ }
++
++// ΓöÇΓöÇ Worktrees ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++/// A directory for a linked worktree that git has not created yet.
++fn linked_path(parent: &tempfile::TempDir, name: &str) -> String {
++    parent
++        .path()
++        .join(name)
++        .to_str()
++        .expect("utf-8 temp path")
++        .to_string()
++}
++
++fn same_path(left: &str, right: &str) -> bool {
++    let normalise = |path: &str| {
++        path.replace('\\', "/")
++            .trim_end_matches('/')
++            .to_ascii_lowercase()
++    };
++    normalise(left) == normalise(right)
++}
++
++#[test]
++fn worktrees_lists_main_after_init() {
++    let fixture = TestRepo::with_feature_branch();
++    let list = fixture.adapter().worktrees().expect("list worktrees");
++    assert_eq!(list.len(), 1, "{list:?}");
++    assert!(list[0].is_main);
++    assert!(!list[0].locked);
++    assert_eq!(list[0].branch, fixture.head_branch());
++}
++
++#[test]
++fn add_worktree_checks_out_branch_and_lists() {
++    let fixture = TestRepo::with_feature_branch();
++    let adapter = fixture.adapter();
++    let parent = tempfile::tempdir().expect("temp dir");
++    let path = linked_path(&parent, "linked");
++
++    adapter
++        .add_worktree(&path, "feature", false)
++        .expect("add worktree on an existing branch");
++
++    let list = adapter.worktrees().expect("list worktrees");
++    assert_eq!(list.len(), 2, "{list:?}");
++    assert!(list[0].is_main);
++    let linked = &list[1];
++    assert!(!linked.is_main);
++    assert_eq!(linked.branch, "feature");
++    assert!(same_path(&linked.path, &path), "{} vs {path}", linked.path);
++    let head = gix::open(&path)
++        .expect("open linked worktree")
++        .head_name()
++        .unwrap()
++        .expect("on a branch")
++        .shorten()
++        .to_string();
++    assert_eq!(head, "feature");
++    assert_eq!(
++        std::fs::read_to_string(std::path::Path::new(&path).join("a.txt"))
++            .ok()
++            .as_deref(),
++        Some("a on feature\n")
++    );
++}
++
++#[test]
++fn add_worktree_can_create_a_new_branch() {
++    let fixture = TestRepo::with_feature_branch();
++    let adapter = fixture.adapter();
++    let parent = tempfile::tempdir().expect("temp dir");
++    let path = linked_path(&parent, "topic-tree");
++
++    adapter
++        .add_worktree(&path, "topic", true)
++        .expect("add worktree with a new branch");
++
++    let list = adapter.worktrees().expect("list worktrees");
++    assert_eq!(list.len(), 2, "{list:?}");
++    assert_eq!(list[1].branch, "topic");
++    assert!(adapter.add_worktree(&path, "other", true).is_err());
++    assert!(adapter.add_worktree("-bad", "topic-2", true).is_err());
++    assert!(adapter.add_worktree(&path, "bad name", true).is_err());
++}
++
++#[test]
++fn remove_worktree_drops_linked() {
++    let fixture = TestRepo::with_feature_branch();
++    let adapter = fixture.adapter();
++    let parent = tempfile::tempdir().expect("temp dir");
++    let path = linked_path(&parent, "linked");
++    adapter
++        .add_worktree(&path, "feature", false)
++        .expect("add worktree");
++    assert_eq!(adapter.worktrees().unwrap().len(), 2);
++
++    adapter
++        .remove_worktree(&path, false)
++        .expect("remove clean worktree");
++
++    let list = adapter.worktrees().expect("list worktrees");
++    assert_eq!(list.len(), 1, "{list:?}");
++    assert!(list[0].is_main);
++    assert!(!std::path::Path::new(&path).exists());
++}
++
++#[test]
++fn force_remove_dirty_linked_worktree() {
++    let fixture = TestRepo::with_feature_branch();
++    let adapter = fixture.adapter();
++    let parent = tempfile::tempdir().expect("temp dir");
++    let path = linked_path(&parent, "linked");
++    adapter
++        .add_worktree(&path, "feature", false)
++        .expect("add worktree");
++    std::fs::write(std::path::Path::new(&path).join("a.txt"), "dirty\n").expect("dirty a file");
++
++    let refused = adapter.remove_worktree(&path, false);
++    assert!(refused.is_err(), "{refused:?}");
++    assert_eq!(adapter.worktrees().unwrap().len(), 2);
++
++    adapter
++        .remove_worktree(&path, true)
++        .expect("force remove dirty worktree");
++    assert_eq!(adapter.worktrees().unwrap().len(), 1);
++}
++
++#[test]
++fn remove_worktree_refuses_main_and_bad_paths() {
++    let fixture = TestRepo::with_feature_branch();
++    let adapter = fixture.adapter();
++    let main = fixture
++        .workdir()
++        .to_str()
++        .expect("utf-8 temp path")
++        .to_string();
++    assert!(adapter.remove_worktree(&main, true).is_err());
++    assert!(adapter.remove_worktree("", false).is_err());
++    assert!(adapter.remove_worktree("-f", false).is_err());
++}
+diff --git a/git_adapter/src/worktree.rs b/git_adapter/src/worktree.rs
+new file mode 100644
+index 0000000..3d8bd8b
+--- /dev/null
++++ b/git_adapter/src/worktree.rs
+@@ -0,0 +1,135 @@
++use core_domain::{DomainError, Worktree};
++
++/// Branch label for a worktree whose HEAD is not on a local branch.
++const DETACHED_LABEL: &str = "(detached)";
++
++/// Parse `git worktree list --porcelain` stdout into domain rows.
++///
++/// Records are separated by blank lines; the first one is the main worktree.
++/// `prunable` entries (their directory is gone) are omitted.
++pub(crate) fn parse_worktree_porcelain(stdout: &str) -> Vec<Worktree> {
++    let mut rows = Vec::new();
++    let mut record: Vec<&str> = Vec::new();
++    let mut index = 0usize;
++    for line in stdout.lines().map(|line| line.trim_end_matches('\r')) {
++        if line.trim().is_empty() {
++            if !record.is_empty() {
++                rows.extend(parse_record(&record, index == 0));
++                index += 1;
++                record.clear();
++            }
++        } else {
++            record.push(line);
++        }
++    }
++    if !record.is_empty() {
++        rows.extend(parse_record(&record, index == 0));
++    }
++    rows
++}
++
++fn parse_record(lines: &[&str], is_main: bool) -> Option<Worktree> {
++    let mut path: Option<String> = None;
++    let mut branch: Option<String> = None;
++    let mut locked = false;
++    let mut prunable = false;
++    for line in lines {
++        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
++        match key {
++            "worktree" => path = Some(value.trim().to_string()),
++            "branch" => {
++                branch = Some(
++                    value
++                        .trim()
++                        .strip_prefix("refs/heads/")
++                        .unwrap_or(value.trim())
++                        .to_string(),
++                );
++            }
++            "detached" => branch = None,
++            "locked" => locked = true,
++            "prunable" => prunable = true,
++            _ => {}
++        }
++    }
++    if prunable {
++        return None;
++    }
++    Some(Worktree {
++        path: path?,
++        branch: branch
++            .filter(|name| !name.is_empty())
++            .unwrap_or_else(|| DETACHED_LABEL.to_string()),
++        is_main,
++        locked,
++    })
++}
++
++/// Reject an empty path, a NUL byte, or a leading `-` before git sees it.
++///
++/// Unlike `require_safe_path`, absolute paths are allowed: linked worktrees live
++/// outside the repository directory.
++pub(crate) fn require_worktree_path(path: &str) -> Result<(), DomainError> {
++    if path.trim().is_empty() || path.contains('\0') || path.starts_with('-') {
++        Err(DomainError::Unknown(format!("invalid path: {path:?}")))
++    } else {
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn porcelain_lists_main_and_linked() {
++        let raw = "\
++worktree /repo
++HEAD abcdef0123456789abcdef0123456789abcdef01
++branch refs/heads/main
++
++worktree /repo-feature
++HEAD fedcba9876543210fedcba9876543210fedcba98
++branch refs/heads/feature
++locked
++";
++        let list = parse_worktree_porcelain(raw);
++        assert_eq!(list.len(), 2);
++        assert!(list[0].is_main);
++        assert_eq!(list[0].branch, "main");
++        assert_eq!(list[0].path.replace('\\', "/"), "/repo");
++        assert!(!list[1].is_main);
++        assert_eq!(list[1].branch, "feature");
++        assert!(list[1].locked);
++    }
++
++    #[test]
++    fn porcelain_handles_detached_locked_reason_prunable_and_crlf() {
++        let raw = "worktree C:/repo\r\nHEAD aaaa\r\nbranch refs/heads/main\r\n\r\n\
++worktree C:/detached\r\nHEAD bbbb\r\ndetached\r\nlocked in use\r\n\r\n\
++worktree C:/gone\r\nHEAD cccc\r\nbranch refs/heads/gone\r\nprunable gitdir file points to non-existent location\r\n\r\n\
++worktree C:/with space/linked\r\nHEAD dddd\r\nbranch refs/heads/topic/x\r\n";
++        let list = parse_worktree_porcelain(raw);
++        let paths: Vec<&str> = list.iter().map(|row| row.path.as_str()).collect();
++        assert_eq!(paths, ["C:/repo", "C:/detached", "C:/with space/linked"]);
++        assert_eq!(list[1].branch, "(detached)");
++        assert!(list[1].locked);
++        assert!(!list[1].is_main);
++        assert_eq!(list[2].branch, "topic/x");
++        assert!(!list[2].locked);
++    }
++
++    #[test]
++    fn empty_output_is_no_worktrees() {
++        assert!(parse_worktree_porcelain("").is_empty());
++    }
++
++    #[test]
++    fn worktree_path_rejects_empty_nul_and_flags() {
++        assert!(require_worktree_path("").is_err());
++        assert!(require_worktree_path("-f").is_err());
++        assert!(require_worktree_path("a\0b").is_err());
++        assert!(require_worktree_path("C:/abs/path").is_ok());
++        assert!(require_worktree_path("../sibling").is_ok());
++    }
++}
+diff --git a/gui_app/src/jobs.rs b/gui_app/src/jobs.rs
+index 217cdfa..3c242ee 100644
+--- a/gui_app/src/jobs.rs
++++ b/gui_app/src/jobs.rs
+@@ -483,20 +483,34 @@ mod tests {
+         }
+         fn branches(&self) -> Result<Vec<Branch>, DomainError> {
+             unreachable!("status panics first")
+         }
+         fn stashes(&self) -> Result<Vec<core_domain::Stash>, DomainError> {
+             unreachable!("status panics first")
+         }
+         fn tags(&self) -> Result<Vec<core_domain::Tag>, DomainError> {
+             unreachable!("status panics first")
+         }
++        fn worktrees(&self) -> Result<Vec<core_domain::Worktree>, DomainError> {
++            unreachable!("not used by load_repository")
++        }
++        fn add_worktree(
++            &self,
++            _path: &str,
++            _branch: &str,
++            _create_branch: bool,
++        ) -> Result<(), DomainError> {
++            unreachable!("not used by load_repository")
++        }
++        fn remove_worktree(&self, _path: &str, _force: bool) -> Result<(), DomainError> {
++            unreachable!("not used by load_repository")
++        }
+         fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+             unreachable!("not used by load_repository")
+         }
+         fn create_branch(&self, _name: &str, _start_point: &str) -> Result<(), DomainError> {
+             unreachable!("not used by load_repository")
+         }
+         fn rename_branch(&self, _from: &str, _to: &str) -> Result<(), DomainError> {
+             unreachable!("not used by load_repository")
+         }
+         fn delete_branch(&self, _name: &str) -> Result<(), DomainError> {
+diff --git a/test_support/src/lib.rs b/test_support/src/lib.rs
+index 58b1568..6851275 100644
+--- a/test_support/src/lib.rs
++++ b/test_support/src/lib.rs
+@@ -1,30 +1,33 @@
+ //! test_support
+ //! Shared test fakes for all adapter crates.
+ //! Add as `[dev-dependencies]` only ΓÇö never in `[dependencies]`.
+ 
+ use core_domain::{
+     Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus, Stash,
+-    Tag,
++    Tag, Worktree,
+ };
+ 
+ /// Pre-configured fake that implements [`GitRepository`].
+ ///
+ /// All methods return clones of the stored `Result` fields, so each call
+ /// is independent and deterministic.  Construct with [`FakeGitRepository::ok`]
+ /// for an all-success baseline and override individual fields for error paths.
+ pub struct FakeGitRepository {
+     pub status_result: Result<RepoStatus, DomainError>,
+     pub log_result: Result<Vec<Commit>, DomainError>,
+     pub branches_result: Result<Vec<Branch>, DomainError>,
+     pub stashes_result: Result<Vec<Stash>, DomainError>,
+     pub tags_result: Result<Vec<Tag>, DomainError>,
++    pub worktrees_result: Result<Vec<Worktree>, DomainError>,
++    pub add_worktree_result: Result<(), DomainError>,
++    pub remove_worktree_result: Result<(), DomainError>,
+     pub checkout_result: Result<(), DomainError>,
+     pub create_branch_result: Result<(), DomainError>,
+     pub rename_branch_result: Result<(), DomainError>,
+     pub delete_branch_result: Result<(), DomainError>,
+     pub cherry_pick_result: Result<(), DomainError>,
+     pub reset_result: Result<(), DomainError>,
+     pub merge_result: Result<(), DomainError>,
+     pub rebase_result: Result<(), DomainError>,
+     pub stage_result: Result<(), DomainError>,
+     pub unstage_result: Result<(), DomainError>,
+@@ -50,20 +53,23 @@ impl FakeGitRepository {
+             status_result: Ok(RepoStatus {
+                 staged_files: vec![],
+                 unstaged_files: vec![],
+                 untracked_files: vec![],
+                 tracking: None,
+             }),
+             log_result: Ok(vec![]),
+             branches_result: Ok(vec![]),
+             stashes_result: Ok(vec![]),
+             tags_result: Ok(vec![]),
++            worktrees_result: Ok(vec![]),
++            add_worktree_result: Ok(()),
++            remove_worktree_result: Ok(()),
+             checkout_result: Ok(()),
+             create_branch_result: Ok(()),
+             rename_branch_result: Ok(()),
+             delete_branch_result: Ok(()),
+             cherry_pick_result: Ok(()),
+             reset_result: Ok(()),
+             merge_result: Ok(()),
+             rebase_result: Ok(()),
+             stage_result: Ok(()),
+             unstage_result: Ok(()),
+@@ -102,20 +108,37 @@ impl GitRepository for FakeGitRepository {
+     }
+ 
+     fn stashes(&self) -> Result<Vec<Stash>, DomainError> {
+         self.stashes_result.clone()
+     }
+ 
+     fn tags(&self) -> Result<Vec<Tag>, DomainError> {
+         self.tags_result.clone()
+     }
+ 
++    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {
++        self.worktrees_result.clone()
++    }
++
++    fn add_worktree(
++        &self,
++        _path: &str,
++        _branch: &str,
++        _create_branch: bool,
++    ) -> Result<(), DomainError> {
++        self.add_worktree_result.clone()
++    }
++
++    fn remove_worktree(&self, _path: &str, _force: bool) -> Result<(), DomainError> {
++        self.remove_worktree_result.clone()
++    }
++
+     fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+         self.checkout_result.clone()
+     }
+ 
+     fn create_branch(&self, _name: &str, _start_point: &str) -> Result<(), DomainError> {
+         self.create_branch_result.clone()
+     }
+ 
+     fn rename_branch(&self, _from: &str, _to: &str) -> Result<(), DomainError> {
+         self.rename_branch_result.clone()
+

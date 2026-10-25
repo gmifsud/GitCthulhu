@@ -1,0 +1,2917 @@
+# Final branch review package layout redesign
+BASE: 4921847 (after tip/tabs polish+docs)
+HEAD: 64cd98e
+MERGE_BASE_HINT: also includes earlier worktree-sessions commits before 4921847
+
+## Commits (layout plan range)
+64cd98e fix(gui): branch chip reveals Explorer LOCAL section
+842565a fix(gui): branch chip reveals Explorer LOCAL; denser hunk padding
+4a5c3d1 fix(gui_app): clear clippy gate after layout redesign
+67aad90 fix(gui): denser hunk line spacing after gutter
+06af6f8 feat: denser unified hunk gutters and tints
+b126b13 feat: hunk Beside/Wide/Focus layout modes
+aca294a fix(gui): align graph pills/message columns without leading spacer
+d399d27 feat: graph pills-first columns with hash last
+decd0d6 feat: fuse WIP and commit files into the right navigator
+74b5628 fix(gui): skip building collapsed explorer section bodies
+d20de85 feat: collapsible LOCAL/REMOTE/WORKTREES/STASHES/TAGS explorer
+
+## Stat
+ gui_app/src/app.rs            | 183 +++++++++++++--
+ gui_app/src/layout.rs         |  93 ++++++--
+ gui_app/src/session.rs        |  73 ++++++
+ gui_app/src/theme.rs          |   4 +-
+ gui_app/src/view/changes.rs   | 160 ++++++++-----
+ gui_app/src/view/chrome.rs    |  15 +-
+ gui_app/src/view/explorer.rs  | 509 ++++++++++++++++++++++++++++++++++++++++++
+ gui_app/src/view/files_nav.rs | 317 ++++++++++++++++++++++++++
+ gui_app/src/view/history.rs   |  83 ++++---
+ gui_app/src/view/mod.rs       |   2 +
+ gui_app/src/view/patch.rs     |  35 ++-
+ gui_app/src/view/refs.rs      | 260 +--------------------
+ gui_app/src/view/top_bar.rs   |  77 ++++++-
+ gui_app/src/view/workspace.rs | 269 ++--------------------
+ gui_app/src/view/worktrees.rs |   7 +
+ 15 files changed, 1411 insertions(+), 676 deletions(-)
+
+diff --git a/gui_app/src/app.rs b/gui_app/src/app.rs
+index 15cff43..609954e 100644
+--- a/gui_app/src/app.rs
++++ b/gui_app/src/app.rs
+@@ -18,18 +18,26 @@ use crate::jobs::{
+     push_in_background, remove_worktree_in_background, save_settings_in_background,
+     stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
+     worktrees_in_background, BranchAction, HistoryAction, SharedRepository, StashAction,
+     WorktreeEdit,
+ };
+-use crate::layout::{self, LayoutPreset, RatioSlot, WorkspacePane};
++use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
+ use crate::selection::Selection;
+ use crate::session::{apply_retention, same_path, WorktreeSession, DIFF_LINES_PER_PAGE};
+ use crate::theme::DesignTokens;
+ use crate::{
+     RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver, WorktreeOpener,
+ };
+ 
++/// Rail visibility and hunk mode to restore when leaving [`HunkMode::Focus`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct FocusRestore {
++    pub files_rail_open: bool,
++    pub inspector_open: bool,
++    pub hunk_mode: HunkMode,
++}
++
+ /// Repository handed from a background open into [`Message::RepositoryOpened`].
+ ///
+ /// Wraps the trait object so [`Message`] can stay `Debug`.
+ #[derive(Clone)]
+ pub(crate) struct OpenedRepository(pub SharedRepository);
+@@ -74,12 +82,14 @@ pub(crate) struct GitApp {
+     pub(crate) layout: LayoutPreset,
+     ratios: [layout::LayoutRatios; 3],
+     /// Rebuilt whenever [`Self::install_layout`] constructs a new pane grid.
+     split_slots: Vec<(pane_grid::Split, RatioSlot)>,
+     pub(crate) files_rail_open: bool,
++    pub(crate) inspector_open: bool,
++    pub(crate) hunk_mode: HunkMode,
++    focus_restore: Option<FocusRestore>,
+     pub(crate) branch_list_open: bool,
+-    pub(crate) branch_query: String,
+     pub(crate) files_as_tree: bool,
+     pub(crate) agent_models: Vec<String>,
+     pub(crate) agent_models_error: Option<String>,
+     pub(crate) agent_busy: bool,
+     pub(crate) terminal: crate::terminal::Transcript,
+@@ -126,12 +136,13 @@ pub(crate) enum Message {
+     /// Show the native folder dialog.
+     ChooseRepositoryFolder,
+     PaneResized(pane_grid::ResizeEvent),
+     SetLayout(LayoutPreset),
+     ToggleFilesRail,
++    /// Collapse or expand one Explorer accordion section for the active session.
++    ToggleExplorerSection(crate::session::ExplorerSection),
+     ToggleBranchList,
+-    BranchQueryChanged(String),
+     ChooseBranch(String),
+     ShowWorkingTree,
+     FocusFile {
+         path: String,
+         place: FileDisposition,
+@@ -158,10 +169,13 @@ pub(crate) enum Message {
+     ClearError,
+     /// Expand or collapse the status-bar error detail.
+     ToggleErrorDetail,
+     /// Cycle Columns ΓåÆ InspectorOverDiff ΓåÆ Stacked.
+     CycleLayout,
++    SetHunkMode(HunkMode),
++    /// Beside Γåö Wide (Focus is explicit via [`Message::SetHunkMode`]).
++    CycleHunkMode,
+     /// Escape: dismiss prompts, errors, overlays, then clear diff focus.
+     Escape,
+     StageMarked,
+     UnstageMarked,
+     /// `None` means the dialog was cancelled.
+@@ -390,11 +404,11 @@ impl GitApp {
+             )],
+             _ => Vec::new(),
+         };
+         let layout = LayoutPreset::DEFAULT;
+         let ratios = layout::default_ratios();
+-        let panes = layout::new_panes(layout, &ratios[layout.index()]);
++        let panes = layout::new_panes(layout, &ratios[layout.index()], true, true);
+         let split_slots = layout::split_slots(&panes);
+         Self {
+             sessions,
+             active: 0,
+             worktree_catalogue: Vec::new(),
+@@ -413,12 +427,14 @@ impl GitApp {
+             panes,
+             layout,
+             ratios,
+             split_slots,
+             files_rail_open: true,
++            inspector_open: true,
++            hunk_mode: HunkMode::Beside,
++            focus_restore: None,
+             branch_list_open: false,
+-            branch_query: String::new(),
+             files_as_tree: true,
+             agent_models: Vec::new(),
+             agent_models_error: None,
+             agent_busy: false,
+             terminal: crate::terminal::Transcript::new(),
+@@ -481,11 +497,10 @@ impl GitApp {
+     /// Modal prompts and pop-overs are global; clear them so a tab change never carries one across.
+     fn reset_transient_ui(&mut self) {
+         self.close_prompts();
+         self.tab_picker_open = false;
+         self.branch_list_open = false;
+-        self.branch_query.clear();
+         self.context_menu = None;
+         self.confirm_detach = None;
+     }
+ 
+     #[cfg(test)]
+@@ -494,19 +509,62 @@ impl GitApp {
+             .map(|session| session.path.clone())
+             .unwrap_or_default()
+     }
+ 
+     fn install_layout(&mut self) {
+-        let ratios = self.ratios[self.layout.index()];
+-        self.panes = if self.files_rail_open {
+-            layout::new_panes(self.layout, &ratios)
+-        } else {
+-            layout::new_panes_without_files(self.layout, &ratios)
+-        };
++        let base = self.ratios[self.layout.index()];
++        let ratios = base.for_hunk_mode(self.hunk_mode);
++        self.panes = layout::new_panes(
++            self.layout,
++            &ratios,
++            self.files_rail_open,
++            self.inspector_open,
++        );
+         self.split_slots = layout::split_slots(&self.panes);
+     }
+ 
++    fn apply_hunk_mode(&mut self, mode: HunkMode) {
++        if mode == HunkMode::Focus {
++            if self.hunk_mode != HunkMode::Focus {
++                self.focus_restore = Some(FocusRestore {
++                    files_rail_open: self.files_rail_open,
++                    inspector_open: self.inspector_open,
++                    hunk_mode: self.hunk_mode,
++                });
++                self.files_rail_open = false;
++                self.inspector_open = false;
++            }
++            self.hunk_mode = HunkMode::Focus;
++        } else {
++            if self.hunk_mode == HunkMode::Focus {
++                if let Some(restore) = self.focus_restore.take() {
++                    self.files_rail_open = restore.files_rail_open;
++                    self.inspector_open = restore.inspector_open;
++                }
++            }
++            self.hunk_mode = mode;
++        }
++        self.install_layout();
++    }
++
++    fn restore_focus_mode(&mut self) -> bool {
++        if self.hunk_mode != HunkMode::Focus {
++            return false;
++        }
++        if let Some(restore) = self.focus_restore.take() {
++            self.files_rail_open = restore.files_rail_open;
++            self.inspector_open = restore.inspector_open;
++            self.hunk_mode = restore.hunk_mode;
++        } else {
++            self.files_rail_open = true;
++            self.inspector_open = true;
++            self.hunk_mode = HunkMode::Beside;
++        }
++        self.install_layout();
++        true
++    }
++
+     fn start_patch(&mut self) -> Task<Message> {
+         let Some(session) = self.active_session_mut() else {
+             return Task::none();
+         };
+         session.diff_lines_limit = DIFF_LINES_PER_PAGE;
+@@ -824,10 +882,23 @@ impl GitApp {
+             }
+             Message::CycleLayout => {
+                 let next = self.layout.next();
+                 self.update(Message::SetLayout(next))
+             }
++            Message::SetHunkMode(mode) => {
++                self.apply_hunk_mode(mode);
++                Task::none()
++            }
++            Message::CycleHunkMode => {
++                let next = if self.hunk_mode == HunkMode::Focus {
++                    HunkMode::Beside
++                } else {
++                    self.hunk_mode.cycle()
++                };
++                self.apply_hunk_mode(next);
++                Task::none()
++            }
+             Message::Escape => self.handle_escape(),
+             Message::StageMarked => self.edit_marked(true),
+             Message::UnstageMarked => self.edit_marked(false),
+             Message::CheckoutBranch(branch) => {
+                 let Some(path) = self.active_session().map(|session| session.path.clone()) else {
+@@ -968,24 +1039,25 @@ impl GitApp {
+             Message::ToggleFilesRail => {
+                 self.files_rail_open = !self.files_rail_open;
+                 self.install_layout();
+                 Task::none()
+             }
+-            Message::ToggleBranchList => {
+-                self.branch_list_open = !self.branch_list_open;
+-                if !self.branch_list_open {
+-                    self.branch_query.clear();
+-                }
++            Message::ToggleExplorerSection(section) => {
++                self.session_mut().toggle_explorer(section);
+                 Task::none()
+             }
+-            Message::BranchQueryChanged(query) => {
+-                self.branch_query = query;
++            Message::ToggleBranchList => {
++                // Legacy dropdown was removed with the left Changes rail; the chip
++                // now reveals LOCAL branches in the Explorer accordion.
++                self.files_rail_open = true;
++                self.branch_list_open = false;
++                self.session_mut().explorer_collapsed.local = false;
++                self.install_layout();
+                 Task::none()
+             }
+             Message::ChooseBranch(name) => {
+                 self.branch_list_open = false;
+-                self.branch_query.clear();
+                 let Some(session) = self.active_session() else {
+                     return Task::none();
+                 };
+                 let current = session
+                     .state
+@@ -1153,11 +1225,10 @@ impl GitApp {
+                 self.error = Some(error_message(&error));
+                 Task::none()
+             }
+             Message::Select(selection) => {
+                 self.branch_list_open = false;
+-                self.branch_query.clear();
+                 self.confirm_discard = None;
+                 self.confirm_drop = None;
+                 self.branch_prompt = None;
+                 if let Some(session) = self.active_session_mut() {
+                     session.selection = Some(selection);
+@@ -2433,10 +2504,13 @@ impl GitApp {
+             return self.update(Message::CancelDetach);
+         }
+         if self.context_menu.is_some() {
+             return self.update(Message::CloseContextMenu);
+         }
++        if self.restore_focus_mode() {
++            return Task::none();
++        }
+         if self.tip_hover.is_some() || self.tip_ready_key.is_some() {
+             self.tip_hover = None;
+             self.tip_ready_key = None;
+             return Task::none();
+         }
+@@ -2462,11 +2536,10 @@ impl GitApp {
+             self.tab_picker_open = false;
+             return Task::none();
+         }
+         if self.branch_list_open {
+             self.branch_list_open = false;
+-            self.branch_query.clear();
+             return Task::none();
+         }
+         if self.error.is_some() {
+             return self.update(Message::ClearError);
+         }
+@@ -2495,10 +2568,15 @@ fn shortcut_message(
+         Key::Character(c)
+             if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("l") =>
+         {
+             Some(Message::CycleLayout)
+         }
++        Key::Character(c)
++            if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("h") =>
++        {
++            Some(Message::CycleHunkMode)
++        }
+         Key::Character(c)
+             if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("r") =>
+         {
+             Some(Message::RefreshRepository)
+         }
+@@ -2913,10 +2991,69 @@ mod tests {
+             &[WorkspacePane::Inspector],
+         );
+         assert_eq!(graph_ratio, layout::MIN_GRAPH_RATIO);
+     }
+ 
++    #[test]
++    fn enter_focus_remembers_rails_and_escape_restores() {
++        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
++        assert!(app.files_rail_open);
++        assert!(app.inspector_open);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++
++        let _ = app.update(Message::SetHunkMode(HunkMode::Focus));
++        assert_eq!(app.hunk_mode, HunkMode::Focus);
++        assert!(!app.files_rail_open);
++        assert!(!app.inspector_open);
++        assert!(splits_of(&app.panes)
++            .iter()
++            .all(|split| !split.left.contains(&WorkspacePane::Inspector)
++                && !split.right.contains(&WorkspacePane::Inspector)
++                && !split.left.contains(&WorkspacePane::Files)
++                && !split.right.contains(&WorkspacePane::Files)));
++
++        let _ = app.update(Message::Escape);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        assert!(app.files_rail_open);
++        assert!(app.inspector_open);
++    }
++
++    #[test]
++    fn cycle_hunk_mode_skips_focus() {
++        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        let _ = app.update(Message::CycleHunkMode);
++        assert_eq!(app.hunk_mode, HunkMode::Wide);
++        let _ = app.update(Message::CycleHunkMode);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        let _ = app.update(Message::SetHunkMode(HunkMode::Focus));
++        assert_eq!(app.hunk_mode, HunkMode::Focus);
++        let _ = app.update(Message::CycleHunkMode);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        assert!(app.files_rail_open);
++    }
++
++    #[test]
++    fn wide_mode_expands_the_diff_split() {
++        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
++        let (_, beside_middle, _) = split_between(
++            &app.panes,
++            &[WorkspacePane::Graph],
++            &[WorkspacePane::Diff],
++        );
++        let _ = app.update(Message::SetHunkMode(HunkMode::Wide));
++        assert_eq!(app.hunk_mode, HunkMode::Wide);
++        assert!(app.files_rail_open);
++        assert!(app.inspector_open);
++        let (_, wide_middle, _) = split_between(
++            &app.panes,
++            &[WorkspacePane::Graph],
++            &[WorkspacePane::Diff],
++        );
++        assert!(wide_middle < beside_middle);
++    }
++
+     #[test]
+     fn toggling_the_files_rail_hides_and_restores_it() {
+         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+         app.ratios[LayoutPreset::InspectorOverDiff.index()].files = 0.30;
+         assert!(app.files_rail_open);
+@@ -2983,16 +3120,14 @@ mod tests {
+     #[test]
+     fn choosing_another_branch_checks_it_out() {
+         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+         app.session_mut().state.branches = vec![branch("dev", true), branch("feature", false)];
+         app.branch_list_open = true;
+-        app.branch_query = "feat".to_string();
+ 
+         let _ = app.update(Message::ChooseBranch("feature".to_string()));
+ 
+         assert!(!app.branch_list_open);
+-        assert!(app.branch_query.is_empty());
+         assert!(app.session_mut().state.loading);
+         assert_eq!(
+             app.session_mut().selection,
+             Some(Selection::Branch {
+                 name: "feature".to_string(),
+diff --git a/gui_app/src/layout.rs b/gui_app/src/layout.rs
+index 45101d9..8a488ad 100644
+--- a/gui_app/src/layout.rs
++++ b/gui_app/src/layout.rs
+@@ -18,10 +18,33 @@ pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.50;
+ pub(crate) const MIN_FILES_RATIO: f32 = 0.16;
+ pub(crate) const MAX_FILES_RATIO: f32 = 0.36;
+ /// Floor for the middle history share of the post-staging remainder.
+ pub(crate) const MIN_GRAPH_RATIO: f32 = 0.50;
+ pub(crate) const MAX_GRAPH_RATIO: f32 = 0.82;
++/// Centre column share (Graph+Diff vs Inspector) when [`HunkMode::Wide`] is active.
++pub(crate) const WIDE_GRAPH_RATIO: f32 = 0.78;
++/// Graph share of the Graph/Diff stack when Wide is active (more room for Diff).
++pub(crate) const WIDE_MIDDLE_RATIO: f32 = 0.36;
++
++/// Diff presentation relative to the graph and side rails.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub(crate) enum HunkMode {
++    #[default]
++    Beside,
++    Wide,
++    Focus,
++}
++
++impl HunkMode {
++    /// Toolbar cycle: Beside Γåö Wide (Focus is explicit only).
++    pub(crate) fn cycle(self) -> Self {
++        match self {
++            Self::Beside => Self::Wide,
++            Self::Wide | Self::Focus => Self::Beside,
++        }
++    }
++}
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum WorkspacePane {
+     Graph,
+     Inspector,
+@@ -83,10 +106,21 @@ impl LayoutRatios {
+                 LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => STACKED_MIDDLE_RATIO,
+             },
+         }
+     }
+ 
++    pub(crate) fn for_hunk_mode(self, mode: HunkMode) -> Self {
++        match mode {
++            HunkMode::Beside | HunkMode::Focus => self,
++            HunkMode::Wide => Self {
++                graph: self.graph.clamp(WIDE_GRAPH_RATIO, MAX_GRAPH_RATIO),
++                middle: self.middle.min(WIDE_MIDDLE_RATIO),
++                files: self.files,
++            },
++        }
++    }
++
+     pub(crate) fn clamp_slot(&mut self, slot: RatioSlot, ratio: f32) {
+         match slot {
+             RatioSlot::Files => {
+                 self.files = ratio.clamp(MIN_FILES_RATIO, MAX_FILES_RATIO);
+             }
+@@ -114,41 +148,50 @@ pub(crate) enum RatioSlot {
+     Graph,
+     Middle,
+     Files,
+ }
+ 
+-pub(crate) fn new_panes(preset: LayoutPreset, ratios: &LayoutRatios) -> State<WorkspacePane> {
+-    State::with_configuration(configuration(preset, ratios, true))
+-}
+-
+-/// The same tree as [`new_panes`] without the staging column.
+-pub(crate) fn new_panes_without_files(
++pub(crate) fn new_panes(
+     preset: LayoutPreset,
+     ratios: &LayoutRatios,
++    show_files: bool,
++    show_inspector: bool,
+ ) -> State<WorkspacePane> {
+-    State::with_configuration(configuration(preset, ratios, false))
++    State::with_configuration(configuration(
++        preset,
++        ratios,
++        show_files,
++        show_inspector,
++    ))
+ }
+ 
+-/// Split handles produced by the latest [`new_panes`] or [`new_panes_without_files`].
++/// Split handles produced by the latest [`new_panes`] call.
+ pub(crate) fn split_slots(state: &State<WorkspacePane>) -> Vec<(Split, RatioSlot)> {
+     let mut slots = Vec::new();
+     collect_slots(state.layout(), state, &mut slots);
+     slots
+ }
+ 
+ fn configuration(
+     preset: LayoutPreset,
+     ratios: &LayoutRatios,
+-    files: bool,
++    show_files: bool,
++    show_inspector: bool,
+ ) -> Configuration<WorkspacePane> {
+     let history = match preset {
+-        LayoutPreset::Columns => split(
+-            Axis::Vertical,
+-            ratios.middle,
+-            Configuration::Pane(WorkspacePane::Diff),
+-            Configuration::Pane(WorkspacePane::Inspector),
+-        ),
++        LayoutPreset::Columns => {
++            if show_inspector {
++                split(
++                    Axis::Vertical,
++                    ratios.middle,
++                    Configuration::Pane(WorkspacePane::Diff),
++                    Configuration::Pane(WorkspacePane::Inspector),
++                )
++            } else {
++                Configuration::Pane(WorkspacePane::Diff)
++            }
++        }
+         LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+             middle_axis(preset),
+             ratios.middle,
+             Configuration::Pane(WorkspacePane::Graph),
+             Configuration::Pane(WorkspacePane::Diff),
+@@ -160,19 +203,25 @@ fn configuration(
+             Axis::Vertical,
+             ratios.graph,
+             Configuration::Pane(WorkspacePane::Graph),
+             history,
+         ),
+-        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+-            outer_axis(preset),
+-            ratios.graph,
+-            history,
+-            Configuration::Pane(WorkspacePane::Inspector),
+-        ),
++        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => {
++            if show_inspector {
++                split(
++                    outer_axis(preset),
++                    ratios.graph,
++                    history,
++                    Configuration::Pane(WorkspacePane::Inspector),
++                )
++            } else {
++                history
++            }
++        }
+     };
+ 
+-    if files {
++    if show_files {
+         split(
+             outer_axis(preset),
+             ratios.files,
+             Configuration::Pane(WorkspacePane::Files),
+             centre,
+diff --git a/gui_app/src/session.rs b/gui_app/src/session.rs
+index b593f0f..b7fb517 100644
+--- a/gui_app/src/session.rs
++++ b/gui_app/src/session.rs
+@@ -38,10 +38,33 @@ pub(crate) fn basename(path: &str) -> &str {
+         .next()
+         .filter(|name| !name.is_empty())
+         .unwrap_or(path)
+ }
+ 
++/// Which accordion section the user can collapse in the Explorer rail.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum ExplorerSection {
++    Local,
++    Remote,
++    Worktrees,
++    Stashes,
++    Tags,
++}
++
++/// Collapsed state for each Explorer accordion section.
++///
++/// All fields default to `false` (open), matching the spec requirement that every
++/// section starts visible.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub(crate) struct ExplorerCollapsed {
++    pub local: bool,
++    pub remote: bool,
++    pub worktrees: bool,
++    pub stashes: bool,
++    pub tags: bool,
++}
++
+ /// Everything bound to one open worktree path.
+ pub(crate) struct WorktreeSession {
+     /// Absolute working directory this session opened.
+     pub(crate) path: String,
+     pub(crate) adapter: SharedRepository,
+@@ -63,10 +86,12 @@ pub(crate) struct WorktreeSession {
+     pub(crate) diff_lines_limit: usize,
+     /// After a successful create, check out this local branch name in this session.
+     pub(crate) pending_checkout: Option<String>,
+     /// When true, the history graph shows only commits reachable from this session's HEAD.
+     pub(crate) focus_current_branch: bool,
++    /// Which Explorer accordion sections are currently collapsed.
++    pub(crate) explorer_collapsed: ExplorerCollapsed,
+ }
+ 
+ impl WorktreeSession {
+     /// Build a fresh session for `path`, seeding its state with the current settings.
+     pub(crate) fn new(path: String, adapter: SharedRepository, settings: AppSettings) -> Self {
+@@ -87,10 +112,11 @@ impl WorktreeSession {
+             patch_generation: 0,
+             focused_diff_path: None,
+             diff_lines_limit: DIFF_LINES_PER_PAGE,
+             pending_checkout: None,
+             focus_current_branch: false,
++            explorer_collapsed: ExplorerCollapsed::default(),
+         }
+     }
+ 
+     /// The query the diff pane should load for the current selection, or `None` when the
+     /// selection draws no patch (a branch, remote, or non-file row).
+@@ -200,10 +226,31 @@ impl WorktreeSession {
+ 
+     pub(crate) fn commit_loaded(&self, id: &str) -> bool {
+         self.state.commits.iter().any(|commit| commit.id == id)
+     }
+ 
++    /// Flip the collapsed flag for one Explorer accordion section.
++    pub(crate) fn toggle_explorer(&mut self, section: ExplorerSection) {
++        match section {
++            ExplorerSection::Local => {
++                self.explorer_collapsed.local = !self.explorer_collapsed.local;
++            }
++            ExplorerSection::Remote => {
++                self.explorer_collapsed.remote = !self.explorer_collapsed.remote;
++            }
++            ExplorerSection::Worktrees => {
++                self.explorer_collapsed.worktrees = !self.explorer_collapsed.worktrees;
++            }
++            ExplorerSection::Stashes => {
++                self.explorer_collapsed.stashes = !self.explorer_collapsed.stashes;
++            }
++            ExplorerSection::Tags => {
++                self.explorer_collapsed.tags = !self.explorer_collapsed.tags;
++            }
++        }
++    }
++
+     #[cfg(test)]
+     pub(crate) fn test_stub() -> Self {
+         use std::sync::Arc;
+         Self::new(
+             r"D:\repo".to_string(),
+@@ -245,10 +292,36 @@ mod tests {
+     use super::*;
+     use crate::changes::MarkedFile;
+     use crate::selection::Selection;
+     use core_domain::{FileDisposition, WorktreeTabRetention};
+ 
++    #[test]
++    fn explorer_collapsed_defaults_open_except_optional() {
++        let session = WorktreeSession::test_stub();
++        assert!(!session.explorer_collapsed.local);
++        assert!(!session.explorer_collapsed.remote);
++        assert!(!session.explorer_collapsed.worktrees);
++        assert!(!session.explorer_collapsed.stashes);
++        assert!(!session.explorer_collapsed.tags);
++    }
++
++    #[test]
++    fn toggle_explorer_section_flips_one_flag() {
++        let mut session = WorktreeSession::test_stub();
++        session.toggle_explorer(ExplorerSection::Stashes);
++        assert!(session.explorer_collapsed.stashes);
++        assert!(!session.explorer_collapsed.local);
++    }
++
++    #[test]
++    fn toggle_explorer_section_twice_restores_open() {
++        let mut session = WorktreeSession::test_stub();
++        session.toggle_explorer(ExplorerSection::Tags);
++        session.toggle_explorer(ExplorerSection::Tags);
++        assert!(!session.explorer_collapsed.tags);
++    }
++
+     fn dirty_session() -> WorktreeSession {
+         let mut session = WorktreeSession::test_stub();
+         session.commit_message = "wip".into();
+         session.marked_files = vec![MarkedFile {
+             path: "a.rs".into(),
+diff --git a/gui_app/src/theme.rs b/gui_app/src/theme.rs
+index 93b35cf..517c70b 100644
+--- a/gui_app/src/theme.rs
++++ b/gui_app/src/theme.rs
+@@ -1,9 +1,9 @@
+ use iced::Color;
+ 
+-/// Tint behind an added or removed diff line. The wireframe uses 12%.
+-const DIFF_TINT: f32 = 0.12;
++/// Tint behind an added or removed diff line. The wireframe uses 22%.
++const DIFF_TINT: f32 = 0.22;
+ 
+ #[derive(Debug, Clone, Copy)]
+ pub(crate) struct DesignTokens {
+     pub bg_app: Color,
+     pub bg_sidebar: Color,
+diff --git a/gui_app/src/view/changes.rs b/gui_app/src/view/changes.rs
+index 1b2a6f4..88b1349 100644
+--- a/gui_app/src/view/changes.rs
++++ b/gui_app/src/view/changes.rs
+@@ -1,36 +1,70 @@
+ use std::collections::HashSet;
+ 
+ use crate::app::{GitApp, Message};
+-use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow};
++use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow, ChangeSection};
+ use crate::selection::Selection;
+ use crate::theme::DesignTokens;
+ use core_domain::FileDisposition;
+ use iced::widget::button::Status;
+ use iced::widget::text::Wrapping;
+-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
++use iced::widget::{button, column, container, row, text, text_input};
++use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
+ 
+-use super::chrome::{
+-    field_style, fold_mark, glyph, icon_button, panel_style, section_label, Reading,
+-};
++use super::chrome::{field_style, fold_mark, glyph, icon_button, Reading};
+ 
+ /// Rows drawn per section. Each row is two buttons, so a huge untracked set would stall layout.
+ /// "Select all" still covers every file; only the drawing is bounded.
+ const FILE_ROWS_SHOWN: usize = 500;
+ 
+-pub(super) fn changes_pane<'a>(
++/// Working-tree staging for the right files navigator (no left-rail chrome).
++pub(crate) fn wip_working_tree_block<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let status = app.session().state.current_status.as_ref();
++    let file_count = status
++        .map(|status| {
++            change_sections(status)
++                .iter()
++                .map(|section| section.files.len())
++                .sum::<usize>()
++        })
++        .unwrap_or(0);
++    let title = if file_count == 0 {
++        "Working tree".to_string()
++    } else if file_count == 1 {
++        "Working tree ┬╖ 1 file".to_string()
++    } else {
++        format!("Working tree ┬╖ {file_count} files")
++    };
++
++    let mut changes = column![text(title)
++        .font(reading.font)
++        .size((reading.size - 2.0).max(11.0))
++        .style(move |_| text::Style {
++            color: Some(tokens.text_muted),
++        })]
++    .spacing(4)
++    .padding([6, 12]);
++    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
++    changes = changes.push(wip_file_sections(app, selection, status, tokens, reading));
++    changes.into()
++}
++
++fn wip_toolbar<'a>(
+     app: &'a GitApp,
+     selection: &Selection,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     let stageable = !marked_paths(&app.session().marked_files, true).is_empty();
+     let unstageable = !marked_paths(&app.session().marked_files, false).is_empty();
+     let chosen = app.session().marked_files.len();
+-    let mut changes = column![
+-        section_label(tokens, reading, "Changes"),
++    column![
+         row![
+             text_input("Commit message", &app.session().commit_message)
+                 .on_input(Message::CommitMessageChanged)
+                 .padding(6)
+                 .width(Length::Fill)
+@@ -137,82 +171,96 @@ pub(super) fn changes_pane<'a>(
+         .style(move |_| text::Style {
+             color: Some(tokens.text_muted),
+         }),
+     ]
+     .spacing(4)
+-    .padding(6);
++    .into()
++}
+ 
+-    match &app.session().state.current_status {
++fn wip_file_sections<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    status: Option<&core_domain::RepoStatus>,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut sections_col = column![].spacing(4);
++    match status {
+         None => {
+-            changes = changes.push(
++            sections_col = sections_col.push(
+                 text("Not loaded yet")
+                     .font(reading.font)
+                     .size(reading.size)
+                     .style(move |_| text::Style {
+                         color: Some(tokens.text_muted),
+                     }),
+-            )
++            );
+         }
+         Some(status) => {
+             let sections = change_sections(status);
+             if sections.is_empty() {
+-                changes = changes.push(
++                sections_col = sections_col.push(
+                     text("Working tree clean")
+                         .font(reading.font)
+                         .size(reading.size)
+                         .style(move |_| text::Style {
+                             color: Some(tokens.text_muted),
+                         }),
+                 );
+             }
+             for section in sections {
+-                let folded = app.session().collapsed_sections.contains(&section.place);
+-                let mut files = column![section_header(
+-                    section.title,
+-                    section.files.len(),
+-                    folded,
+-                    section.place,
+-                    tokens,
+-                    reading,
+-                )]
+-                .spacing(0);
+-                if !folded {
+-                    let collapsed = collapsed_prefixes(app, section.place);
+-                    let rows =
+-                        change_rows(section.files, section.place, app.files_as_tree, &collapsed);
+-                    let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
+-                    for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
+-                        files = files.push(change_line(
+-                            row_item,
+-                            section.place,
+-                            app,
+-                            selection,
+-                            tokens,
+-                            reading,
+-                        ));
+-                    }
+-                    if hidden > 0 {
+-                        files = files.push(
+-                            text(format!("ΓÇª and {hidden} more"))
+-                                .font(reading.font)
+-                                .size((reading.size - 2.0).max(11.0))
+-                                .style(move |_| text::Style {
+-                                    color: Some(tokens.text_muted),
+-                                }),
+-                        );
+-                    }
+-                }
+-                changes = changes.push(files);
++                sections_col =
++                    sections_col.push(section_block(app, selection, section, tokens, reading));
+             }
+         }
+     }
++    sections_col.into()
++}
+ 
+-    container(scrollable(changes))
+-        .width(Length::Fill)
+-        .height(Length::Fill)
+-        .style(move |_theme: &Theme| panel_style(tokens, true))
+-        .into()
++fn section_block<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    section: ChangeSection<'_>,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let folded = app.session().collapsed_sections.contains(&section.place);
++    let mut files = column![section_header(
++        section.title,
++        section.files.len(),
++        folded,
++        section.place,
++        tokens,
++        reading,
++    )]
++    .spacing(0);
++    if !folded {
++        let collapsed = collapsed_prefixes(app, section.place);
++        let rows = change_rows(section.files, section.place, app.files_as_tree, &collapsed);
++        let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
++        for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
++            files = files.push(change_line(
++                row_item,
++                section.place,
++                app,
++                selection,
++                tokens,
++                reading,
++            ));
++        }
++        if hidden > 0 {
++            files = files.push(
++                text(format!("ΓÇª and {hidden} more"))
++                    .font(reading.font)
++                    .size((reading.size - 2.0).max(11.0))
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            );
++        }
++    }
++    files.into()
+ }
+ 
+ fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {
+     app.session().collapsed_dirs
+         .iter()
+diff --git a/gui_app/src/view/chrome.rs b/gui_app/src/view/chrome.rs
+index c461157..ee51d9f 100644
+--- a/gui_app/src/view/chrome.rs
++++ b/gui_app/src/view/chrome.rs
+@@ -158,24 +158,10 @@ pub(super) fn branch_chip<'a>(
+         }
+     })
+     .into()
+ }
+ 
+-pub(super) fn section_label<'a>(
+-    tokens: DesignTokens,
+-    reading: Reading,
+-    title: &'static str,
+-) -> Element<'a, Message> {
+-    text(title)
+-        .font(reading.font)
+-        .size((reading.size - 2.0).max(11.0))
+-        .style(move |_| text::Style {
+-            color: Some(tokens.text_muted),
+-        })
+-        .into()
+-}
+-
+ pub(super) fn panel_style(tokens: DesignTokens, ruled: bool) -> container::Style {
+     container::Style {
+         background: Some(Background::Color(if ruled {
+             tokens.bg_sidebar
+         } else {
+@@ -269,10 +255,11 @@ pub(super) fn command_button<'a>(
+ 
+ /// Compact symbol control for working-area toolbars.
+ ///
+ /// Always wraps in `tooltip` so the hover target is never remounted when the
+ /// two-second tip becomes ready (that remount was clearing hover and flickering).
++#[allow(clippy::too_many_arguments)]
+ pub(super) fn icon_button<'a>(
+     mark: &'static str,
+     title: impl Into<String>,
+     tip_key: impl Into<String>,
+     tip_ready: bool,
+diff --git a/gui_app/src/view/explorer.rs b/gui_app/src/view/explorer.rs
+new file mode 100644
+index 0000000..65b43d1
+--- /dev/null
++++ b/gui_app/src/view/explorer.rs
+@@ -0,0 +1,509 @@
++//! Left-rail Explorer accordion: LOCAL / REMOTE / WORKTREES / STASHES / TAGS.
++//!
++//! Each section has a clickable header that collapses its body. The collapsed state
++//! lives on `WorktreeSession::explorer_collapsed` (pure, reducer-safe).
++
++use crate::app::{GitApp, Message};
++use crate::context_menu::ContextTarget;
++use crate::session::{basename, same_path, ExplorerSection};
++use crate::theme::DesignTokens;
++use core_domain::{Branch, Stash, Tag, Worktree};
++use iced::widget::button::Status;
++use iced::widget::scrollable::{Direction, Scrollbar};
++use iced::widget::text::Wrapping;
++use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
++use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
++
++use super::chrome::{
++    glyph, hairline, icon_button, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED, FOLD_OPEN,
++    REMOTE_MARK, STASH_MARK, TAG_MARK,
++};
++
++const HEAD_PADDING_Y: f32 = 4.0;
++const HEAD_PADDING_X: f32 = 8.0;
++const OPEN_MARK: &str = "ΓùÅ";
++const DETACHED: &str = "(detached)";
++
++/// The full Explorer accordion pane for the left files rail.
++pub(super) fn explorer_pane<'a>(
++    app: &'a GitApp,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let session = app.session();
++    let collapsed = &session.explorer_collapsed;
++
++    let branches = &session.state.branches;
++    let stashes = &session.state.stashes;
++    let tags = &session.state.tags;
++
++    let locals: Vec<&Branch> = branches.iter().filter(|b| !b.is_remote).collect();
++    let remotes: Vec<&Branch> = branches.iter().filter(|b| b.is_remote).collect();
++    let worktrees = &app.worktree_catalogue;
++
++    column![
++        section_block(
++            "LOCAL",
++            locals.len(),
++            ExplorerSection::Local,
++            collapsed.local,
++            (!collapsed.local).then(|| local_rows(&locals, tokens, reading)),
++            tokens,
++            reading,
++        ),
++        hairline(tokens),
++        section_block(
++            "REMOTE",
++            remotes.len(),
++            ExplorerSection::Remote,
++            collapsed.remote,
++            (!collapsed.remote).then(|| remote_rows(&remotes, tokens, reading)),
++            tokens,
++            reading,
++        ),
++        hairline(tokens),
++        section_block(
++            "WORKTREES",
++            worktrees.len(),
++            ExplorerSection::Worktrees,
++            collapsed.worktrees,
++            (!collapsed.worktrees).then(|| worktrees_rows(app, worktrees, tokens, reading)),
++            tokens,
++            reading,
++        ),
++        hairline(tokens),
++        section_block(
++            "STASHES",
++            stashes.len(),
++            ExplorerSection::Stashes,
++            collapsed.stashes,
++            (!collapsed.stashes).then(|| stash_rows(stashes, tokens, reading)),
++            tokens,
++            reading,
++        ),
++        hairline(tokens),
++        section_block(
++            "TAGS",
++            tags.len(),
++            ExplorerSection::Tags,
++            collapsed.tags,
++            (!collapsed.tags).then(|| tag_rows(tags, tokens, reading)),
++            tokens,
++            reading,
++        ),
++    ]
++    .width(Length::Fill)
++    .height(Length::Fill)
++    .into()
++}
++
++/// One collapsible accordion block: header + optional body (body omitted when collapsed).
++fn section_block<'a>(
++    title: &'static str,
++    count: usize,
++    section: ExplorerSection,
++    collapsed: bool,
++    body: Option<Element<'a, Message>>,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let chevron = if collapsed { FOLD_CLOSED } else { FOLD_OPEN };
++    let header_label = format!("{title} ┬╖ {count}");
++    let sym = symbol_reading(&reading);
++    let header = button(
++        row![
++            text(chevron).font(sym.font).size(reading.size),
++            text(header_label)
++                .font(reading.font)
++                .size((reading.size - 1.0).max(11.0))
++                .style(move |_| iced::widget::text::Style {
++                    color: Some(tokens.text_muted),
++                }),
++        ]
++        .spacing(4)
++        .align_y(Alignment::Center),
++    )
++    .padding([HEAD_PADDING_Y, HEAD_PADDING_X])
++    .width(Length::Fill)
++    .on_press(Message::ToggleExplorerSection(section))
++    .style(move |_theme, status| {
++        let hot = matches!(status, Status::Hovered | Status::Pressed);
++        iced::widget::button::Style {
++            background: Some(Background::Color(if hot {
++                tokens.border
++            } else {
++                Color::TRANSPARENT
++            })),
++            text_color: tokens.text_muted,
++            border: Border::default(),
++            shadow: Shadow::default(),
++        }
++    });
++
++    let mut block = column![header].width(Length::Fill);
++    if let Some(body) = body {
++        debug_assert!(!collapsed);
++        block = block.push(body);
++    }
++    block.into()
++}
++
++// ΓöÇΓöÇ LOCAL ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++fn local_rows<'a>(
++    locals: &[&Branch],
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut rows = column![].spacing(2).padding([4, 8]);
++    for branch in locals {
++        let selected = branch.is_head;
++        rows = rows.push(branch_row(
++            BRANCH_MARK,
++            branch.name.clone(),
++            Message::ChooseBranch(branch.name.clone()),
++            selected,
++            branch.is_head,
++            Some(ContextTarget::LocalBranch {
++                name: branch.name.clone(),
++                tip: branch.tip.clone(),
++            }),
++            tokens,
++            reading,
++        ));
++    }
++    if locals.is_empty() {
++        rows = rows.push(empty_hint("No local branches", tokens, reading));
++    }
++    rows.into()
++}
++
++// ΓöÇΓöÇ REMOTE ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++fn remote_rows<'a>(
++    remotes: &[&Branch],
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut rows = column![].spacing(2).padding([4, 8]);
++    for branch in remotes {
++        let selected = false;
++        rows = rows.push(branch_row(
++            REMOTE_MARK,
++            branch.name.clone(),
++            Message::Select(crate::selection::Selection::Remote {
++                name: branch.name.clone(),
++            }),
++            selected,
++            false,
++            None,
++            tokens,
++            reading,
++        ));
++    }
++    if remotes.is_empty() {
++        rows = rows.push(empty_hint("No remote branches", tokens, reading));
++    }
++    rows.into()
++}
++
++// ΓöÇΓöÇ WORKTREES ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++fn worktrees_rows<'a>(
++    app: &'a GitApp,
++    worktrees: &'a [Worktree],
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut rows = column![].spacing(2);
++    if worktrees.is_empty() {
++        rows = rows.push(
++            container(empty_hint("No worktrees loaded.", tokens, reading)).padding([4, 8]),
++        );
++    }
++    for entry in worktrees {
++        rows = rows.push(worktree_row(app, entry, tokens, reading));
++    }
++    // Embedded scrollbar so it takes layout space and does not cover buttons.
++    let list = scrollable(rows).direction(Direction::Vertical(
++        Scrollbar::new().width(8).scroller_width(8).spacing(6),
++    ));
++    container(list).max_height(160.0).width(Length::Fill).into()
++}
++
++fn worktree_row<'a>(
++    app: &'a GitApp,
++    entry: &'a Worktree,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let open = app
++        .sessions
++        .iter()
++        .any(|session| same_path(&session.path, &entry.path));
++    let active = app
++        .sessions
++        .get(app.active)
++        .is_some_and(|session| same_path(&session.path, &entry.path));
++    let branch = if entry.branch.is_empty() {
++        DETACHED.to_string()
++    } else {
++        entry.branch.clone()
++    };
++
++    let mut name_row = row![text(basename(&entry.path).to_string())
++        .font(reading.font)
++        .size(reading.size)
++        .wrapping(Wrapping::None)
++        .style(move |_| iced::widget::text::Style {
++            color: Some(if open {
++                tokens.text_primary
++            } else {
++                tokens.text_secondary
++            }),
++        })]
++    .spacing(6)
++    .align_y(Alignment::Center);
++
++    if entry.is_main {
++        name_row = name_row.push(wt_tag("main", tokens, reading));
++    }
++    if entry.locked {
++        name_row = name_row.push(wt_tag("locked", tokens, reading));
++    }
++
++    let marker: Element<'a, Message> = glyph(
++        OPEN_MARK,
++        (reading.size - 4.0).max(7.0),
++        if open {
++            tokens.accent_primary
++        } else {
++            Color::TRANSPARENT
++        },
++        &reading,
++    );
++
++    let body = button(
++        row![
++            marker,
++            column![
++                name_row,
++                text(branch)
++                    .font(reading.font)
++                    .size((reading.size - 2.0).max(11.0))
++                    .wrapping(Wrapping::None)
++                    .style(move |_| iced::widget::text::Style {
++                        color: Some(tokens.accent_primary),
++                    }),
++            ]
++            .spacing(1)
++            .width(Length::Fill),
++        ]
++        .spacing(8)
++        .align_y(Alignment::Center),
++    )
++    .padding([3, 6])
++    .width(Length::Fill)
++    .on_press(Message::OpenWorktree(entry.path.clone()))
++    .style(move |_theme, status| {
++        let hot = matches!(status, Status::Hovered | Status::Pressed);
++        iced::widget::button::Style {
++            background: Some(Background::Color(if active {
++                tokens.bg_raised
++            } else if hot {
++                tokens.border
++            } else {
++                Color::TRANSPARENT
++            })),
++            text_color: tokens.text_secondary,
++            border: Border {
++                color: if active {
++                    tokens.accent_primary
++                } else {
++                    Color::TRANSPARENT
++                },
++                width: if active { 1.0 } else { 0.0 },
++                radius: 4.0.into(),
++            },
++            shadow: Shadow::default(),
++        }
++    });
++
++    let remove_key = format!("worktree-remove:{}", entry.path);
++    let tip_ready = app.tip_ready(&remove_key);
++    row![
++        body,
++        icon_button(
++            "├ù",
++            "Remove worktree",
++            remove_key,
++            tip_ready,
++            Message::AskRemoveWorktree {
++                path: entry.path.clone(),
++            },
++            !entry.is_main && !app.worktree_busy,
++            false,
++            tokens,
++            reading,
++        ),
++    ]
++    .spacing(4)
++    .align_y(Alignment::Center)
++    .into()
++}
++
++fn wt_tag<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    use iced::widget::Theme;
++    container(
++        text(label)
++            .font(reading.font)
++            .size((reading.size - 3.0).max(10.0))
++            .style(move |_| iced::widget::text::Style {
++                color: Some(tokens.text_muted),
++            }),
++    )
++    .padding([0, 4])
++    .style(move |_theme: &Theme| container::Style {
++        background: Some(Background::Color(Color::TRANSPARENT)),
++        text_color: Some(tokens.text_muted),
++        border: Border {
++            color: tokens.chip_border,
++            width: 1.0,
++            radius: 3.0.into(),
++        },
++        shadow: Shadow::default(),
++    })
++    .into()
++}
++
++// ΓöÇΓöÇ STASHES ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++fn stash_rows<'a>(stashes: &'a [Stash], tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    let mut rows = column![].spacing(2).padding([4, 8]);
++    for stash in stashes {
++        let msg = Message::Select(crate::selection::Selection::Stash {
++            index: stash.index,
++            message: stash.message.clone(),
++        });
++        rows = rows.push(branch_row(
++            STASH_MARK,
++            stash.message.clone(),
++            msg,
++            false,
++            false,
++            None,
++            tokens,
++            reading,
++        ));
++    }
++    if stashes.is_empty() {
++        rows = rows.push(empty_hint("No stashes", tokens, reading));
++    }
++    rows.into()
++}
++
++// ΓöÇΓöÇ TAGS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++fn tag_rows<'a>(tags: &'a [Tag], tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    let mut rows = column![].spacing(2).padding([4, 8]);
++    for tag in tags {
++        let msg = Message::Select(crate::selection::Selection::Tag {
++            name: tag.name.clone(),
++            commit_id: tag.commit_id.clone(),
++        });
++        rows = rows.push(branch_row(
++            TAG_MARK,
++            tag.name.clone(),
++            msg,
++            false,
++            false,
++            None,
++            tokens,
++            reading,
++        ));
++    }
++    if tags.is_empty() {
++        rows = rows.push(empty_hint("No tags", tokens, reading));
++    }
++    rows.into()
++}
++
++// ΓöÇΓöÇ Shared helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++#[allow(clippy::too_many_arguments)]
++fn branch_row<'a>(
++    mark: &'static str,
++    label: String,
++    message: Message,
++    selected: bool,
++    accent: bool,
++    context: Option<ContextTarget>,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mark_color = if accent {
++        tokens.accent_primary
++    } else if selected {
++        tokens.text_primary
++    } else {
++        tokens.text_muted
++    };
++    let label_color = if accent {
++        tokens.accent_primary
++    } else if selected {
++        tokens.text_primary
++    } else {
++        tokens.text_secondary
++    };
++    let row = button(
++        row![
++            glyph(mark, reading.size, mark_color, &reading),
++            text(label)
++                .font(reading.font)
++                .size(reading.size)
++                .wrapping(Wrapping::None)
++                .style(move |_| iced::widget::text::Style {
++                    color: Some(label_color),
++                }),
++        ]
++        .spacing(8)
++        .align_y(Alignment::Center),
++    )
++    .width(Length::Fill)
++    .padding([4, 8])
++    .on_press(message)
++    .style(move |_theme, status| {
++        let hot = matches!(status, Status::Hovered | Status::Pressed);
++        iced::widget::button::Style {
++            background: Some(Background::Color(if selected || hot {
++                tokens.border
++            } else {
++                Color::TRANSPARENT
++            })),
++            text_color: label_color,
++            border: Border {
++                color: Color::TRANSPARENT,
++                width: 0.0,
++                radius: 4.0.into(),
++            },
++            shadow: Shadow::default(),
++        }
++    });
++    if let Some(target) = context {
++        mouse_area(row)
++            .on_right_press(Message::OpenContextMenu { target })
++            .into()
++    } else {
++        row.into()
++    }
++}
++
++fn empty_hint<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    text(label)
++        .font(reading.font)
++        .size(reading.size)
++        .style(move |_| iced::widget::text::Style {
++            color: Some(tokens.text_muted),
++        })
++        .into()
++}
+diff --git a/gui_app/src/view/files_nav.rs b/gui_app/src/view/files_nav.rs
+new file mode 100644
+index 0000000..9087acb
+--- /dev/null
++++ b/gui_app/src/view/files_nav.rs
+@@ -0,0 +1,317 @@
++//! Right inspector: working-tree staging stacked above commit file list.
++
++use crate::app::{GitApp, Message};
++use crate::changes::change_sections;
++use crate::selection::{short_hash, Selection};
++use crate::theme::DesignTokens;
++use core_domain::RepoStatus;
++use iced::widget::text::Wrapping;
++use iced::widget::{button, column, container, row, scrollable, text};
++use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use super::changes::wip_working_tree_block;
++use super::chrome::{command_button, Reading};
++use super::history::relative_age;
++use super::patch::patch_stats;
++use iced::widget::button::Status;
++
++pub(crate) fn show_wip_block(status: Option<&RepoStatus>) -> bool {
++    status.is_some_and(|status| !change_sections(status).is_empty())
++}
++
++pub(crate) fn show_commit_block(selection: &Selection) -> bool {
++    matches!(selection, Selection::Commit { .. })
++}
++
++fn show_tag_block(selection: &Selection) -> bool {
++    matches!(selection, Selection::Tag { .. })
++}
++
++pub(crate) fn files_navigator<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let status = app.session().state.current_status.as_ref();
++    let wip = show_wip_block(status);
++    let commit = show_commit_block(selection);
++    let tag = show_tag_block(selection);
++
++    if !wip && !commit && !tag {
++        return empty_navigator_hint(tokens, reading);
++    }
++
++    let mut body = column![].spacing(8).width(Length::Fill);
++
++    if wip {
++        body = body.push(wip_working_tree_block(app, selection, tokens, reading));
++    }
++
++    if commit {
++        if let Some(meta) = commit_meta(app, selection, tokens, reading) {
++            body = body.push(meta);
++        }
++        body = body.push(commit_files_block(app, tokens, reading));
++    } else if tag {
++        if let Some(meta) = tag_meta(selection, tokens, reading) {
++            body = body.push(meta);
++        }
++        body = body.push(commit_files_block(app, tokens, reading));
++    }
++
++    container(scrollable(body))
++        .width(Length::Fill)
++        .height(Length::Fill)
++        .into()
++}
++
++fn empty_navigator_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    container(
++        text("Select a commit or make a change.")
++            .font(reading.font)
++            .size(reading.size)
++            .style(move |_| text::Style {
++                color: Some(tokens.text_muted),
++            }),
++    )
++    .padding([12, 12])
++    .width(Length::Fill)
++    .height(Length::Fill)
++    .into()
++}
++
++fn commit_meta<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Option<Element<'a, Message>> {
++    let Selection::Commit { id } = selection else {
++        return None;
++    };
++    let commit = app.session().state.commits.iter().find(|commit| &commit.id == id)?;
++    let now = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map(|d| d.as_secs() as i64)
++        .unwrap_or(commit.timestamp);
++    let meta = format!(
++        "{} ┬╖ {} ┬╖ {}",
++        short_hash(&commit.id),
++        commit.author,
++        relative_age(now, commit.timestamp)
++    );
++    Some(
++        container(
++            column![
++                text(commit.message.clone())
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_primary),
++                    }),
++                text(meta)
++                    .font(reading.font)
++                    .size((reading.size - 2.0).max(11.0))
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            ]
++            .spacing(4),
++        )
++        .padding([0, 12])
++        .into(),
++    )
++}
++
++fn tag_meta<'a>(
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Option<Element<'a, Message>> {
++    let Selection::Tag { name, .. } = selection else {
++        return None;
++    };
++    Some(
++        container(
++            text(name.clone())
++                .font(reading.font)
++                .size(reading.size)
++                .style(move |_| text::Style {
++                    color: Some(tokens.text_primary),
++                }),
++        )
++        .padding([0, 12])
++        .into(),
++    )
++}
++
++pub(crate) fn commit_files_block<'a>(
++    app: &'a GitApp,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut block = column![].spacing(2).padding([4, 12]);
++    if app.session().patch_pending {
++        return block
++            .push(
++                text("Loading filesΓÇª")
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            )
++            .into();
++    }
++    if let Some(error) = &app.session().patch_error {
++        return block
++            .push(
++                text(error.clone())
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.accent_primary),
++                    }),
++            )
++            .into();
++    }
++    if app.session().patches.is_empty() {
++        return block
++            .push(
++                text("No files in this commit")
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            )
++            .into();
++    }
++
++    let (total_added, total_removed) = app.session().patches.iter().fold((0, 0), |(a, r), patch| {
++        let (added, removed) = patch_stats(patch);
++        (a + added, r + removed)
++    });
++    let title = format!(
++        "Files changed ({})  +{total_added} ΓêÆ{total_removed}",
++        app.session().patches.len()
++    );
++    let mut heading = row![text(title)
++        .font(reading.font)
++        .size((reading.size - 2.0).max(11.0))
++        .style(move |_| text::Style {
++            color: Some(tokens.text_muted),
++        })]
++    .spacing(8)
++    .align_y(Alignment::Center);
++    if app.session().focused_diff_path.is_some() {
++        heading = heading.push(iced::widget::horizontal_space()).push(
++            command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
++        );
++    }
++    block = block.push(heading);
++
++    for patch in &app.session().patches {
++        let (added, removed) = patch_stats(patch);
++        let focused = app.session().focused_diff_path.as_deref() == Some(patch.path.as_str());
++        let stats = if patch.binary {
++            "binary".to_string()
++        } else {
++            format!("+{added} ΓêÆ{removed}")
++        };
++        let path = patch.path.clone();
++        block = block.push(
++            button(
++                row![
++                    text(patch.path.clone())
++                        .font(reading.mono)
++                        .size((reading.size - 2.0).max(11.0))
++                        .wrapping(Wrapping::None)
++                        .width(Length::Fill),
++                    text(stats)
++                        .font(reading.mono)
++                        .size((reading.size - 2.0).max(11.0))
++                        .style(move |_| text::Style {
++                            color: Some(if added > 0 && removed == 0 {
++                                tokens.added
++                            } else if removed > 0 && added == 0 {
++                                tokens.removed
++                            } else {
++                                tokens.text_muted
++                            }),
++                        }),
++                ]
++                .spacing(8)
++                .align_y(Alignment::Center),
++            )
++            .padding([2, 4])
++            .width(Length::Fill)
++            .on_press(Message::FocusDiffPath(path))
++            .style(move |_theme, status| {
++                let hot = matches!(status, Status::Hovered | Status::Pressed);
++                iced::widget::button::Style {
++                    background: Some(Background::Color(if focused || hot {
++                        tokens.border
++                    } else {
++                        Color::TRANSPARENT
++                    })),
++                    text_color: tokens.text_secondary,
++                    border: Border::default(),
++                    shadow: Shadow::default(),
++                }
++            }),
++        );
++    }
++
++    block.into()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use core_domain::RepoStatus;
++
++    fn clean_status() -> RepoStatus {
++        RepoStatus {
++            staged_files: vec![],
++            unstaged_files: vec![],
++            untracked_files: vec![],
++            tracking: None,
++            head_commit_id: None,
++        }
++    }
++
++    fn dirty_status() -> RepoStatus {
++        RepoStatus {
++            staged_files: vec![],
++            unstaged_files: vec!["a.rs".into()],
++            untracked_files: vec![],
++            tracking: None,
++            head_commit_id: None,
++        }
++    }
++
++    #[test]
++    fn wip_block_hidden_when_clean() {
++        assert!(!show_wip_block(None));
++        assert!(!show_wip_block(Some(&clean_status())));
++    }
++
++    #[test]
++    fn wip_block_shown_when_dirty() {
++        assert!(show_wip_block(Some(&dirty_status())));
++    }
++
++    #[test]
++    fn commit_block_for_commit_selection_only() {
++        assert!(show_commit_block(&Selection::Commit {
++            id: "abc".into()
++        }));
++        assert!(!show_commit_block(&Selection::Branch {
++            name: "main".into(),
++            current: true,
++        }));
++    }
++}
+diff --git a/gui_app/src/view/history.rs b/gui_app/src/view/history.rs
+index 864f3b5..1e41bd4 100644
+--- a/gui_app/src/view/history.rs
++++ b/gui_app/src/view/history.rs
+@@ -16,13 +16,15 @@ use std::collections::HashMap;
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+ use super::chrome::{icon_button, panel_style, Reading};
+ 
+ const COL_GAP: f32 = 10.0;
+-const HASH_WIDTH: f32 = 64.0;
++const HASH_WIDTH: f32 = 72.0;
+ const WHEN_WIDTH: f32 = 56.0;
+-const AUTHOR_WIDTH: f32 = 120.0;
++const AUTHOR_WIDTH: f32 = 100.0;
++const MESSAGE_FILL: u16 = 3;
++const PILLS_FILL: u16 = 1;
+ /// Floor for the lane canvas so Graph never collapses into Description on resize.
+ const MIN_GRAPH_COL_WIDTH: f32 = 40.0;
+ const HEADER_SIZE: f32 = 11.0;
+ const PILL_PAD_Y: f32 = 1.0;
+ const PILL_PAD_X: f32 = 6.0;
+@@ -96,25 +98,25 @@ pub(super) fn history_pane<'a>(
+             );
+         let head = wip_label(session);
+         commit_rows = commit_rows.push(
+             button(
+                 row![
+-                    container(text(""))
+-                        .width(lanes_width)
+-                        .height(Length::Fixed(ROW_HEIGHT)),
+-                    single_line("WIP", Length::Fixed(HASH_WIDTH), reading, tokens, true),
+-                    description_cell(
+-                        Some(RefPill {
++                    pills_cell(
++                        &[RefPill {
+                             label: format!("wip ┬╖ {head}"),
+                             kind: RefPillKind::Head,
+-                        }),
+-                        "Working changes",
++                        }],
+                         tokens,
+                         reading,
+                     ),
++                    container(text(""))
++                        .width(lanes_width)
++                        .height(Length::Fixed(ROW_HEIGHT)),
++                    message_cell("Working changes", tokens, reading),
+                     single_line("", Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
+                     single_line("", Length::Fixed(WHEN_WIDTH), reading, tokens, false),
++                    single_line("", Length::Fixed(HASH_WIDTH), reading, tokens, true),
+                 ]
+                 .spacing(COL_GAP)
+                 .height(Length::Fixed(ROW_HEIGHT))
+                 .align_y(Alignment::Center),
+             )
+@@ -131,29 +133,30 @@ pub(super) fn history_pane<'a>(
+         };
+         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
+         let age = relative_age_compact(now, commit.timestamp);
+         let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
+         let label = row![
++            pills_cell(&pills, tokens, reading),
+             canvas(GraphCell(graph_row))
+                 .width(lanes_width)
+                 .height(Length::Fixed(ROW_HEIGHT)),
+-            single_line(
+-                short_hash(&commit.id),
+-                Length::Fixed(HASH_WIDTH),
+-                reading,
+-                tokens,
+-                true
+-            ),
+-            description_with_pills(&pills, &commit.message, tokens, reading),
++            message_cell(&commit.message, tokens, reading),
+             single_line(
+                 &commit.author,
+                 Length::Fixed(AUTHOR_WIDTH),
+                 reading,
+                 tokens,
+                 false
+             ),
+             single_line(&age, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
++            single_line(
++                short_hash(&commit.id),
++                Length::Fixed(HASH_WIDTH),
++                reading,
++                tokens,
++                true
++            ),
+         ]
+         .spacing(COL_GAP)
+         .height(Length::Fixed(ROW_HEIGHT))
+         .align_y(Alignment::Center);
+         let id = commit.id.clone();
+@@ -205,23 +208,30 @@ fn column_headers<'a>(
+     focus: bool,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     row![
++        header_cell("Refs", Length::FillPortion(PILLS_FILL), tokens, reading),
+         container(
+             text("Graph")
+                 .font(reading.font)
+                 .size(HEADER_SIZE)
++                .wrapping(Wrapping::None)
+                 .style(move |_| text::Style {
+                     color: Some(tokens.text_muted),
+                 }),
+         )
+         .width(lanes_width),
+-        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
+-        header_cell("Description", Length::Fill, tokens, reading),
++        header_cell(
++            "Description",
++            Length::FillPortion(MESSAGE_FILL),
++            tokens,
++            reading,
++        ),
+         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
+         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
++        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
+         icon_button(
+             "ΓùÄ",
+             if focus {
+                 "Show all branches"
+             } else {
+@@ -250,21 +260,21 @@ fn header_cell<'a>(
+ ) -> Element<'a, Message> {
+     container(
+         text(label)
+             .font(reading.font)
+             .size(HEADER_SIZE)
++            .wrapping(Wrapping::None)
+             .style(move |_| text::Style {
+                 color: Some(tokens.text_muted),
+             }),
+     )
+     .width(width)
+     .into()
+ }
+ 
+-fn description_with_pills<'a>(
++fn pills_cell<'a>(
+     pills: &[RefPill],
+-    message: &str,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     let mut cell = row![].spacing(PILL_GAP).align_y(Alignment::Center);
+     for pill in pills.iter().take(4) {
+@@ -273,38 +283,39 @@ fn description_with_pills<'a>(
+     if pills.len() > 4 {
+         cell = cell.push(
+             text(format!("+{}", pills.len() - 4))
+                 .font(reading.font)
+                 .size((reading.size - 2.0).max(11.0))
++                .wrapping(Wrapping::None)
+                 .style(move |_| text::Style {
+                     color: Some(tokens.text_muted),
+                 }),
+         );
+     }
+-    cell = cell.push(
+-        text(message.to_string())
+-            .font(reading.font)
+-            .size(reading.size)
+-            .wrapping(Wrapping::None)
+-            .style(move |_| text::Style {
+-                color: Some(tokens.text_primary),
+-            }),
+-    );
+     container(cell)
+-        .width(Length::Fill)
++        .width(Length::FillPortion(PILLS_FILL))
+         .clip(true)
+         .into()
+ }
+ 
+-fn description_cell<'a>(
+-    pill: Option<RefPill>,
++fn message_cell<'a>(
+     message: &str,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+-    let pills = pill.into_iter().collect::<Vec<_>>();
+-    description_with_pills(&pills, message, tokens, reading)
++    let body = text(message.to_string())
++        .font(reading.font)
++        .size(reading.size)
++        .wrapping(Wrapping::None)
++        .style(move |_| text::Style {
++            color: Some(tokens.text_primary),
++        });
++    // Share remaining width with pills; clip long subjects.
++    container(body)
++        .width(Length::FillPortion(MESSAGE_FILL))
++        .clip(true)
++        .into()
+ }
+ 
+ fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+     let (fg, bg, border) = match pill.kind {
+         RefPillKind::Head => (tokens.bg_app, tokens.accent_primary, tokens.accent_primary),
+diff --git a/gui_app/src/view/mod.rs b/gui_app/src/view/mod.rs
+index 30fc463..601664c 100644
+--- a/gui_app/src/view/mod.rs
++++ b/gui_app/src/view/mod.rs
+@@ -1,11 +1,13 @@
+ mod branch;
+ mod changes;
+ mod chrome;
++mod files_nav;
+ mod commands;
+ mod confirm;
+ mod context_overlay;
++mod explorer;
+ mod history;
+ mod patch;
+ mod refs;
+ mod settings;
+ mod status_bar;
+diff --git a/gui_app/src/view/patch.rs b/gui_app/src/view/patch.rs
+index 4d965ef..1da5323 100644
+--- a/gui_app/src/view/patch.rs
++++ b/gui_app/src/view/patch.rs
+@@ -10,11 +10,11 @@ use super::chrome::{command_button, Reading};
+ pub(super) fn patch_pane<'a>(
+     app: &'a GitApp,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+-    let mut body = column![].spacing(4).padding([4, 8]);
++    let mut body = column![].spacing(2).padding([4, 8]);
+     if app.session().patch_pending {
+         body = body.push(note("LoadingΓÇª", tokens, reading));
+     } else if let Some(error) = &app.session().patch_error {
+         body = body.push(note(error, tokens, reading));
+     } else if app.session().patches.is_empty() {
+@@ -173,10 +173,11 @@ pub(crate) fn patch_stats(patch: &Patch) -> (usize, usize) {
+     (added, removed)
+ }
+ 
+ const SHOW_MORE_LABEL: &str = "Show more lines";
+ const LINE_NO_WIDTH: f32 = 40.0;
++const MARK_WIDTH: f32 = 12.0;
+ 
+ /// Old/new start (and optional counts) from a unified hunk header.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) struct HunkRange {
+     pub old_start: u32,
+@@ -252,14 +253,19 @@ fn diff_line<'a>(
+     old_no: Option<u32>,
+     new_no: Option<u32>,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+-    let (mark, color, tint) = match line.kind {
+-        DiffLineKind::Added => ("+", tokens.added, tokens.added_bg),
+-        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed_bg),
+-        DiffLineKind::Context => (" ", tokens.text_secondary, Color::TRANSPARENT),
++    let (mark, text_color, mark_color, tint) = match line.kind {
++        DiffLineKind::Added => ("+", tokens.added, tokens.added, tokens.added_bg),
++        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed, tokens.removed_bg),
++        DiffLineKind::Context => (
++            " ",
++            tokens.text_secondary,
++            tokens.text_muted,
++            Color::TRANSPARENT,
++        ),
+     };
+     let gutter = tokens.text_muted;
+     container(
+         row![
+             text(format_line_no(old_no))
+@@ -276,23 +282,34 @@ fn diff_line<'a>(
+                 .width(Length::Fixed(LINE_NO_WIDTH))
+                 .wrapping(Wrapping::None)
+                 .style(move |_| text::Style {
+                     color: Some(gutter),
+                 }),
+-            text(format!("{mark}{}", line.text))
++            text(mark)
+                 .font(reading.mono)
+                 .size(reading.size)
++                .width(Length::Fixed(MARK_WIDTH))
+                 .wrapping(Wrapping::None)
+-                .style(move |_| text::Style { color: Some(color) }),
++                .style(move |_| text::Style {
++                    color: Some(mark_color),
++                }),
++            text(line.text.clone())
++                .font(reading.mono)
++                .size(reading.size)
++                .wrapping(Wrapping::None)
++                .style(move |_| text::Style {
++                    color: Some(text_color),
++                }),
+         ]
+-        .spacing(6)
++        .spacing(2)
+         .align_y(Alignment::Center),
+     )
++    .padding([1, 4])
+     .width(Length::Fill)
+     .style(move |_theme: &Theme| container::Style {
+         background: Some(Background::Color(tint)),
+-        text_color: Some(color),
++        text_color: Some(text_color),
+         border: Border::default(),
+         shadow: Shadow::default(),
+     })
+     .into()
+ }
+diff --git a/gui_app/src/view/refs.rs b/gui_app/src/view/refs.rs
+index b44350c..7fa2faf 100644
+--- a/gui_app/src/view/refs.rs
++++ b/gui_app/src/view/refs.rs
+@@ -1,264 +1,6 @@
+-use crate::app::Message;
+-use crate::context_menu::ContextTarget;
+-use crate::selection::Selection;
+-use crate::theme::DesignTokens;
+-use core_domain::{Branch, Stash, Tag};
+-use iced::widget::button::Status;
+-use iced::widget::text::Wrapping;
+-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
+-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
+-
+-use super::chrome::{
+-    branch_chip, field_style, glyph, section_label, Reading, BRANCH_MARK, REMOTE_MARK, STASH_MARK,
+-    TAG_MARK,
+-};
+-
+-pub(super) fn branch_switcher<'a>(
+-    app: &'a crate::app::GitApp,
+-    selection: &Selection,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let name = current_branch_name(&app.session().state.branches);
+-    let mut switcher = column![branch_chip(
+-        name,
+-        Message::ToggleBranchList,
+-        !app.session().state.loading,
+-        app.branch_list_open,
+-        tokens,
+-        reading,
+-    )]
+-    .spacing(8)
+-    .padding([8, 12]);
+-
+-    if app.branch_list_open {
+-        let query = app.branch_query.as_str();
+-        switcher = switcher.push(
+-            text_input("Checkout branchΓÇª", &app.branch_query)
+-                .on_input(Message::BranchQueryChanged)
+-                .padding(6)
+-                .width(Length::Fill)
+-                .style(field_style(tokens)),
+-        );
+-        switcher = switcher.push(
+-            container(scrollable(branch_list(
+-                &app.session().state.branches,
+-                &app.session().state.stashes,
+-                &app.session().state.tags,
+-                selection,
+-                query,
+-                tokens,
+-                reading,
+-            )))
+-            .height(Length::Fixed(220.0))
+-            .width(Length::Fill),
+-        );
+-    }
+-
+-    switcher.into()
+-}
+-
+-fn branch_list<'a>(
+-    branches: &'a [Branch],
+-    stashes: &'a [Stash],
+-    tags: &'a [Tag],
+-    selection: &Selection,
+-    query: &str,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let mut list = column![].spacing(12).padding([4, 8]);
+-    let locals: Vec<&Branch> = branches
+-        .iter()
+-        .filter(|branch| !branch.is_remote && matches_query(&branch.name, query))
+-        .collect();
+-    let remotes: Vec<&Branch> = branches
+-        .iter()
+-        .filter(|branch| branch.is_remote && matches_query(&branch.name, query))
+-        .collect();
+-    let shown_tags: Vec<&Tag> = tags
+-        .iter()
+-        .filter(|tag| matches_query(&tag.name, query))
+-        .collect();
+-    let shown_stashes: Vec<&Stash> = stashes
+-        .iter()
+-        .filter(|stash| matches_query(&stash.message, query))
+-        .collect();
+-    let any = !locals.is_empty()
+-        || !remotes.is_empty()
+-        || !shown_tags.is_empty()
+-        || !shown_stashes.is_empty();
+-    if !locals.is_empty() {
+-        let mut local = column![section_label(tokens, reading, "Branches")].spacing(2);
+-        for branch in locals {
+-            let selected = branch.is_head
+-                || matches!(selection, Selection::Branch { name, .. } if name == &branch.name);
+-            local = local.push(ref_row(
+-                BRANCH_MARK,
+-                branch.name.clone(),
+-                Message::ChooseBranch(branch.name.clone()),
+-                selected,
+-                branch.is_head,
+-                Some(ContextTarget::LocalBranch {
+-                    name: branch.name.clone(),
+-                    tip: branch.tip.clone(),
+-                }),
+-                tokens,
+-                reading,
+-            ));
+-        }
+-        list = list.push(local);
+-    }
+-    if !remotes.is_empty() {
+-        let mut remote = column![section_label(tokens, reading, "Remotes")].spacing(2);
+-        for branch in remotes {
+-            let selected = matches!(selection, Selection::Remote { name } if name == &branch.name);
+-            remote = remote.push(ref_row(
+-                REMOTE_MARK,
+-                branch.name.clone(),
+-                Message::Select(Selection::Remote {
+-                    name: branch.name.clone(),
+-                }),
+-                selected,
+-                false,
+-                None,
+-                tokens,
+-                reading,
+-            ));
+-        }
+-        list = list.push(remote);
+-    }
+-    if !shown_tags.is_empty() {
+-        let mut tagged = column![section_label(tokens, reading, "Tags")].spacing(2);
+-        for tag in shown_tags {
+-            let selected = matches!(selection, Selection::Tag { name, .. } if name == &tag.name);
+-            tagged = tagged.push(ref_row(
+-                TAG_MARK,
+-                tag.name.clone(),
+-                Message::Select(Selection::Tag {
+-                    name: tag.name.clone(),
+-                    commit_id: tag.commit_id.clone(),
+-                }),
+-                selected,
+-                false,
+-                None,
+-                tokens,
+-                reading,
+-            ));
+-        }
+-        list = list.push(tagged);
+-    }
+-    if !shown_stashes.is_empty() {
+-        let mut saved = column![section_label(tokens, reading, "Stashes")].spacing(2);
+-        for stash in shown_stashes {
+-            let selected = matches!(
+-                selection,
+-                Selection::Stash { index, message }
+-                    if *index == stash.index && message == &stash.message
+-            );
+-            saved = saved.push(ref_row(
+-                STASH_MARK,
+-                stash.message.clone(),
+-                Message::Select(Selection::Stash {
+-                    index: stash.index,
+-                    message: stash.message.clone(),
+-                }),
+-                selected,
+-                false,
+-                None,
+-                tokens,
+-                reading,
+-            ));
+-        }
+-        list = list.push(saved);
+-    }
+-    if !any {
+-        list = list.push(
+-            text("No matching branch")
+-                .font(reading.font)
+-                .size(reading.size)
+-                .style(move |_| text::Style {
+-                    color: Some(tokens.text_muted),
+-                }),
+-        );
+-    }
+-    list.into()
+-}
+-
+-#[allow(clippy::too_many_arguments)]
+-fn ref_row<'a>(
+-    mark: &'static str,
+-    label: String,
+-    message: Message,
+-    selected: bool,
+-    accent: bool,
+-    context: Option<ContextTarget>,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let mark_color = if accent {
+-        tokens.accent_primary
+-    } else if selected {
+-        tokens.text_primary
+-    } else {
+-        tokens.text_muted
+-    };
+-    let label_color = if accent {
+-        tokens.accent_primary
+-    } else if selected {
+-        tokens.text_primary
+-    } else {
+-        tokens.text_secondary
+-    };
+-    let row = button(
+-        row![
+-            glyph(mark, reading.size, mark_color, &reading),
+-            text(label)
+-                .font(reading.font)
+-                .size(reading.size)
+-                .wrapping(Wrapping::None)
+-                .style(move |_| text::Style {
+-                    color: Some(label_color),
+-                }),
+-        ]
+-        .spacing(8)
+-        .align_y(Alignment::Center),
+-    )
+-    .width(Length::Fill)
+-    .padding([4, 8])
+-    .on_press(message)
+-    .style(move |_theme, status| {
+-        let hot = matches!(status, Status::Hovered | Status::Pressed);
+-        iced::widget::button::Style {
+-            background: Some(Background::Color(if selected || hot {
+-                tokens.border
+-            } else {
+-                Color::TRANSPARENT
+-            })),
+-            text_color: label_color,
+-            border: Border {
+-                color: Color::TRANSPARENT,
+-                width: 0.0,
+-                radius: 4.0.into(),
+-            },
+-            shadow: Shadow::default(),
+-        }
+-    });
+-    if let Some(target) = context {
+-        mouse_area(row)
+-            .on_right_press(Message::OpenContextMenu { target })
+-            .into()
+-    } else {
+-        row.into()
+-    }
+-}
+-
+-pub(crate) fn matches_query(name: &str, query: &str) -> bool {
+-    let query = query.trim();
+-    query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
+-}
++use core_domain::Branch;
+ 
+ pub(super) fn current_branch_name(branches: &[Branch]) -> String {
+     branches
+         .iter()
+         .find(|branch| branch.is_head && !branch.is_remote)
+diff --git a/gui_app/src/view/top_bar.rs b/gui_app/src/view/top_bar.rs
+index fc911e8..b93574a 100644
+--- a/gui_app/src/view/top_bar.rs
++++ b/gui_app/src/view/top_bar.rs
+@@ -52,11 +52,11 @@ pub(super) fn top_bar<'a>(
+     left = left.push(repository_path(&app.session().path, tokens, reading));
+     left = left.push(branch_chip(
+         branch_name,
+         Message::ToggleBranchList,
+         !app.session().state.loading,
+-        app.branch_list_open,
++        app.files_rail_open && !app.session().explorer_collapsed.local,
+         tokens,
+         reading,
+     ));
+     left = left.push(tracking(summary, tokens, reading));
+ 
+@@ -65,10 +65,11 @@ pub(super) fn top_bar<'a>(
+         .align_y(Alignment::Center)
+         .width(Length::Fill);
+     for button in command_buttons(&top_commands, &branch_selection, app, tokens, reading) {
+         right = right.push(button);
+     }
++    right = right.push(hunk_segment(app.hunk_mode, tokens));
+     right = right.push(layout_segment(app.layout, tokens));
+     right = right.push(quiet_button(
+         OPEN_REPOSITORY,
+         Message::ChooseRepositoryFolder,
+         !app.session().state.loading,
+@@ -187,10 +188,84 @@ fn search_field<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Messa
+         shadow: Shadow::default(),
+     })
+     .into()
+ }
+ 
++fn hunk_segment<'a>(current: crate::layout::HunkMode, tokens: DesignTokens) -> Element<'a, Message> {
++    container(
++        row![
++            hunk_button(crate::layout::HunkMode::Beside, current, tokens),
++            hunk_button(crate::layout::HunkMode::Wide, current, tokens),
++            hunk_button(crate::layout::HunkMode::Focus, current, tokens),
++        ]
++        .spacing(0),
++    )
++    .style(move |_theme: &Theme| container::Style {
++        background: Some(Background::Color(tokens.chip)),
++        text_color: Some(tokens.text_primary),
++        border: Border {
++            color: tokens.chip_border,
++            width: 1.0,
++            radius: SEG_RADIUS.into(),
++        },
++        shadow: Shadow::default(),
++    })
++    .into()
++}
++
++fn hunk_button<'a>(
++    mode: crate::layout::HunkMode,
++    current: crate::layout::HunkMode,
++    tokens: DesignTokens,
++) -> Element<'a, Message> {
++    let active = mode == current;
++    let ink = if active {
++        Color::BLACK
++    } else {
++        tokens.text_primary
++    };
++    let label = match mode {
++        crate::layout::HunkMode::Beside => "B",
++        crate::layout::HunkMode::Wide => "W",
++        crate::layout::HunkMode::Focus => "F",
++    };
++    iced::widget::button(
++        text(label)
++            .size(11.0)
++            .style(move |_| text::Style { color: Some(ink) }),
++    )
++    .padding([4, 6])
++    .on_press(Message::SetHunkMode(mode))
++    .style(move |_theme, status| {
++        let hot = matches!(
++            status,
++            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
++        );
++        iced::widget::button::Style {
++            background: Some(Background::Color(if active {
++                tokens.accent_primary
++            } else if hot {
++                tokens.bg_raised
++            } else {
++                tokens.chip
++            })),
++            text_color: ink,
++            border: Border {
++                color: if active {
++                    tokens.accent_primary
++                } else {
++                    tokens.chip_border
++                },
++                width: 1.0,
++                radius: 0.0.into(),
++            },
++            shadow: Shadow::default(),
++        }
++    })
++    .into()
++}
++
+ fn layout_segment<'a>(
+     current: crate::layout::LayoutPreset,
+     tokens: DesignTokens,
+ ) -> Element<'a, Message> {
+     container(
+diff --git a/gui_app/src/view/workspace.rs b/gui_app/src/view/workspace.rs
+index 612910e..28c0e46 100644
+--- a/gui_app/src/view/workspace.rs
++++ b/gui_app/src/view/workspace.rs
+@@ -1,32 +1,27 @@
+ use crate::app::{GitApp, Message};
+-use crate::layout::{LayoutPreset, WorkspacePane};
++use crate::layout::{HunkMode, LayoutPreset, WorkspacePane};
+ use crate::selection::{context_label, Selection};
+ use crate::theme::DesignTokens;
+ use iced::widget::pane_grid::{self, Content};
+-use iced::widget::text::Wrapping;
+-use iced::widget::{button, column, container, row, scrollable, text};
+-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
++use iced::widget::{button, column, container, row, text};
++use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
+ 
+-use super::changes::changes_pane;
+-use super::chrome::{command_button, hairline, icon_button, pane_title, symbol_reading, Reading};
++use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+ use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
+-use super::history::{history_pane, relative_age};
+-use super::patch::{patch_pane, patch_stats};
+-use super::refs::branch_switcher;
+-use super::worktrees::worktrees_section;
+-use crate::selection::short_hash;
+-use iced::widget::button::Status;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use super::explorer::explorer_pane;
++use super::files_nav::files_navigator;
++use super::history::history_pane;
++use super::patch::patch_pane;
+ 
+ const PANE_SPACING: f32 = 4.0;
+ const SPLIT_HIT: f32 = 8.0;
+ const HEAD_PADDING_Y: f32 = 4.0;
+ const HEAD_PADDING_X: f32 = 8.0;
+ const COMMAND_SPACING: f32 = 6.0;
+ const FILES_RAIL_WIDTH: f32 = 36.0;
+-const FILES_TITLE: &str = "Changes";
++const FILES_TITLE: &str = "Explorer";
+ const GRAPH_TITLE: &str = "History";
+ const DIFF_TITLE: &str = "Diff";
+ const COLLAPSE_FILES: &str = "Γƒ¿";
+ const EXPAND_FILES: &str = "Γƒ⌐";
+ 
+@@ -49,11 +44,11 @@ pub(super) fn workspace<'a>(
+     .spacing(PANE_SPACING)
+     .on_resize(SPLIT_HIT, Message::PaneResized)
+     .width(Length::Fill)
+     .height(Length::Fill);
+ 
+-    if app.files_rail_open {
++    if app.files_rail_open || app.hunk_mode == HunkMode::Focus {
+         return grid.into();
+     }
+ 
+     let rail = collapsed_files_rail(app.layout, tokens, reading);
+     match app.layout {
+@@ -122,11 +117,11 @@ fn inspector<'a>(
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     let _ = layout;
+     column![
+         inspector_head(app, selection, tokens, reading),
+-        detail_body(app, selection, tokens, reading),
++        files_navigator(app, selection, tokens, reading),
+     ]
+     .width(Length::Fill)
+     .height(Length::Fill)
+     .into()
+ }
+@@ -156,215 +151,10 @@ fn diff<'a>(
+     .width(Length::Fill)
+     .height(Length::Fill)
+     .into()
+ }
+ 
+-fn detail_body<'a>(
+-    app: &'a GitApp,
+-    selection: &Selection,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let show_patch = matches!(selection, Selection::Commit { .. } | Selection::Tag { .. });
+-    if !show_patch {
+-        return inspector_working_hint(tokens, reading);
+-    }
+-
+-    // Do not give the column `Length::Fill` height: it sits inside a
+-    // scrollable, and iced panics when a vertically filling child is laid
+-    // out inside a scrollable viewport.
+-    let mut body = column![row![icon_button(
+-        "Γîé",
+-        "Working tree",
+-        "inspector-working-tree",
+-        app.tip_ready("inspector-working-tree"),
+-        Message::ShowWorkingTree,
+-        true,
+-        false,
+-        tokens,
+-        reading,
+-    )]
+-    .padding([8, 12])]
+-    .spacing(4)
+-    .width(Length::Fill);
+-
+-    if let Selection::Commit { id } = selection {
+-        if let Some(commit) = app.session().state.commits.iter().find(|commit| &commit.id == id) {
+-            let now = SystemTime::now()
+-                .duration_since(UNIX_EPOCH)
+-                .map(|d| d.as_secs() as i64)
+-                .unwrap_or(commit.timestamp);
+-            let meta = format!(
+-                "{} ┬╖ {} ┬╖ {}",
+-                short_hash(&commit.id),
+-                commit.author,
+-                relative_age(now, commit.timestamp)
+-            );
+-            body = body.push(
+-                container(
+-                    column![
+-                        text(commit.message.clone())
+-                            .font(reading.font)
+-                            .size(reading.size)
+-                            .style(move |_| text::Style {
+-                                color: Some(tokens.text_primary),
+-                            }),
+-                        text(meta)
+-                            .font(reading.font)
+-                            .size((reading.size - 2.0).max(11.0))
+-                            .style(move |_| text::Style {
+-                                color: Some(tokens.text_muted),
+-                            }),
+-                    ]
+-                    .spacing(4),
+-                )
+-                .padding([0, 12]),
+-            );
+-        }
+-    } else if let Selection::Tag { name, .. } = selection {
+-        body = body.push(
+-            container(
+-                text(name.clone())
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.text_primary),
+-                    }),
+-            )
+-            .padding([0, 12]),
+-        );
+-    }
+-
+-    body = body.push(commit_files_block(app, tokens, reading));
+-
+-    container(scrollable(body))
+-        .width(Length::Fill)
+-        .height(Length::Fill)
+-        .into()
+-}
+-
+-fn commit_files_block<'a>(
+-    app: &'a GitApp,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let mut block = column![].spacing(2).padding([4, 12]);
+-    if app.session().patch_pending {
+-        return block
+-            .push(
+-                text("Loading filesΓÇª")
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.text_muted),
+-                    }),
+-            )
+-            .into();
+-    }
+-    if let Some(error) = &app.session().patch_error {
+-        return block
+-            .push(
+-                text(error.clone())
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.accent_primary),
+-                    }),
+-            )
+-            .into();
+-    }
+-    if app.session().patches.is_empty() {
+-        return block
+-            .push(
+-                text("No files in this commit")
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.text_muted),
+-                    }),
+-            )
+-            .into();
+-    }
+-
+-    let (total_added, total_removed) = app.session().patches.iter().fold((0, 0), |(a, r), patch| {
+-        let (added, removed) = patch_stats(patch);
+-        (a + added, r + removed)
+-    });
+-    let title = format!(
+-        "Files changed ({})  +{total_added} ΓêÆ{total_removed}",
+-        app.session().patches.len()
+-    );
+-    let mut heading = row![text(title)
+-        .font(reading.font)
+-        .size((reading.size - 2.0).max(11.0))
+-        .style(move |_| text::Style {
+-            color: Some(tokens.text_muted),
+-        })]
+-    .spacing(8)
+-    .align_y(Alignment::Center);
+-    if app.session().focused_diff_path.is_some() {
+-        heading = heading.push(iced::widget::horizontal_space()).push(
+-            command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
+-        );
+-    }
+-    block = block.push(heading);
+-
+-    for patch in &app.session().patches {
+-        let (added, removed) = patch_stats(patch);
+-        let focused = app.session().focused_diff_path.as_deref() == Some(patch.path.as_str());
+-        let stats = if patch.binary {
+-            "binary".to_string()
+-        } else {
+-            format!("+{added} ΓêÆ{removed}")
+-        };
+-        let path = patch.path.clone();
+-        block = block.push(
+-            button(
+-                row![
+-                    text(patch.path.clone())
+-                        .font(reading.mono)
+-                        .size((reading.size - 2.0).max(11.0))
+-                        .wrapping(Wrapping::None)
+-                        .width(Length::Fill),
+-                    text(stats)
+-                        .font(reading.mono)
+-                        .size((reading.size - 2.0).max(11.0))
+-                        .style(move |_| text::Style {
+-                            color: Some(if added > 0 && removed == 0 {
+-                                tokens.added
+-                            } else if removed > 0 && added == 0 {
+-                                tokens.removed
+-                            } else {
+-                                tokens.text_muted
+-                            }),
+-                        }),
+-                ]
+-                .spacing(8)
+-                .align_y(Alignment::Center),
+-            )
+-            .padding([2, 4])
+-            .width(Length::Fill)
+-            .on_press(Message::FocusDiffPath(path))
+-            .style(move |_theme, status| {
+-                let hot = matches!(status, Status::Hovered | Status::Pressed);
+-                iced::widget::button::Style {
+-                    background: Some(Background::Color(if focused || hot {
+-                        tokens.border
+-                    } else {
+-                        Color::TRANSPARENT
+-                    })),
+-                    text_color: tokens.text_secondary,
+-                    border: Border::default(),
+-                    shadow: Shadow::default(),
+-                }
+-            }),
+-        );
+-    }
+-
+-    block.into()
+-}
+-
+ fn inspector_head<'a>(
+     app: &'a GitApp,
+     selection: &Selection,
+     tokens: DesignTokens,
+     reading: Reading,
+@@ -424,34 +214,22 @@ fn files_rail<'a>(
+     selection: &Selection,
+     layout: LayoutPreset,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+-    let _ = layout;
++    let _ = (layout, selection);
+     column![
+-        files_head(working_change_count(app), tokens, reading),
+-        branch_switcher(app, selection, tokens, reading),
+-        worktrees_section(app, tokens, reading),
+-        changes_pane(app, selection, tokens, reading),
++        files_head(tokens, reading),
++        explorer_pane(app, tokens, reading),
+     ]
+     .width(Length::Fill)
+     .height(Length::Fill)
+     .into()
+ }
+ 
+-fn working_change_count(app: &GitApp) -> usize {
+-    app.session().state
+-        .current_status
+-        .as_ref()
+-        .map(|status| {
+-            status.staged_files.len() + status.unstaged_files.len() + status.untracked_files.len()
+-        })
+-        .unwrap_or(0)
+-}
+-
+-fn files_head<'a>(count: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+-    let title = format!("{FILES_TITLE} ┬╖ {count}");
++fn files_head<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    let title = FILES_TITLE;
+     column![
+         row![
+             text(title)
+                 .font(reading.font)
+                 .size((reading.size - 2.0).max(11.0))
+@@ -473,25 +251,10 @@ fn files_head<'a>(count: usize, tokens: DesignTokens, reading: Reading) -> Eleme
+         hairline(tokens),
+     ]
+     .into()
+ }
+ 
+-fn inspector_working_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+-    container(
+-        text("Stage and commit from Changes on the left. Select a commit to inspect it.")
+-            .font(reading.font)
+-            .size(reading.size)
+-            .style(move |_| text::Style {
+-                color: Some(tokens.text_muted),
+-            }),
+-    )
+-    .padding([12, 12])
+-    .width(Length::Fill)
+-    .height(Length::Fill)
+-    .into()
+-}
+-
+ fn collapsed_files_rail<'a>(
+     layout: LayoutPreset,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+diff --git a/gui_app/src/view/worktrees.rs b/gui_app/src/view/worktrees.rs
+index 462e811..3e81b96 100644
+--- a/gui_app/src/view/worktrees.rs
++++ b/gui_app/src/view/worktrees.rs
+@@ -16,15 +16,22 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme}
+ 
+ use super::chrome::{
+     accent_button, command_button, field_style, glyph, hairline, icon_button, pane_title, Reading,
+ };
+ 
++#[allow(dead_code)]
+ const WORKTREES_TITLE: &str = "Worktrees";
++#[allow(dead_code)]
+ const LIST_MAX_HEIGHT: f32 = 160.0;
++#[allow(dead_code)]
+ const OPEN_MARK: &str = "ΓùÅ";
+ const DETACHED: &str = "(detached)";
+ 
++/// Formerly the left-rail Worktrees block. The Explorer accordion owns that
++/// list now (`view/explorer.rs`); keep this helper for reference until the
++/// create/remove dialogs absorb any shared row chrome, then delete.
++#[allow(dead_code)]
+ pub(super) fn worktrees_section<'a>(
+     app: &'a GitApp,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {

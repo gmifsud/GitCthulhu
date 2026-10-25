@@ -1,7 +1,7 @@
 //! Turns a [`RibbonCommand`] into the [`Message`] the window already handles.
 //!
 //! [`crate::selection::ribbon_commands`] decides which commands a selection
-//! allows. This module only places them.
+//! allows. This module only places them — as compact icon buttons.
 
 use crate::app::{GitApp, Message};
 use crate::changes::marked_paths;
@@ -11,7 +11,7 @@ use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::Element;
 
-use super::chrome::{accent_button, command_button, Reading};
+use super::chrome::{icon_button, Reading};
 
 /// Where a command is drawn. The rules stay in `ribbon_commands`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +46,9 @@ pub(super) fn command_place(command: RibbonCommand) -> CommandPlace {
 }
 
 pub(super) fn can_commit(app: &GitApp) -> bool {
-    !app.commit_message.trim().is_empty()
+    !app.session().commit_message.trim().is_empty()
         && app
+            .session()
             .state
             .current_status
             .as_ref()
@@ -55,7 +56,8 @@ pub(super) fn can_commit(app: &GitApp) -> bool {
 }
 
 pub(super) fn can_stash(app: &GitApp) -> bool {
-    app.state
+    app.session()
+        .state
         .current_status
         .as_ref()
         .is_some_and(|status| !status.staged_files.is_empty() || !status.unstaged_files.is_empty())
@@ -73,6 +75,32 @@ pub(super) fn placed_commands(
         .collect()
 }
 
+/// Segoe UI Symbol marks for ribbon commands (recognisable at small size).
+fn command_mark(command: RibbonCommand) -> &'static str {
+    match command {
+        RibbonCommand::Checkout => "⤵",
+        RibbonCommand::Fetch => "↓",
+        RibbonCommand::Pull => "⬇",
+        RibbonCommand::Push => "⬆",
+        RibbonCommand::Refresh => "↻",
+        RibbonCommand::Stage => "+",
+        RibbonCommand::Unstage => "−",
+        RibbonCommand::Discard => "⌫",
+        RibbonCommand::Commit => "✓",
+        RibbonCommand::Stash => "≡",
+        RibbonCommand::Apply => "⤵",
+        RibbonCommand::Pop => "↥",
+        RibbonCommand::Drop => "×",
+        RibbonCommand::CreateBranch => "+",
+        RibbonCommand::RenameBranch => "✎",
+        RibbonCommand::DeleteBranch => "×",
+        RibbonCommand::Merge => "⑂",
+        RibbonCommand::Rebase => "⤴",
+        RibbonCommand::CherryPick => "✂",
+        RibbonCommand::Reset => "⟲",
+    }
+}
+
 pub(super) fn command_buttons(
     items: &[RibbonItem],
     selection: &Selection,
@@ -83,13 +111,21 @@ pub(super) fn command_buttons(
     items
         .iter()
         .map(|item| {
-            let enabled = item.enabled && !app.state.loading;
+            let enabled = item.enabled && !app.session().state.loading;
             let message = command_message(item.command, selection, app);
-            if item.primary {
-                accent_button(item.label, message, enabled, tokens, reading)
-            } else {
-                command_button(item.label, message, enabled, tokens, reading)
-            }
+            let tip_key = format!("cmd-{:?}", item.command);
+            let tip_ready = app.tip_ready(&tip_key);
+            icon_button(
+                command_mark(item.command),
+                item.label,
+                tip_key,
+                tip_ready,
+                message,
+                enabled,
+                item.primary,
+                tokens,
+                reading,
+            )
         })
         .collect()
 }
@@ -111,7 +147,7 @@ fn command_message(command: RibbonCommand, selection: &Selection, app: &GitApp) 
         RibbonCommand::Unstage => stage_message(app, selection, false),
         RibbonCommand::Discard => Message::AskDiscard,
         RibbonCommand::Commit => {
-            Message::EditWorktree(WorktreeEdit::Commit(app.commit_message.clone()))
+            Message::EditWorktree(WorktreeEdit::Commit(app.session().commit_message.clone()))
         }
         RibbonCommand::Stash => Message::StashPush,
         RibbonCommand::Apply => match selection {
@@ -134,7 +170,7 @@ fn command_message(command: RibbonCommand, selection: &Selection, app: &GitApp) 
 }
 
 fn stage_message(app: &GitApp, selection: &Selection, stage: bool) -> Message {
-    let marked = marked_paths(&app.marked_files, stage);
+    let marked = marked_paths(&app.session().marked_files, stage);
     if !marked.is_empty() {
         return if stage {
             Message::EditWorktree(WorktreeEdit::Stage(marked))

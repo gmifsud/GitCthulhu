@@ -2,7 +2,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::thread;
 
-use core_domain::{DomainError, FileDisposition, GitRepository, Hunk, Patch, ResetMode, ViewEvent};
+use core_domain::{
+    DomainError, FileDisposition, GitRepository, Hunk, Patch, ResetMode, ViewEvent, Worktree,
+};
 use iced::futures::channel::oneshot;
 
 /// A repository adapter that can be shared with background work.
@@ -173,6 +175,16 @@ pub(crate) fn checkout_in_background(
     )
 }
 
+pub(crate) fn checkout_detached_in_background(
+    repo: SharedRepository,
+    commit_id: String,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.checkout_detached(&commit_id),
+        || Err(DomainError::Unknown("detach was interrupted".to_string())),
+    )
+}
+
 pub(crate) fn fetch_in_background(
     repo: SharedRepository,
 ) -> impl Future<Output = Result<(), DomainError>> {
@@ -237,18 +249,73 @@ pub(crate) fn open_repository_in_background(
     open: crate::RepositoryOpener,
     path: String,
 ) -> impl Future<Output = (String, Result<SharedRepository, DomainError>)> {
+    // The interrupted fallback echoes the requested path, like the success path.
+    let echoed = path.clone();
     in_background(
         move || {
             let result = open(&path);
             (path, result)
         },
-        || {
+        move || {
             (
-                String::new(),
+                echoed,
                 Err(DomainError::Unknown(
                     "repository open was interrupted".to_string(),
                 )),
             )
+        },
+    )
+}
+
+pub(crate) fn worktrees_in_background(
+    repo: SharedRepository,
+) -> impl Future<Output = Result<Vec<Worktree>, DomainError>> {
+    in_background(
+        move || repo.worktrees(),
+        || {
+            Err(DomainError::Unknown(
+                "worktree list was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+/// `git worktree add`. With `create_branch`, `branch` is made at `start_point` or HEAD.
+pub(crate) fn add_worktree_in_background(
+    repo: SharedRepository,
+    path: String,
+    branch: String,
+    create_branch: bool,
+    start_point: Option<String>,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || {
+            repo.add_worktree(
+                &path,
+                &branch,
+                create_branch,
+                start_point.as_deref(),
+            )
+        },
+        || {
+            Err(DomainError::Unknown(
+                "worktree create was interrupted".to_string(),
+            ))
+        },
+    )
+}
+
+pub(crate) fn remove_worktree_in_background(
+    repo: SharedRepository,
+    path: String,
+    force: bool,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.remove_worktree(&path, force),
+        || {
+            Err(DomainError::Unknown(
+                "worktree remove was interrupted".to_string(),
+            ))
         },
     )
 }
@@ -490,7 +557,25 @@ mod tests {
         fn tags(&self) -> Result<Vec<core_domain::Tag>, DomainError> {
             unreachable!("status panics first")
         }
+        fn worktrees(&self) -> Result<Vec<core_domain::Worktree>, DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn add_worktree(
+            &self,
+            _path: &str,
+            _branch: &str,
+            _create_branch: bool,
+            _start_point: Option<&str>,
+        ) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn remove_worktree(&self, _path: &str, _force: bool) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
         fn checkout_branch(&self, _branch_name: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn checkout_detached(&self, _commit_id: &str) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
         fn create_branch(&self, _name: &str, _start_point: &str) -> Result<(), DomainError> {
@@ -734,6 +819,17 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_open_echoes_the_requested_path() {
+        let open: crate::RepositoryOpener = Arc::new(|_| panic!("opener thread died"));
+        let (path, result) = iced::futures::executor::block_on(open_repository_in_background(
+            open,
+            r"D:\repo".to_string(),
+        ));
+        assert_eq!(path, r"D:\repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn background_edit_returns_the_adapter_result() {
         let declining = FakeGitRepository {
             commit_result: Err(DomainError::Unknown("hook declined".to_string())),
@@ -752,5 +848,40 @@ mod tests {
             declined,
             Err(DomainError::Unknown("hook declined".to_string()))
         );
+    }
+
+    #[test]
+    fn background_worktree_jobs_return_the_adapter_result() {
+        let linked = Worktree {
+            path: r"D:\repo-wt".to_string(),
+            branch: "topic".to_string(),
+            is_main: false,
+            locked: false,
+        };
+        let repo = FakeGitRepository {
+            worktrees_result: Ok(vec![linked.clone()]),
+            add_worktree_result: Err(DomainError::Unknown("path exists".to_string())),
+            ..FakeGitRepository::ok()
+        };
+        let shared: SharedRepository = Arc::new(repo);
+
+        let listed =
+            iced::futures::executor::block_on(worktrees_in_background(Arc::clone(&shared)));
+        let added = iced::futures::executor::block_on(add_worktree_in_background(
+            Arc::clone(&shared),
+            r"D:\repo-wt".to_string(),
+            "topic".to_string(),
+            true,
+            None,
+        ));
+        let removed = iced::futures::executor::block_on(remove_worktree_in_background(
+            shared,
+            r"D:\repo-wt".to_string(),
+            false,
+        ));
+
+        assert_eq!(listed, Ok(vec![linked]));
+        assert_eq!(added, Err(DomainError::Unknown("path exists".to_string())));
+        assert_eq!(removed, Ok(()));
     }
 }

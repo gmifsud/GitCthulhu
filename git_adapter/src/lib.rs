@@ -5,6 +5,7 @@ mod command;
 mod diff;
 mod stash;
 mod status;
+mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -14,12 +15,13 @@ use std::fmt::Display;
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
     Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag,
+    ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
 use gix::refs::TargetRef;
 use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
+use worktree::{parse_worktree_porcelain, require_worktree_path};
 
 pub(crate) fn unknown(error: impl Display) -> DomainError {
     DomainError::Unknown(error.to_string())
@@ -106,11 +108,19 @@ impl GitRepository for GitoxideAdapter {
     fn status(&self) -> Result<RepoStatus, DomainError> {
         let repo = self.open_repo()?;
         let head_is_unborn = repo.head().map_err(unknown)?.is_unborn();
+        let head_commit_id = if head_is_unborn {
+            None
+        } else {
+            repo.head()
+                .ok()
+                .and_then(|head| head.id().map(|id| id.to_string()))
+        };
         let mut status = RepoStatus {
             staged_files: staged_paths(&repo, head_is_unborn)?,
             unstaged_files: vec![],
             untracked_files: vec![],
             tracking: tracking_status(&self.repo_path)?,
+            head_commit_id,
         };
 
         // Index ↔ worktree: modified/removed tracked files and untracked files, one path each.
@@ -229,6 +239,59 @@ impl GitRepository for GitoxideAdapter {
         Ok(tags)
     }
 
+    fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {
+        self.open_repo()?;
+        let out = run_git_stdout(&self.repo_path, &["worktree", "list", "--porcelain"])?;
+        Ok(parse_worktree_porcelain(&out))
+    }
+
+    fn add_worktree(
+        &self,
+        path: &str,
+        branch: &str,
+        create_branch: bool,
+        start_point: Option<&str>,
+    ) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_worktree_path(path)?;
+        require_branch_name(branch)?;
+        if create_branch {
+            match start_point {
+                Some(start) => {
+                    if start.is_empty() || start.starts_with('-') {
+                        return Err(DomainError::Unknown(format!(
+                            "invalid start point: {start:?}"
+                        )));
+                    }
+                    // `git worktree add -b <branch> <path> <commit-ish>`
+                    run_git(
+                        &self.repo_path,
+                        &["worktree", "add", "-b", branch, path, start],
+                    )
+                }
+                None => run_git(
+                    &self.repo_path,
+                    &["worktree", "add", "-b", branch, "--", path],
+                ),
+            }
+        } else {
+            run_git(&self.repo_path, &["worktree", "add", "--", path, branch])
+        }
+    }
+
+    fn remove_worktree(&self, path: &str, force: bool) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_worktree_path(path)?;
+        if force {
+            run_git(
+                &self.repo_path,
+                &["worktree", "remove", "--force", "--", path],
+            )
+        } else {
+            run_git(&self.repo_path, &["worktree", "remove", "--", path])
+        }
+    }
+
     /// Switch to a local branch with `git switch`.
     ///
     /// gix 0.66 keeps the checkout options a correct worktree update needs (filters,
@@ -243,6 +306,16 @@ impl GitRepository for GitoxideAdapter {
             )));
         }
         run_git(&self.repo_path, &["switch", "--no-guess", branch_name])
+    }
+
+    fn checkout_detached(&self, commit_id: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if commit_id.is_empty() || commit_id.starts_with('-') {
+            return Err(DomainError::Unknown(format!(
+                "invalid commit id: {commit_id:?}"
+            )));
+        }
+        run_git(&self.repo_path, &["checkout", "--detach", commit_id])
     }
 
     fn create_branch(&self, name: &str, start_point: &str) -> Result<(), DomainError> {
