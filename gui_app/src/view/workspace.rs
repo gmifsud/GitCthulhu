@@ -7,13 +7,11 @@ use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::changes::changes_pane;
 use super::chrome::{command_button, hairline, icon_button, pane_title, symbol_reading, Reading};
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
+use super::explorer::explorer_pane;
 use super::history::{history_pane, relative_age};
 use super::patch::{patch_pane, patch_stats};
-use super::refs::branch_switcher;
-use super::worktrees::worktrees_section;
 use crate::selection::short_hash;
 use iced::widget::button::Status;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +22,7 @@ const HEAD_PADDING_Y: f32 = 4.0;
 const HEAD_PADDING_X: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 const FILES_RAIL_WIDTH: f32 = 36.0;
-const FILES_TITLE: &str = "Changes";
+const FILES_TITLE: &str = "Explorer";
 const GRAPH_TITLE: &str = "History";
 const DIFF_TITLE: &str = "Diff";
 const COLLAPSE_FILES: &str = "⟨";
@@ -426,30 +424,18 @@ fn files_rail<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let _ = layout;
+    let _ = (layout, selection);
     column![
-        files_head(working_change_count(app), tokens, reading),
-        branch_switcher(app, selection, tokens, reading),
-        worktrees_section(app, tokens, reading),
-        changes_pane(app, selection, tokens, reading),
+        files_head(tokens, reading),
+        explorer_pane(app, tokens, reading),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-fn working_change_count(app: &GitApp) -> usize {
-    app.session().state
-        .current_status
-        .as_ref()
-        .map(|status| {
-            status.staged_files.len() + status.unstaged_files.len() + status.untracked_files.len()
-        })
-        .unwrap_or(0)
-}
-
-fn files_head<'a>(count: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    let title = format!("{FILES_TITLE} · {count}");
+fn files_head<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let title = FILES_TITLE;
     column![
         row![
             text(title)

@@ -18,11 +18,18 @@ use super::chrome::{
     accent_button, command_button, field_style, glyph, hairline, icon_button, pane_title, Reading,
 };
 
+#[allow(dead_code)]
 const WORKTREES_TITLE: &str = "Worktrees";
+#[allow(dead_code)]
 const LIST_MAX_HEIGHT: f32 = 160.0;
+#[allow(dead_code)]
 const OPEN_MARK: &str = "●";
 const DETACHED: &str = "(detached)";
 
+/// Formerly the left-rail Worktrees block. The Explorer accordion owns that
+/// list now (`view/explorer.rs`); keep this helper for reference until the
+/// create/remove dialogs absorb any shared row chrome, then delete.
+#[allow(dead_code)]
 pub(super) fn worktrees_section<'a>(
     app: &'a GitApp,
     tokens: DesignTokens,

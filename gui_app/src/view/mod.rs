@@ -4,6 +4,7 @@ mod chrome;
 mod commands;
 mod confirm;
 mod context_overlay;
+mod explorer;
 mod history;
 mod patch;
 mod refs;

@@ -40,6 +40,29 @@ pub(crate) fn basename(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Which accordion section the user can collapse in the Explorer rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExplorerSection {
+    Local,
+    Remote,
+    Worktrees,
+    Stashes,
+    Tags,
+}
+
+/// Collapsed state for each Explorer accordion section.
+///
+/// All fields default to `false` (open), matching the spec requirement that every
+/// section starts visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ExplorerCollapsed {
+    pub local: bool,
+    pub remote: bool,
+    pub worktrees: bool,
+    pub stashes: bool,
+    pub tags: bool,
+}
+
 /// Everything bound to one open worktree path.
 pub(crate) struct WorktreeSession {
     /// Absolute working directory this session opened.
@@ -65,6 +88,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) pending_checkout: Option<String>,
     /// When true, the history graph shows only commits reachable from this session's HEAD.
     pub(crate) focus_current_branch: bool,
+    /// Which Explorer accordion sections are currently collapsed.
+    pub(crate) explorer_collapsed: ExplorerCollapsed,
 }
 
 impl WorktreeSession {
@@ -89,6 +114,7 @@ impl WorktreeSession {
             diff_lines_limit: DIFF_LINES_PER_PAGE,
             pending_checkout: None,
             focus_current_branch: false,
+            explorer_collapsed: ExplorerCollapsed::default(),
         }
     }
 
@@ -202,6 +228,27 @@ impl WorktreeSession {
         self.state.commits.iter().any(|commit| commit.id == id)
     }
 
+    /// Flip the collapsed flag for one Explorer accordion section.
+    pub(crate) fn toggle_explorer(&mut self, section: ExplorerSection) {
+        match section {
+            ExplorerSection::Local => {
+                self.explorer_collapsed.local = !self.explorer_collapsed.local;
+            }
+            ExplorerSection::Remote => {
+                self.explorer_collapsed.remote = !self.explorer_collapsed.remote;
+            }
+            ExplorerSection::Worktrees => {
+                self.explorer_collapsed.worktrees = !self.explorer_collapsed.worktrees;
+            }
+            ExplorerSection::Stashes => {
+                self.explorer_collapsed.stashes = !self.explorer_collapsed.stashes;
+            }
+            ExplorerSection::Tags => {
+                self.explorer_collapsed.tags = !self.explorer_collapsed.tags;
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_stub() -> Self {
         use std::sync::Arc;
@@ -246,6 +293,32 @@ mod tests {
     use crate::changes::MarkedFile;
     use crate::selection::Selection;
     use core_domain::{FileDisposition, WorktreeTabRetention};
+
+    #[test]
+    fn explorer_collapsed_defaults_open_except_optional() {
+        let session = WorktreeSession::test_stub();
+        assert!(!session.explorer_collapsed.local);
+        assert!(!session.explorer_collapsed.remote);
+        assert!(!session.explorer_collapsed.worktrees);
+        assert!(!session.explorer_collapsed.stashes);
+        assert!(!session.explorer_collapsed.tags);
+    }
+
+    #[test]
+    fn toggle_explorer_section_flips_one_flag() {
+        let mut session = WorktreeSession::test_stub();
+        session.toggle_explorer(ExplorerSection::Stashes);
+        assert!(session.explorer_collapsed.stashes);
+        assert!(!session.explorer_collapsed.local);
+    }
+
+    #[test]
+    fn toggle_explorer_section_twice_restores_open() {
+        let mut session = WorktreeSession::test_stub();
+        session.toggle_explorer(ExplorerSection::Tags);
+        session.toggle_explorer(ExplorerSection::Tags);
+        assert!(!session.explorer_collapsed.tags);
+    }
 
     fn dirty_session() -> WorktreeSession {
         let mut session = WorktreeSession::test_stub();

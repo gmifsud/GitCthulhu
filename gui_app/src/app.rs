@@ -128,6 +128,8 @@ pub(crate) enum Message {
     PaneResized(pane_grid::ResizeEvent),
     SetLayout(LayoutPreset),
     ToggleFilesRail,
+    /// Collapse or expand one Explorer accordion section for the active session.
+    ToggleExplorerSection(crate::session::ExplorerSection),
     ToggleBranchList,
     BranchQueryChanged(String),
     ChooseBranch(String),
@@ -968,6 +970,10 @@ impl GitApp {
             Message::ToggleFilesRail => {
                 self.files_rail_open = !self.files_rail_open;
                 self.install_layout();
+                Task::none()
+            }
+            Message::ToggleExplorerSection(section) => {
+                self.session_mut().toggle_explorer(section);
                 Task::none()
             }
             Message::ToggleBranchList => {
