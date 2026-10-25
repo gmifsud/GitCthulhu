@@ -3,6 +3,7 @@ use crate::commit_graph::{graph_rows, graph_width, GraphCell, ROW_HEIGHT};
 use crate::jobs::COMMIT_PAGE_SIZE;
 use crate::ref_pills::{refs_at, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
+use crate::session::{basename, WorktreeSession};
 use crate::theme::DesignTokens;
 use core_domain::Commit;
 use iced::widget::button::Status;
@@ -49,19 +50,18 @@ pub(super) fn history_pane<'a>(
 
     let mut commit_rows = column![column_headers(lanes_width, tokens, reading)];
 
-    if working_tree_dirty(app) {
-        let selected = matches!(
-            selection,
-            Selection::Branch { current: true, .. } | Selection::File { .. }
-        );
-        let head = app
-            .session()
-            .state
-            .branches
-            .iter()
-            .find(|branch| branch.is_head)
-            .map(|branch| branch.name.as_str())
-            .unwrap_or("HEAD");
+    // One WIP row per open session with changes, in tab order. Only the active tab's row can
+    // be selected: the selection belongs to that session.
+    for (index, session) in app.sessions.iter().enumerate() {
+        if !session_dirty(session) {
+            continue;
+        }
+        let selected = index == app.active
+            && matches!(
+                selection,
+                Selection::Branch { current: true, .. } | Selection::File { .. }
+            );
+        let head = wip_label(session);
         commit_rows = commit_rows.push(
             button(
                 row![
@@ -87,7 +87,7 @@ pub(super) fn history_pane<'a>(
             )
             .width(Length::Fill)
             .padding(0)
-            .on_press(Message::ShowWorkingTree)
+            .on_press(Message::ShowSessionWorkingTree(index))
             .style(move |_theme, status| commit_style(tokens, status, selected)),
         );
     }
@@ -134,7 +134,7 @@ pub(super) fn history_pane<'a>(
         );
     }
 
-    if shown_nodes.is_empty() && !working_tree_dirty(app) {
+    if shown_nodes.is_empty() && !app.sessions.iter().any(session_dirty) {
         commit_rows = commit_rows.push(
             text("No commits yet")
                 .font(reading.font)
@@ -308,12 +308,24 @@ pub(crate) fn relative_age_compact(now: i64, then: i64) -> String {
     format!("{}y", days / 365)
 }
 
-fn working_tree_dirty(app: &GitApp) -> bool {
-    app.session().state.current_status.as_ref().is_some_and(|status| {
+fn session_dirty(session: &WorktreeSession) -> bool {
+    session.state.current_status.as_ref().is_some_and(|status| {
         !status.staged_files.is_empty()
             || !status.unstaged_files.is_empty()
             || !status.untracked_files.is_empty()
     })
+}
+
+/// Name shown on a session's WIP pill: its checked-out branch, else the folder name (a
+/// detached HEAD or a session whose branches have not loaded yet).
+fn wip_label(session: &WorktreeSession) -> String {
+    session
+        .state
+        .branches
+        .iter()
+        .find(|branch| branch.is_head && !branch.is_remote)
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| basename(&session.path).to_string())
 }
 
 fn single_line<'a>(
@@ -363,6 +375,41 @@ fn commit_style(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_at(path: &str, dirty: bool, head: Option<&str>) -> WorktreeSession {
+        let mut session = WorktreeSession::test_stub();
+        session.path = path.to_string();
+        session.state.current_status = Some(core_domain::RepoStatus {
+            staged_files: Vec::new(),
+            unstaged_files: if dirty { vec!["a.rs".to_string()] } else { Vec::new() },
+            untracked_files: Vec::new(),
+            tracking: None,
+        });
+        session.state.branches = head
+            .map(|name| {
+                vec![core_domain::Branch {
+                    name: name.to_string(),
+                    is_remote: false,
+                    is_head: true,
+                    tip: "abc".to_string(),
+                }]
+            })
+            .unwrap_or_default();
+        session
+    }
+
+    #[test]
+    fn only_sessions_with_changes_are_dirty() {
+        assert!(session_dirty(&session_at(r"D:\a", true, Some("main"))));
+        assert!(!session_dirty(&session_at(r"D:\a", false, Some("main"))));
+        assert!(!session_dirty(&WorktreeSession::test_stub()));
+    }
+
+    #[test]
+    fn wip_label_is_the_branch_else_the_folder_name() {
+        assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, Some("feature"))), "feature");
+        assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, None)), "wt");
+    }
 
     #[test]
     fn relative_age_steps_up_units() {

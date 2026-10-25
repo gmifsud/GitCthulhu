@@ -235,6 +235,8 @@ pub(crate) enum Message {
     HistoryFinished(String, Result<(), DomainError>),
     /// Focus the tab at this index.
     SelectWorktreeTab(usize),
+    /// A graph WIP row was pressed: activate that session, then show its working tree.
+    ShowSessionWorkingTree(usize),
     /// Close the tab at this index. The worktree on disk is left alone.
     CloseWorktreeTab(usize),
     /// Show or hide the `+` picker of worktrees that are not open yet.
@@ -1385,6 +1387,13 @@ impl GitApp {
                 self.activate(index);
                 self.tab_picker_open = false;
                 Task::none()
+            }
+            Message::ShowSessionWorkingTree(index) => {
+                if index >= self.sessions.len() {
+                    return Task::none();
+                }
+                self.activate(index);
+                self.update(Message::ShowWorkingTree)
             }
             Message::CloseWorktreeTab(index) => {
                 // The last tab stays, and so does a tab with a job running: its finish
@@ -4348,6 +4357,29 @@ mod tests {
         assert_eq!(app.active, 1);
         assert!(app.worktree_prompt.is_none());
         assert!(!app.tab_picker_open);
+    }
+
+    #[test]
+    fn a_wip_row_activates_its_session_and_shows_its_working_tree() {
+        let mut app = two_session_app();
+
+        let _ = app.update(Message::ShowSessionWorkingTree(1));
+
+        assert_eq!(app.active, 1);
+        assert!(matches!(
+            app.session().selection,
+            Some(Selection::Branch { current: true, .. })
+        ));
+    }
+
+    #[test]
+    fn a_wip_row_for_a_missing_session_changes_nothing() {
+        let mut app = two_session_app();
+
+        let _ = app.update(Message::ShowSessionWorkingTree(7));
+
+        assert_eq!(app.active, 0);
+        assert!(app.session().selection.is_none());
     }
 
     #[test]
