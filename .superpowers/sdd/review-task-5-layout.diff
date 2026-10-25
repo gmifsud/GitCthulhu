@@ -1,0 +1,123 @@
+# Review Task 5 BASE b126b13 HEAD 06af6f8
+## Stat
+ gui_app/src/theme.rs      |  4 ++--
+ gui_app/src/view/patch.rs | 31 ++++++++++++++++++++++++-------
+ 2 files changed, 26 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/gui_app/src/theme.rs b/gui_app/src/theme.rs
+index 93b35cf..517c70b 100644
+--- a/gui_app/src/theme.rs
++++ b/gui_app/src/theme.rs
+@@ -1,12 +1,12 @@
+ use iced::Color;
+ 
+-/// Tint behind an added or removed diff line. The wireframe uses 12%.
+-const DIFF_TINT: f32 = 0.12;
++/// Tint behind an added or removed diff line. The wireframe uses 22%.
++const DIFF_TINT: f32 = 0.22;
+ 
+ #[derive(Debug, Clone, Copy)]
+ pub(crate) struct DesignTokens {
+     pub bg_app: Color,
+     pub bg_sidebar: Color,
+     pub bg_chrome: Color,
+     pub bg_raised: Color,
+     pub text_primary: Color,
+diff --git a/gui_app/src/view/patch.rs b/gui_app/src/view/patch.rs
+index 4d965ef..6f679c4 100644
+--- a/gui_app/src/view/patch.rs
++++ b/gui_app/src/view/patch.rs
+@@ -170,16 +170,17 @@ pub(crate) fn patch_stats(patch: &Patch) -> (usize, usize) {
+             }
+         }
+     }
+     (added, removed)
+ }
+ 
+ const SHOW_MORE_LABEL: &str = "Show more lines";
+ const LINE_NO_WIDTH: f32 = 40.0;
++const MARK_WIDTH: f32 = 12.0;
+ 
+ /// Old/new start (and optional counts) from a unified hunk header.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) struct HunkRange {
+     pub old_start: u32,
+     pub new_start: u32,
+ }
+ 
+@@ -249,20 +250,25 @@ fn format_line_no(number: Option<u32>) -> String {
+ 
+ fn diff_line<'a>(
+     line: &DiffLine,
+     old_no: Option<u32>,
+     new_no: Option<u32>,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+-    let (mark, color, tint) = match line.kind {
+-        DiffLineKind::Added => ("+", tokens.added, tokens.added_bg),
+-        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed_bg),
+-        DiffLineKind::Context => (" ", tokens.text_secondary, Color::TRANSPARENT),
++    let (mark, text_color, mark_color, tint) = match line.kind {
++        DiffLineKind::Added => ("+", tokens.added, tokens.added, tokens.added_bg),
++        DiffLineKind::Removed => ("-", tokens.removed, tokens.removed, tokens.removed_bg),
++        DiffLineKind::Context => (
++            " ",
++            tokens.text_secondary,
++            tokens.text_muted,
++            Color::TRANSPARENT,
++        ),
+     };
+     let gutter = tokens.text_muted;
+     container(
+         row![
+             text(format_line_no(old_no))
+                 .font(reading.mono)
+                 .size((reading.size - 2.0).max(11.0))
+                 .width(Length::Fixed(LINE_NO_WIDTH))
+@@ -273,29 +279,40 @@ fn diff_line<'a>(
+             text(format_line_no(new_no))
+                 .font(reading.mono)
+                 .size((reading.size - 2.0).max(11.0))
+                 .width(Length::Fixed(LINE_NO_WIDTH))
+                 .wrapping(Wrapping::None)
+                 .style(move |_| text::Style {
+                     color: Some(gutter),
+                 }),
+-            text(format!("{mark}{}", line.text))
++            text(mark)
+                 .font(reading.mono)
+                 .size(reading.size)
++                .width(Length::Fixed(MARK_WIDTH))
+                 .wrapping(Wrapping::None)
+-                .style(move |_| text::Style { color: Some(color) }),
++                .style(move |_| text::Style {
++                    color: Some(mark_color),
++                }),
++            text(line.text.clone())
++                .font(reading.mono)
++                .size(reading.size)
++                .wrapping(Wrapping::None)
++                .style(move |_| text::Style {
++                    color: Some(text_color),
++                }),
+         ]
+         .spacing(6)
+         .align_y(Alignment::Center),
+     )
++    .padding([0, 2])
+     .width(Length::Fill)
+     .style(move |_theme: &Theme| container::Style {
+         background: Some(Background::Color(tint)),
+-        text_color: Some(color),
++        text_color: Some(text_color),
+         border: Border::default(),
+         shadow: Shadow::default(),
+     })
+     .into()
+ }
+ 
+ fn note<'a>(value: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+     text(value.to_string())
+

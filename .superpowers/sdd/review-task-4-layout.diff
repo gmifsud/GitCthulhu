@@ -1,0 +1,669 @@
+# Review Task 4
+BASE: aca294a HEAD: b126b13
+## Commits
+b126b13 feat: hunk Beside/Wide/Focus layout modes
+
+## Stat
+ gui_app/src/app.rs            | 151 +++++++++++++++++++++++++++++++++++++++---
+ gui_app/src/layout.rs         | 101 ++++++++++++++++++++++------
+ gui_app/src/view/top_bar.rs   |  75 +++++++++++++++++++++
+ gui_app/src/view/workspace.rs |   4 +-
+ 4 files changed, 299 insertions(+), 32 deletions(-)
+
+## Diff
+diff --git a/gui_app/src/app.rs b/gui_app/src/app.rs
+index ed87328..6cb9c0d 100644
+--- a/gui_app/src/app.rs
++++ b/gui_app/src/app.rs
+@@ -15,24 +15,32 @@ use crate::jobs::{
+     discard_in_background, edit_in_background, error_message, fetch_in_background,
+     history_in_background, init_in_background, list_models_in_background, load_patch_in_background,
+     load_repository_in_background, open_repository_in_background, pull_in_background,
+     push_in_background, remove_worktree_in_background, save_settings_in_background,
+     stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
+     worktrees_in_background, BranchAction, HistoryAction, SharedRepository, StashAction,
+     WorktreeEdit,
+ };
+-use crate::layout::{self, LayoutPreset, RatioSlot, WorkspacePane};
++use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
+ use crate::selection::Selection;
+ use crate::session::{apply_retention, same_path, WorktreeSession, DIFF_LINES_PER_PAGE};
+ use crate::theme::DesignTokens;
+ use crate::{
+     RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver, WorktreeOpener,
+ };
+ 
++/// Rail visibility and hunk mode to restore when leaving [`HunkMode::Focus`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct FocusRestore {
++    pub files_rail_open: bool,
++    pub inspector_open: bool,
++    pub hunk_mode: HunkMode,
++}
++
+ /// Repository handed from a background open into [`Message::RepositoryOpened`].
+ ///
+ /// Wraps the trait object so [`Message`] can stay `Debug`.
+ #[derive(Clone)]
+ pub(crate) struct OpenedRepository(pub SharedRepository);
+ 
+ impl std::fmt::Debug for OpenedRepository {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+@@ -71,16 +79,19 @@ pub(crate) struct GitApp {
+     /// True while a welcome-screen open/init/clone is in flight (no session yet).
+     pub(crate) opening: bool,
+     pub(crate) panes: pane_grid::State<WorkspacePane>,
+     pub(crate) layout: LayoutPreset,
+     ratios: [layout::LayoutRatios; 3],
+     /// Rebuilt whenever [`Self::install_layout`] constructs a new pane grid.
+     split_slots: Vec<(pane_grid::Split, RatioSlot)>,
+     pub(crate) files_rail_open: bool,
++    pub(crate) inspector_open: bool,
++    pub(crate) hunk_mode: HunkMode,
++    focus_restore: Option<FocusRestore>,
+     pub(crate) branch_list_open: bool,
+     pub(crate) branch_query: String,
+     pub(crate) files_as_tree: bool,
+     pub(crate) agent_models: Vec<String>,
+     pub(crate) agent_models_error: Option<String>,
+     pub(crate) agent_busy: bool,
+     pub(crate) terminal: crate::terminal::Transcript,
+     pub(crate) terminal_log: text_editor::Content,
+@@ -157,16 +168,19 @@ pub(crate) enum Message {
+     /// Clear [`GitApp::focused_diff_path`] and show every file again.
+     ClearDiffFocus,
+     /// Dismiss the status-bar error.
+     ClearError,
+     /// Expand or collapse the status-bar error detail.
+     ToggleErrorDetail,
+     /// Cycle Columns ΓåÆ InspectorOverDiff ΓåÆ Stacked.
+     CycleLayout,
++    SetHunkMode(HunkMode),
++    /// Beside Γåö Wide (Focus is explicit via [`Message::SetHunkMode`]).
++    CycleHunkMode,
+     /// Escape: dismiss prompts, errors, overlays, then clear diff focus.
+     Escape,
+     StageMarked,
+     UnstageMarked,
+     /// `None` means the dialog was cancelled.
+     RepositoryFolderChosen(Option<String>),
+     /// Replace the current adapter with the repository at this path.
+     OpenRepository(String),
+@@ -389,17 +403,17 @@ impl GitApp {
+                 path.unwrap_or_default(),
+                 adapter,
+                 settings.clone(),
+             )],
+             _ => Vec::new(),
+         };
+         let layout = LayoutPreset::DEFAULT;
+         let ratios = layout::default_ratios();
+-        let panes = layout::new_panes(layout, &ratios[layout.index()]);
++        let panes = layout::new_panes(layout, &ratios[layout.index()], true, true);
+         let split_slots = layout::split_slots(&panes);
+         Self {
+             sessions,
+             active: 0,
+             worktree_catalogue: Vec::new(),
+             catalogue_error: None,
+             tab_picker_open: false,
+             worktree_prompt: None,
+@@ -412,16 +426,19 @@ impl GitApp {
+             cursor: (0.0, 0.0),
+             settings,
+             opening: false,
+             panes,
+             layout,
+             ratios,
+             split_slots,
+             files_rail_open: true,
++            inspector_open: true,
++            hunk_mode: HunkMode::Beside,
++            focus_restore: None,
+             branch_list_open: false,
+             branch_query: String::new(),
+             files_as_tree: true,
+             agent_models: Vec::new(),
+             agent_models_error: None,
+             agent_busy: false,
+             terminal: crate::terminal::Transcript::new(),
+             terminal_log: text_editor::Content::new(),
+@@ -493,25 +510,68 @@ impl GitApp {
+     #[cfg(test)]
+     fn active_path(&self) -> String {
+         self.active_session()
+             .map(|session| session.path.clone())
+             .unwrap_or_default()
+     }
+ 
+     fn install_layout(&mut self) {
+-        let ratios = self.ratios[self.layout.index()];
+-        self.panes = if self.files_rail_open {
+-            layout::new_panes(self.layout, &ratios)
+-        } else {
+-            layout::new_panes_without_files(self.layout, &ratios)
+-        };
++        let base = self.ratios[self.layout.index()];
++        let ratios = base.for_hunk_mode(self.hunk_mode);
++        self.panes = layout::new_panes(
++            self.layout,
++            &ratios,
++            self.files_rail_open,
++            self.inspector_open,
++        );
+         self.split_slots = layout::split_slots(&self.panes);
+     }
+ 
++    fn apply_hunk_mode(&mut self, mode: HunkMode) {
++        if mode == HunkMode::Focus {
++            if self.hunk_mode != HunkMode::Focus {
++                self.focus_restore = Some(FocusRestore {
++                    files_rail_open: self.files_rail_open,
++                    inspector_open: self.inspector_open,
++                    hunk_mode: self.hunk_mode,
++                });
++                self.files_rail_open = false;
++                self.inspector_open = false;
++            }
++            self.hunk_mode = HunkMode::Focus;
++        } else {
++            if self.hunk_mode == HunkMode::Focus {
++                if let Some(restore) = self.focus_restore.take() {
++                    self.files_rail_open = restore.files_rail_open;
++                    self.inspector_open = restore.inspector_open;
++                }
++            }
++            self.hunk_mode = mode;
++        }
++        self.install_layout();
++    }
++
++    fn restore_focus_mode(&mut self) -> bool {
++        if self.hunk_mode != HunkMode::Focus {
++            return false;
++        }
++        if let Some(restore) = self.focus_restore.take() {
++            self.files_rail_open = restore.files_rail_open;
++            self.inspector_open = restore.inspector_open;
++            self.hunk_mode = restore.hunk_mode;
++        } else {
++            self.files_rail_open = true;
++            self.inspector_open = true;
++            self.hunk_mode = HunkMode::Beside;
++        }
++        self.install_layout();
++        true
++    }
++
+     fn start_patch(&mut self) -> Task<Message> {
+         let Some(session) = self.active_session_mut() else {
+             return Task::none();
+         };
+         session.diff_lines_limit = DIFF_LINES_PER_PAGE;
+         let Some(query) = session.patch_query() else {
+             session.patches.clear();
+             session.patch_error = None;
+@@ -823,16 +883,29 @@ impl GitApp {
+                     self.error_expanded = !self.error_expanded;
+                 }
+                 Task::none()
+             }
+             Message::CycleLayout => {
+                 let next = self.layout.next();
+                 self.update(Message::SetLayout(next))
+             }
++            Message::SetHunkMode(mode) => {
++                self.apply_hunk_mode(mode);
++                Task::none()
++            }
++            Message::CycleHunkMode => {
++                let next = if self.hunk_mode == HunkMode::Focus {
++                    HunkMode::Beside
++                } else {
++                    self.hunk_mode.cycle()
++                };
++                self.apply_hunk_mode(next);
++                Task::none()
++            }
+             Message::Escape => self.handle_escape(),
+             Message::StageMarked => self.edit_marked(true),
+             Message::UnstageMarked => self.edit_marked(false),
+             Message::CheckoutBranch(branch) => {
+                 let Some(path) = self.active_session().map(|session| session.path.clone()) else {
+                     return Task::none();
+                 };
+                 self.checkout_for(&path, branch)
+@@ -2436,16 +2509,19 @@ impl GitApp {
+ 
+     fn handle_escape(&mut self) -> Task<Message> {
+         if self.confirm_detach.is_some() {
+             return self.update(Message::CancelDetach);
+         }
+         if self.context_menu.is_some() {
+             return self.update(Message::CloseContextMenu);
+         }
++        if self.restore_focus_mode() {
++            return Task::none();
++        }
+         if self.tip_hover.is_some() || self.tip_ready_key.is_some() {
+             self.tip_hover = None;
+             self.tip_ready_key = None;
+             return Task::none();
+         }
+         if self.confirm_discard.is_some() {
+             return self.update(Message::CancelDiscard);
+         }
+@@ -2916,16 +2992,75 @@ mod tests {
+         let (_, graph_ratio, _) = split_between(
+             &app.panes,
+             &[WorkspacePane::Graph, WorkspacePane::Diff],
+             &[WorkspacePane::Inspector],
+         );
+         assert_eq!(graph_ratio, layout::MIN_GRAPH_RATIO);
+     }
+ 
++    #[test]
++    fn enter_focus_remembers_rails_and_escape_restores() {
++        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
++        assert!(app.files_rail_open);
++        assert!(app.inspector_open);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++
++        let _ = app.update(Message::SetHunkMode(HunkMode::Focus));
++        assert_eq!(app.hunk_mode, HunkMode::Focus);
++        assert!(!app.files_rail_open);
++        assert!(!app.inspector_open);
++        assert!(splits_of(&app.panes)
++            .iter()
++            .all(|split| !split.left.contains(&WorkspacePane::Inspector)
++                && !split.right.contains(&WorkspacePane::Inspector)
++                && !split.left.contains(&WorkspacePane::Files)
++                && !split.right.contains(&WorkspacePane::Files)));
++
++        let _ = app.update(Message::Escape);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        assert!(app.files_rail_open);
++        assert!(app.inspector_open);
++    }
++
++    #[test]
++    fn cycle_hunk_mode_skips_focus() {
++        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        let _ = app.update(Message::CycleHunkMode);
++        assert_eq!(app.hunk_mode, HunkMode::Wide);
++        let _ = app.update(Message::CycleHunkMode);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        let _ = app.update(Message::SetHunkMode(HunkMode::Focus));
++        assert_eq!(app.hunk_mode, HunkMode::Focus);
++        let _ = app.update(Message::CycleHunkMode);
++        assert_eq!(app.hunk_mode, HunkMode::Beside);
++        assert!(app.files_rail_open);
++    }
++
++    #[test]
++    fn wide_mode_expands_the_diff_split() {
++        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
++        let (_, beside_middle, _) = split_between(
++            &app.panes,
++            &[WorkspacePane::Graph],
++            &[WorkspacePane::Diff],
++        );
++        let _ = app.update(Message::SetHunkMode(HunkMode::Wide));
++        assert_eq!(app.hunk_mode, HunkMode::Wide);
++        assert!(app.files_rail_open);
++        assert!(app.inspector_open);
++        let (_, wide_middle, _) = split_between(
++            &app.panes,
++            &[WorkspacePane::Graph],
++            &[WorkspacePane::Diff],
++        );
++        assert!(wide_middle < beside_middle);
++    }
++
+     #[test]
+     fn toggling_the_files_rail_hides_and_restores_it() {
+         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+         app.ratios[LayoutPreset::InspectorOverDiff.index()].files = 0.30;
+         assert!(app.files_rail_open);
+ 
+         let _ = app.update(Message::ToggleFilesRail);
+         assert!(!app.files_rail_open);
+diff --git a/gui_app/src/layout.rs b/gui_app/src/layout.rs
+index 45101d9..751587d 100644
+--- a/gui_app/src/layout.rs
++++ b/gui_app/src/layout.rs
+@@ -15,16 +15,47 @@ pub(crate) const STACKED_MIDDLE_RATIO: f32 = 0.48;
+ pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.50;
+ 
+ /// Floor for the left staging ratio (avoids crushing Stage).
+ pub(crate) const MIN_FILES_RATIO: f32 = 0.16;
+ pub(crate) const MAX_FILES_RATIO: f32 = 0.36;
+ /// Floor for the middle history share of the post-staging remainder.
+ pub(crate) const MIN_GRAPH_RATIO: f32 = 0.50;
+ pub(crate) const MAX_GRAPH_RATIO: f32 = 0.82;
++/// Centre column share (Graph+Diff vs Inspector) when [`HunkMode::Wide`] is active.
++pub(crate) const WIDE_GRAPH_RATIO: f32 = 0.78;
++/// Graph share of the Graph/Diff stack when Wide is active (more room for Diff).
++pub(crate) const WIDE_MIDDLE_RATIO: f32 = 0.36;
++
++/// Diff presentation relative to the graph and side rails.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub(crate) enum HunkMode {
++    #[default]
++    Beside,
++    Wide,
++    Focus,
++}
++
++impl HunkMode {
++    pub(crate) fn label(self) -> &'static str {
++        match self {
++            Self::Beside => "Beside",
++            Self::Wide => "Wide",
++            Self::Focus => "Focus",
++        }
++    }
++
++    /// Toolbar cycle: Beside Γåö Wide (Focus is explicit only).
++    pub(crate) fn cycle(self) -> Self {
++        match self {
++            Self::Beside => Self::Wide,
++            Self::Wide | Self::Focus => Self::Beside,
++        }
++    }
++}
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum WorkspacePane {
+     Graph,
+     Inspector,
+     Diff,
+     Files,
+ }
+@@ -80,16 +111,27 @@ impl LayoutRatios {
+             graph: GRAPH_RATIO,
+             middle: match preset {
+                 LayoutPreset::Columns => COLUMNS_MIDDLE_RATIO,
+                 LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => STACKED_MIDDLE_RATIO,
+             },
+         }
+     }
+ 
++    pub(crate) fn for_hunk_mode(self, mode: HunkMode) -> Self {
++        match mode {
++            HunkMode::Beside | HunkMode::Focus => self,
++            HunkMode::Wide => Self {
++                graph: self.graph.max(WIDE_GRAPH_RATIO).min(MAX_GRAPH_RATIO),
++                middle: self.middle.min(WIDE_MIDDLE_RATIO),
++                files: self.files,
++            },
++        }
++    }
++
+     pub(crate) fn clamp_slot(&mut self, slot: RatioSlot, ratio: f32) {
+         match slot {
+             RatioSlot::Files => {
+                 self.files = ratio.clamp(MIN_FILES_RATIO, MAX_FILES_RATIO);
+             }
+             RatioSlot::Graph => {
+                 self.graph = ratio.clamp(MIN_GRAPH_RATIO, MAX_GRAPH_RATIO);
+             }
+@@ -111,71 +153,86 @@ pub(crate) fn default_ratios() -> [LayoutRatios; 3] {
+ /// Which ratio a splitter writes.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum RatioSlot {
+     Graph,
+     Middle,
+     Files,
+ }
+ 
+-pub(crate) fn new_panes(preset: LayoutPreset, ratios: &LayoutRatios) -> State<WorkspacePane> {
+-    State::with_configuration(configuration(preset, ratios, true))
+-}
+-
+-/// The same tree as [`new_panes`] without the staging column.
+-pub(crate) fn new_panes_without_files(
++pub(crate) fn new_panes(
+     preset: LayoutPreset,
+     ratios: &LayoutRatios,
++    show_files: bool,
++    show_inspector: bool,
+ ) -> State<WorkspacePane> {
+-    State::with_configuration(configuration(preset, ratios, false))
++    State::with_configuration(configuration(
++        preset,
++        ratios,
++        show_files,
++        show_inspector,
++    ))
+ }
+ 
+-/// Split handles produced by the latest [`new_panes`] or [`new_panes_without_files`].
++/// Split handles produced by the latest [`new_panes`] call.
+ pub(crate) fn split_slots(state: &State<WorkspacePane>) -> Vec<(Split, RatioSlot)> {
+     let mut slots = Vec::new();
+     collect_slots(state.layout(), state, &mut slots);
+     slots
+ }
+ 
+ fn configuration(
+     preset: LayoutPreset,
+     ratios: &LayoutRatios,
+-    files: bool,
++    show_files: bool,
++    show_inspector: bool,
+ ) -> Configuration<WorkspacePane> {
+     let history = match preset {
+-        LayoutPreset::Columns => split(
+-            Axis::Vertical,
+-            ratios.middle,
+-            Configuration::Pane(WorkspacePane::Diff),
+-            Configuration::Pane(WorkspacePane::Inspector),
+-        ),
++        LayoutPreset::Columns => {
++            if show_inspector {
++                split(
++                    Axis::Vertical,
++                    ratios.middle,
++                    Configuration::Pane(WorkspacePane::Diff),
++                    Configuration::Pane(WorkspacePane::Inspector),
++                )
++            } else {
++                Configuration::Pane(WorkspacePane::Diff)
++            }
++        }
+         LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+             middle_axis(preset),
+             ratios.middle,
+             Configuration::Pane(WorkspacePane::Graph),
+             Configuration::Pane(WorkspacePane::Diff),
+         ),
+     };
+ 
+     let centre = match preset {
+         LayoutPreset::Columns => split(
+             Axis::Vertical,
+             ratios.graph,
+             Configuration::Pane(WorkspacePane::Graph),
+             history,
+         ),
+-        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+-            outer_axis(preset),
+-            ratios.graph,
+-            history,
+-            Configuration::Pane(WorkspacePane::Inspector),
+-        ),
++        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => {
++            if show_inspector {
++                split(
++                    outer_axis(preset),
++                    ratios.graph,
++                    history,
++                    Configuration::Pane(WorkspacePane::Inspector),
++                )
++            } else {
++                history
++            }
++        }
+     };
+ 
+-    if files {
++    if show_files {
+         split(
+             outer_axis(preset),
+             ratios.files,
+             Configuration::Pane(WorkspacePane::Files),
+             centre,
+         )
+     } else {
+         centre
+diff --git a/gui_app/src/view/top_bar.rs b/gui_app/src/view/top_bar.rs
+index fc911e8..8050fa4 100644
+--- a/gui_app/src/view/top_bar.rs
++++ b/gui_app/src/view/top_bar.rs
+@@ -62,16 +62,17 @@ pub(super) fn top_bar<'a>(
+ 
+     let mut right = row![horizontal_space()]
+         .spacing(COMMAND_SPACING)
+         .align_y(Alignment::Center)
+         .width(Length::Fill);
+     for button in command_buttons(&top_commands, &branch_selection, app, tokens, reading) {
+         right = right.push(button);
+     }
++    right = right.push(hunk_segment(app.hunk_mode, tokens));
+     right = right.push(layout_segment(app.layout, tokens));
+     right = right.push(quiet_button(
+         OPEN_REPOSITORY,
+         Message::ChooseRepositoryFolder,
+         !app.session().state.loading,
+         tokens,
+         reading,
+     ));
+@@ -184,16 +185,90 @@ fn search_field<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Messa
+             width: 1.0,
+             radius: SEG_RADIUS.into(),
+         },
+         shadow: Shadow::default(),
+     })
+     .into()
+ }
+ 
++fn hunk_segment<'a>(current: crate::layout::HunkMode, tokens: DesignTokens) -> Element<'a, Message> {
++    container(
++        row![
++            hunk_button(crate::layout::HunkMode::Beside, current, tokens),
++            hunk_button(crate::layout::HunkMode::Wide, current, tokens),
++            hunk_button(crate::layout::HunkMode::Focus, current, tokens),
++        ]
++        .spacing(0),
++    )
++    .style(move |_theme: &Theme| container::Style {
++        background: Some(Background::Color(tokens.chip)),
++        text_color: Some(tokens.text_primary),
++        border: Border {
++            color: tokens.chip_border,
++            width: 1.0,
++            radius: SEG_RADIUS.into(),
++        },
++        shadow: Shadow::default(),
++    })
++    .into()
++}
++
++fn hunk_button<'a>(
++    mode: crate::layout::HunkMode,
++    current: crate::layout::HunkMode,
++    tokens: DesignTokens,
++) -> Element<'a, Message> {
++    let active = mode == current;
++    let ink = if active {
++        Color::BLACK
++    } else {
++        tokens.text_primary
++    };
++    let label = match mode {
++        crate::layout::HunkMode::Beside => "B",
++        crate::layout::HunkMode::Wide => "W",
++        crate::layout::HunkMode::Focus => "F",
++    };
++    iced::widget::button(
++        text(label)
++            .size(11.0)
++            .style(move |_| text::Style { color: Some(ink) }),
++    )
++    .padding([4, 6])
++    .on_press(Message::SetHunkMode(mode))
++    .style(move |_theme, status| {
++        let hot = matches!(
++            status,
++            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
++        );
++        iced::widget::button::Style {
++            background: Some(Background::Color(if active {
++                tokens.accent_primary
++            } else if hot {
++                tokens.bg_raised
++            } else {
++                tokens.chip
++            })),
++            text_color: ink,
++            border: Border {
++                color: if active {
++                    tokens.accent_primary
++                } else {
++                    tokens.chip_border
++                },
++                width: 1.0,
++                radius: 0.0.into(),
++            },
++            shadow: Shadow::default(),
++        }
++    })
++    .into()
++}
++
+ fn layout_segment<'a>(
+     current: crate::layout::LayoutPreset,
+     tokens: DesignTokens,
+ ) -> Element<'a, Message> {
+     container(
+         row![
+             layout_button(crate::layout::LayoutPreset::Columns, current, tokens),
+             layout_button(
+diff --git a/gui_app/src/view/workspace.rs b/gui_app/src/view/workspace.rs
+index f3b7961..28c0e46 100644
+--- a/gui_app/src/view/workspace.rs
++++ b/gui_app/src/view/workspace.rs
+@@ -1,10 +1,10 @@
+ use crate::app::{GitApp, Message};
+-use crate::layout::{LayoutPreset, WorkspacePane};
++use crate::layout::{HunkMode, LayoutPreset, WorkspacePane};
+ use crate::selection::{context_label, Selection};
+ use crate::theme::DesignTokens;
+ use iced::widget::pane_grid::{self, Content};
+ use iced::widget::{button, column, container, row, text};
+ use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
+ 
+ use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+ use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
+@@ -41,17 +41,17 @@ pub(super) fn workspace<'a>(
+         };
+         Content::new(body).style(move |_theme| pane_surface(tokens, *surface))
+     })
+     .spacing(PANE_SPACING)
+     .on_resize(SPLIT_HIT, Message::PaneResized)
+     .width(Length::Fill)
+     .height(Length::Fill);
+ 
+-    if app.files_rail_open {
++    if app.files_rail_open || app.hunk_mode == HunkMode::Focus {
+         return grid.into();
+     }
+ 
+     let rail = collapsed_files_rail(app.layout, tokens, reading);
+     match app.layout {
+         LayoutPreset::Stacked => column![rail, grid]
+             .width(Length::Fill)
+             .height(Length::Fill)
+

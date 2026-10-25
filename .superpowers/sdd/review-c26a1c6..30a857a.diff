@@ -1,0 +1,208 @@
+diff --git a/gui_app/src/app.rs b/gui_app/src/app.rs
+index abb130f..73b3d4e 100644
+--- a/gui_app/src/app.rs
++++ b/gui_app/src/app.rs
+@@ -1419,20 +1419,21 @@ impl GitApp {
+                     // Keep the last good catalogue; the explorer shows why it is stale.
+                     Err(error) => self.catalogue_error = Some(error_message(&error)),
+                 }
+                 Task::none()
+             }
+             Message::AskCreateWorktree => {
+                 if self.worktree_busy || self.active_session().is_none() {
+                     return Task::none();
+                 }
+                 self.close_prompts();
++                self.error = None;
+                 self.worktree_prompt = Some(WorktreePrompt::Create {
+                     path: String::new(),
+                     branch: String::new(),
+                     create_branch: true,
+                 });
+                 Task::none()
+             }
+             Message::AskRemoveWorktree { path } => self.ask_remove_worktree(&path),
+             Message::WorktreePathChanged(value) => {
+                 if let Some(WorktreePrompt::Create { path, .. }) = &mut self.worktree_prompt {
+@@ -1634,20 +1635,27 @@ impl GitApp {
+         &mut self,
+         path: String,
+         result: Result<OpenedRepository, DomainError>,
+     ) -> Task<Message> {
+         // A result that is not the open in flight belongs to a replaced repository.
+         let expected = self
+             .worktree_opening
+             .as_deref()
+             .is_some_and(|pending| same_path(pending, &path));
+         if !expected {
++            // An empty path is a failure with no echo; it can only be ours, so release the lock.
++            if path.trim().is_empty() {
++                self.worktree_opening = None;
++                if let Err(error) = result {
++                    self.error = Some(error_message(&error));
++                }
++            }
+             return Task::none();
+         }
+         self.worktree_opening = None;
+         if self.sessions.is_empty() {
+             return Task::none();
+         }
+         match result {
+             Ok(OpenedRepository(repo)) => {
+                 if let Some(index) = self
+                     .sessions
+@@ -1690,20 +1698,21 @@ impl GitApp {
+         let prompt = WorktreePrompt::Remove {
+             path: entry.path.clone(),
+             branch: entry.branch.clone(),
+             force: false,
+         };
+         if self.only_session_is(path) {
+             self.error = Some("Open another worktree tab before removing this one.".to_string());
+             return Task::none();
+         }
+         self.close_prompts();
++        self.error = None;
+         self.worktree_prompt = Some(prompt);
+         Task::none()
+     }
+ 
+     /// True when `path` is the only open session, so removing it would leave no tab.
+     fn only_session_is(&self, path: &str) -> bool {
+         self.sessions.len() == 1 && same_path(&self.sessions[0].path, path)
+     }
+ 
+     fn confirm_create_worktree(&mut self) -> Task<Message> {
+@@ -4011,20 +4020,62 @@ mod tests {
+         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+ 
+         let _ = app.update(Message::WorktreeOpened(
+             SECOND.to_string(),
+             Ok(OpenedRepository(std::sync::Arc::new(populated_repo()))),
+         ));
+ 
+         assert_eq!(app.sessions.len(), 1);
+     }
+ 
++    #[test]
++    fn an_empty_path_open_failure_releases_the_open_lock() {
++        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
++        let _ = app.update(Message::OpenWorktree(SECOND.to_string()));
++        assert_eq!(app.worktree_opening.as_deref(), Some(SECOND));
++
++        // The interrupted-thread shape: no path echoed back.
++        let _ = app.update(Message::WorktreeOpened(
++            String::new(),
++            Err(DomainError::Unknown(
++                "repository open was interrupted".to_string(),
++            )),
++        ));
++
++        assert!(app.worktree_opening.is_none());
++        assert_eq!(app.sessions.len(), 1);
++        assert!(app.error.is_some());
++
++        // A later open is accepted rather than silently dropped.
++        let _ = app.update(Message::OpenWorktree(THIRD.to_string()));
++        assert_eq!(app.worktree_opening.as_deref(), Some(THIRD));
++    }
++
++    #[test]
++    fn asking_to_create_or_remove_clears_a_stale_error() {
++        let mut app = catalogued_app();
++        app.error = Some("stale".to_string());
++        let _ = app.update(Message::AskCreateWorktree);
++        assert!(app.worktree_prompt.is_some());
++        assert_eq!(app.error, None);
++
++        app.error = Some("stale".to_string());
++        let _ = app.update(Message::AskRemoveWorktree {
++            path: THIRD.to_string(),
++        });
++        assert!(matches!(
++            app.worktree_prompt,
++            Some(WorktreePrompt::Remove { .. })
++        ));
++        assert_eq!(app.error, None);
++    }
++
+     #[test]
+     fn a_worktree_opens_through_the_worktree_opener_and_never_remembers() {
+         use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+         fn counting(calls: &Arc<AtomicUsize>) -> RepositoryOpener {
+             let calls = Arc::clone(calls);
+             Arc::new(move |_| {
+                 calls.fetch_add(1, Ordering::SeqCst);
+                 Ok(Arc::new(FakeGitRepository::ok()) as SharedRepository)
+             })
+diff --git a/gui_app/src/jobs.rs b/gui_app/src/jobs.rs
+index 78f3b3e..4aededa 100644
+--- a/gui_app/src/jobs.rs
++++ b/gui_app/src/jobs.rs
+@@ -232,28 +232,30 @@ pub(crate) fn choose_repository_folder(
+                 .map(|path| path.to_string_lossy().into_owned())
+         },
+         || None,
+     )
+ }
+ 
+ pub(crate) fn open_repository_in_background(
+     open: crate::RepositoryOpener,
+     path: String,
+ ) -> impl Future<Output = (String, Result<SharedRepository, DomainError>)> {
++    // The interrupted fallback echoes the requested path, like the success path.
++    let echoed = path.clone();
+     in_background(
+         move || {
+             let result = open(&path);
+             (path, result)
+         },
+-        || {
++        move || {
+             (
+-                String::new(),
++                echoed,
+                 Err(DomainError::Unknown(
+                     "repository open was interrupted".to_string(),
+                 )),
+             )
+         },
+     )
+ }
+ 
+ pub(crate) fn worktrees_in_background(
+     repo: SharedRepository,
+@@ -787,20 +789,31 @@ mod tests {
+         });
+         let (path, result) = iced::futures::executor::block_on(open_repository_in_background(
+             open,
+             r"D:\repo".to_string(),
+         ));
+         assert_eq!(path, r"D:\repo");
+         assert!(result.is_ok());
+         assert_eq!(seen.lock().expect("path lock").as_str(), r"D:\repo");
+     }
+ 
++    #[test]
++    fn an_interrupted_open_echoes_the_requested_path() {
++        let open: crate::RepositoryOpener = Arc::new(|_| panic!("opener thread died"));
++        let (path, result) = iced::futures::executor::block_on(open_repository_in_background(
++            open,
++            r"D:\repo".to_string(),
++        ));
++        assert_eq!(path, r"D:\repo");
++        assert!(result.is_err());
++    }
++
+     #[test]
+     fn background_edit_returns_the_adapter_result() {
+         let declining = FakeGitRepository {
+             commit_result: Err(DomainError::Unknown("hook declined".to_string())),
+             ..FakeGitRepository::ok()
+         };
+         let ok = iced::futures::executor::block_on(edit_in_background(
+             Arc::new(FakeGitRepository::ok()),
+             WorktreeEdit::Commit("record the change".to_string()),
+         ));

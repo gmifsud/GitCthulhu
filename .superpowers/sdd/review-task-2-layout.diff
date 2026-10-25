@@ -1,0 +1,945 @@
+# Review package Task 2
+BASE: 74b5628
+HEAD: decd0d6
+
+## Commits
+decd0d6 feat: fuse WIP and commit files into the right navigator
+
+## Stat
+ gui_app/src/view/changes.rs   | 175 ++++++++++++++++-------
+ gui_app/src/view/files_nav.rs | 317 ++++++++++++++++++++++++++++++++++++++++++
+ gui_app/src/view/mod.rs       |   1 +
+ gui_app/src/view/workspace.rs | 237 +------------------------------
+ 4 files changed, 450 insertions(+), 280 deletions(-)
+
+## Diff
+diff --git a/gui_app/src/view/changes.rs b/gui_app/src/view/changes.rs
+index 1b2a6f4..979271d 100644
+--- a/gui_app/src/view/changes.rs
++++ b/gui_app/src/view/changes.rs
+@@ -1,41 +1,102 @@
+ use std::collections::HashSet;
+ 
+ use crate::app::{GitApp, Message};
+-use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow};
++use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow, ChangeSection};
+ use crate::selection::Selection;
+ use crate::theme::DesignTokens;
+ use core_domain::FileDisposition;
+ use iced::widget::button::Status;
+ use iced::widget::text::Wrapping;
+ use iced::widget::{button, column, container, row, scrollable, text, text_input};
+ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
+ 
+ use super::chrome::{
+     field_style, fold_mark, glyph, icon_button, panel_style, section_label, Reading,
+ };
+ 
+ /// Rows drawn per section. Each row is two buttons, so a huge untracked set would stall layout.
+ /// "Select all" still covers every file; only the drawing is bounded.
+ const FILE_ROWS_SHOWN: usize = 500;
+ 
++/// Working-tree staging for the right files navigator (no left-rail chrome).
++pub(crate) fn wip_working_tree_block<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let status = app.session().state.current_status.as_ref();
++    let file_count = status
++        .map(|status| {
++            change_sections(status)
++                .iter()
++                .map(|section| section.files.len())
++                .sum::<usize>()
++        })
++        .unwrap_or(0);
++    let title = if file_count == 0 {
++        "Working tree".to_string()
++    } else if file_count == 1 {
++        "Working tree ┬╖ 1 file".to_string()
++    } else {
++        format!("Working tree ┬╖ {file_count} files")
++    };
++
++    let mut changes = column![text(title)
++        .font(reading.font)
++        .size((reading.size - 2.0).max(11.0))
++        .style(move |_| text::Style {
++            color: Some(tokens.text_muted),
++        })]
++    .spacing(4)
++    .padding([6, 12]);
++    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
++    changes = changes.push(wip_file_sections(app, selection, status, tokens, reading));
++    changes.into()
++}
++
+ pub(super) fn changes_pane<'a>(
+     app: &'a GitApp,
+     selection: &Selection,
+     tokens: DesignTokens,
+     reading: Reading,
++) -> Element<'a, Message> {
++    let mut changes = column![section_label(tokens, reading, "Changes")]
++        .spacing(4)
++        .padding(6);
++    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
++    changes = changes.push(wip_file_sections(
++        app,
++        selection,
++        app.session().state.current_status.as_ref(),
++        tokens,
++        reading,
++    ));
++
++    container(scrollable(changes))
++        .width(Length::Fill)
++        .height(Length::Fill)
++        .style(move |_theme: &Theme| panel_style(tokens, true))
++        .into()
++}
++
++fn wip_toolbar<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
+ ) -> Element<'a, Message> {
+     let stageable = !marked_paths(&app.session().marked_files, true).is_empty();
+     let unstageable = !marked_paths(&app.session().marked_files, false).is_empty();
+     let chosen = app.session().marked_files.len();
+-    let mut changes = column![
+-        section_label(tokens, reading, "Changes"),
++    column![
+         row![
+             text_input("Commit message", &app.session().commit_message)
+                 .on_input(Message::CommitMessageChanged)
+                 .padding(6)
+                 .width(Length::Fill)
+                 .style(field_style(tokens)),
+             icon_button(
+                 "Γ£ª",
+                 "Suggest commit message",
+                 "changes-suggest",
+@@ -132,92 +193,106 @@ pub(super) fn changes_pane<'a>(
+         } else {
+             format!("{chosen} selected")
+         })
+         .font(reading.font)
+         .size((reading.size - 2.0).max(11.0))
+         .style(move |_| text::Style {
+             color: Some(tokens.text_muted),
+         }),
+     ]
+     .spacing(4)
+-    .padding(6);
++    .into()
++}
+ 
+-    match &app.session().state.current_status {
++fn wip_file_sections<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    status: Option<&core_domain::RepoStatus>,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut sections_col = column![].spacing(4);
++    match status {
+         None => {
+-            changes = changes.push(
++            sections_col = sections_col.push(
+                 text("Not loaded yet")
+                     .font(reading.font)
+                     .size(reading.size)
+                     .style(move |_| text::Style {
+                         color: Some(tokens.text_muted),
+                     }),
+-            )
++            );
+         }
+         Some(status) => {
+             let sections = change_sections(status);
+             if sections.is_empty() {
+-                changes = changes.push(
++                sections_col = sections_col.push(
+                     text("Working tree clean")
+                         .font(reading.font)
+                         .size(reading.size)
+                         .style(move |_| text::Style {
+                             color: Some(tokens.text_muted),
+                         }),
+                 );
+             }
+             for section in sections {
+-                let folded = app.session().collapsed_sections.contains(&section.place);
+-                let mut files = column![section_header(
+-                    section.title,
+-                    section.files.len(),
+-                    folded,
+-                    section.place,
+-                    tokens,
+-                    reading,
+-                )]
+-                .spacing(0);
+-                if !folded {
+-                    let collapsed = collapsed_prefixes(app, section.place);
+-                    let rows =
+-                        change_rows(section.files, section.place, app.files_as_tree, &collapsed);
+-                    let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
+-                    for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
+-                        files = files.push(change_line(
+-                            row_item,
+-                            section.place,
+-                            app,
+-                            selection,
+-                            tokens,
+-                            reading,
+-                        ));
+-                    }
+-                    if hidden > 0 {
+-                        files = files.push(
+-                            text(format!("ΓÇª and {hidden} more"))
+-                                .font(reading.font)
+-                                .size((reading.size - 2.0).max(11.0))
+-                                .style(move |_| text::Style {
+-                                    color: Some(tokens.text_muted),
+-                                }),
+-                        );
+-                    }
+-                }
+-                changes = changes.push(files);
++                sections_col =
++                    sections_col.push(section_block(app, selection, section, tokens, reading));
+             }
+         }
+     }
++    sections_col.into()
++}
+ 
+-    container(scrollable(changes))
+-        .width(Length::Fill)
+-        .height(Length::Fill)
+-        .style(move |_theme: &Theme| panel_style(tokens, true))
+-        .into()
++fn section_block<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    section: ChangeSection<'_>,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let folded = app.session().collapsed_sections.contains(&section.place);
++    let mut files = column![section_header(
++        section.title,
++        section.files.len(),
++        folded,
++        section.place,
++        tokens,
++        reading,
++    )]
++    .spacing(0);
++    if !folded {
++        let collapsed = collapsed_prefixes(app, section.place);
++        let rows = change_rows(section.files, section.place, app.files_as_tree, &collapsed);
++        let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
++        for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
++            files = files.push(change_line(
++                row_item,
++                section.place,
++                app,
++                selection,
++                tokens,
++                reading,
++            ));
++        }
++        if hidden > 0 {
++            files = files.push(
++                text(format!("ΓÇª and {hidden} more"))
++                    .font(reading.font)
++                    .size((reading.size - 2.0).max(11.0))
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            );
++        }
++    }
++    files.into()
+ }
+ 
+ fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {
+     app.session().collapsed_dirs
+         .iter()
+         .filter(|(entry_place, _)| *entry_place == place)
+         .map(|(_, prefix)| prefix.clone())
+         .collect()
+ }
+ 
+diff --git a/gui_app/src/view/files_nav.rs b/gui_app/src/view/files_nav.rs
+new file mode 100644
+index 0000000..9087acb
+--- /dev/null
++++ b/gui_app/src/view/files_nav.rs
+@@ -0,0 +1,317 @@
++//! Right inspector: working-tree staging stacked above commit file list.
++
++use crate::app::{GitApp, Message};
++use crate::changes::change_sections;
++use crate::selection::{short_hash, Selection};
++use crate::theme::DesignTokens;
++use core_domain::RepoStatus;
++use iced::widget::text::Wrapping;
++use iced::widget::{button, column, container, row, scrollable, text};
++use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use super::changes::wip_working_tree_block;
++use super::chrome::{command_button, Reading};
++use super::history::relative_age;
++use super::patch::patch_stats;
++use iced::widget::button::Status;
++
++pub(crate) fn show_wip_block(status: Option<&RepoStatus>) -> bool {
++    status.is_some_and(|status| !change_sections(status).is_empty())
++}
++
++pub(crate) fn show_commit_block(selection: &Selection) -> bool {
++    matches!(selection, Selection::Commit { .. })
++}
++
++fn show_tag_block(selection: &Selection) -> bool {
++    matches!(selection, Selection::Tag { .. })
++}
++
++pub(crate) fn files_navigator<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let status = app.session().state.current_status.as_ref();
++    let wip = show_wip_block(status);
++    let commit = show_commit_block(selection);
++    let tag = show_tag_block(selection);
++
++    if !wip && !commit && !tag {
++        return empty_navigator_hint(tokens, reading);
++    }
++
++    let mut body = column![].spacing(8).width(Length::Fill);
++
++    if wip {
++        body = body.push(wip_working_tree_block(app, selection, tokens, reading));
++    }
++
++    if commit {
++        if let Some(meta) = commit_meta(app, selection, tokens, reading) {
++            body = body.push(meta);
++        }
++        body = body.push(commit_files_block(app, tokens, reading));
++    } else if tag {
++        if let Some(meta) = tag_meta(selection, tokens, reading) {
++            body = body.push(meta);
++        }
++        body = body.push(commit_files_block(app, tokens, reading));
++    }
++
++    container(scrollable(body))
++        .width(Length::Fill)
++        .height(Length::Fill)
++        .into()
++}
++
++fn empty_navigator_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
++    container(
++        text("Select a commit or make a change.")
++            .font(reading.font)
++            .size(reading.size)
++            .style(move |_| text::Style {
++                color: Some(tokens.text_muted),
++            }),
++    )
++    .padding([12, 12])
++    .width(Length::Fill)
++    .height(Length::Fill)
++    .into()
++}
++
++fn commit_meta<'a>(
++    app: &'a GitApp,
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Option<Element<'a, Message>> {
++    let Selection::Commit { id } = selection else {
++        return None;
++    };
++    let commit = app.session().state.commits.iter().find(|commit| &commit.id == id)?;
++    let now = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map(|d| d.as_secs() as i64)
++        .unwrap_or(commit.timestamp);
++    let meta = format!(
++        "{} ┬╖ {} ┬╖ {}",
++        short_hash(&commit.id),
++        commit.author,
++        relative_age(now, commit.timestamp)
++    );
++    Some(
++        container(
++            column![
++                text(commit.message.clone())
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_primary),
++                    }),
++                text(meta)
++                    .font(reading.font)
++                    .size((reading.size - 2.0).max(11.0))
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            ]
++            .spacing(4),
++        )
++        .padding([0, 12])
++        .into(),
++    )
++}
++
++fn tag_meta<'a>(
++    selection: &Selection,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Option<Element<'a, Message>> {
++    let Selection::Tag { name, .. } = selection else {
++        return None;
++    };
++    Some(
++        container(
++            text(name.clone())
++                .font(reading.font)
++                .size(reading.size)
++                .style(move |_| text::Style {
++                    color: Some(tokens.text_primary),
++                }),
++        )
++        .padding([0, 12])
++        .into(),
++    )
++}
++
++pub(crate) fn commit_files_block<'a>(
++    app: &'a GitApp,
++    tokens: DesignTokens,
++    reading: Reading,
++) -> Element<'a, Message> {
++    let mut block = column![].spacing(2).padding([4, 12]);
++    if app.session().patch_pending {
++        return block
++            .push(
++                text("Loading filesΓÇª")
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            )
++            .into();
++    }
++    if let Some(error) = &app.session().patch_error {
++        return block
++            .push(
++                text(error.clone())
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.accent_primary),
++                    }),
++            )
++            .into();
++    }
++    if app.session().patches.is_empty() {
++        return block
++            .push(
++                text("No files in this commit")
++                    .font(reading.font)
++                    .size(reading.size)
++                    .style(move |_| text::Style {
++                        color: Some(tokens.text_muted),
++                    }),
++            )
++            .into();
++    }
++
++    let (total_added, total_removed) = app.session().patches.iter().fold((0, 0), |(a, r), patch| {
++        let (added, removed) = patch_stats(patch);
++        (a + added, r + removed)
++    });
++    let title = format!(
++        "Files changed ({})  +{total_added} ΓêÆ{total_removed}",
++        app.session().patches.len()
++    );
++    let mut heading = row![text(title)
++        .font(reading.font)
++        .size((reading.size - 2.0).max(11.0))
++        .style(move |_| text::Style {
++            color: Some(tokens.text_muted),
++        })]
++    .spacing(8)
++    .align_y(Alignment::Center);
++    if app.session().focused_diff_path.is_some() {
++        heading = heading.push(iced::widget::horizontal_space()).push(
++            command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
++        );
++    }
++    block = block.push(heading);
++
++    for patch in &app.session().patches {
++        let (added, removed) = patch_stats(patch);
++        let focused = app.session().focused_diff_path.as_deref() == Some(patch.path.as_str());
++        let stats = if patch.binary {
++            "binary".to_string()
++        } else {
++            format!("+{added} ΓêÆ{removed}")
++        };
++        let path = patch.path.clone();
++        block = block.push(
++            button(
++                row![
++                    text(patch.path.clone())
++                        .font(reading.mono)
++                        .size((reading.size - 2.0).max(11.0))
++                        .wrapping(Wrapping::None)
++                        .width(Length::Fill),
++                    text(stats)
++                        .font(reading.mono)
++                        .size((reading.size - 2.0).max(11.0))
++                        .style(move |_| text::Style {
++                            color: Some(if added > 0 && removed == 0 {
++                                tokens.added
++                            } else if removed > 0 && added == 0 {
++                                tokens.removed
++                            } else {
++                                tokens.text_muted
++                            }),
++                        }),
++                ]
++                .spacing(8)
++                .align_y(Alignment::Center),
++            )
++            .padding([2, 4])
++            .width(Length::Fill)
++            .on_press(Message::FocusDiffPath(path))
++            .style(move |_theme, status| {
++                let hot = matches!(status, Status::Hovered | Status::Pressed);
++                iced::widget::button::Style {
++                    background: Some(Background::Color(if focused || hot {
++                        tokens.border
++                    } else {
++                        Color::TRANSPARENT
++                    })),
++                    text_color: tokens.text_secondary,
++                    border: Border::default(),
++                    shadow: Shadow::default(),
++                }
++            }),
++        );
++    }
++
++    block.into()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use core_domain::RepoStatus;
++
++    fn clean_status() -> RepoStatus {
++        RepoStatus {
++            staged_files: vec![],
++            unstaged_files: vec![],
++            untracked_files: vec![],
++            tracking: None,
++            head_commit_id: None,
++        }
++    }
++
++    fn dirty_status() -> RepoStatus {
++        RepoStatus {
++            staged_files: vec![],
++            unstaged_files: vec!["a.rs".into()],
++            untracked_files: vec![],
++            tracking: None,
++            head_commit_id: None,
++        }
++    }
++
++    #[test]
++    fn wip_block_hidden_when_clean() {
++        assert!(!show_wip_block(None));
++        assert!(!show_wip_block(Some(&clean_status())));
++    }
++
++    #[test]
++    fn wip_block_shown_when_dirty() {
++        assert!(show_wip_block(Some(&dirty_status())));
++    }
++
++    #[test]
++    fn commit_block_for_commit_selection_only() {
++        assert!(show_commit_block(&Selection::Commit {
++            id: "abc".into()
++        }));
++        assert!(!show_commit_block(&Selection::Branch {
++            name: "main".into(),
++            current: true,
++        }));
++    }
++}
+diff --git a/gui_app/src/view/mod.rs b/gui_app/src/view/mod.rs
+index 079ce14..601664c 100644
+--- a/gui_app/src/view/mod.rs
++++ b/gui_app/src/view/mod.rs
+@@ -1,13 +1,14 @@
+ mod branch;
+ mod changes;
+ mod chrome;
++mod files_nav;
+ mod commands;
+ mod confirm;
+ mod context_overlay;
+ mod explorer;
+ mod history;
+ mod patch;
+ mod refs;
+ mod settings;
+ mod status_bar;
+ mod tabs;
+diff --git a/gui_app/src/view/workspace.rs b/gui_app/src/view/workspace.rs
+index 77809db..f3b7961 100644
+--- a/gui_app/src/view/workspace.rs
++++ b/gui_app/src/view/workspace.rs
+@@ -1,27 +1,24 @@
+ use crate::app::{GitApp, Message};
+ use crate::layout::{LayoutPreset, WorkspacePane};
+ use crate::selection::{context_label, Selection};
+ use crate::theme::DesignTokens;
+ use iced::widget::pane_grid::{self, Content};
+-use iced::widget::text::Wrapping;
+-use iced::widget::{button, column, container, row, scrollable, text};
+-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
++use iced::widget::{button, column, container, row, text};
++use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
+ 
+-use super::chrome::{command_button, hairline, icon_button, pane_title, symbol_reading, Reading};
++use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+ use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
+ use super::explorer::explorer_pane;
+-use super::history::{history_pane, relative_age};
+-use super::patch::{patch_pane, patch_stats};
+-use crate::selection::short_hash;
+-use iced::widget::button::Status;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use super::files_nav::files_navigator;
++use super::history::history_pane;
++use super::patch::patch_pane;
+ 
+ const PANE_SPACING: f32 = 4.0;
+ const SPLIT_HIT: f32 = 8.0;
+ const HEAD_PADDING_Y: f32 = 4.0;
+ const HEAD_PADDING_X: f32 = 8.0;
+ const COMMAND_SPACING: f32 = 6.0;
+ const FILES_RAIL_WIDTH: f32 = 36.0;
+ const FILES_TITLE: &str = "Explorer";
+ const GRAPH_TITLE: &str = "History";
+ const DIFF_TITLE: &str = "Diff";
+@@ -115,21 +112,21 @@ fn graph<'a>(
+ fn inspector<'a>(
+     app: &'a GitApp,
+     selection: &Selection,
+     layout: LayoutPreset,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     let _ = layout;
+     column![
+         inspector_head(app, selection, tokens, reading),
+-        detail_body(app, selection, tokens, reading),
++        files_navigator(app, selection, tokens, reading),
+     ]
+     .width(Length::Fill)
+     .height(Length::Fill)
+     .into()
+ }
+ 
+ fn diff<'a>(
+     app: &'a GitApp,
+     _selection: &Selection,
+     layout: LayoutPreset,
+@@ -149,225 +146,20 @@ fn diff<'a>(
+                 .width(Length::Fill),
+             hairline(tokens),
+         ],
+         patch_pane(app, tokens, reading),
+     ]
+     .width(Length::Fill)
+     .height(Length::Fill)
+     .into()
+ }
+ 
+-fn detail_body<'a>(
+-    app: &'a GitApp,
+-    selection: &Selection,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let show_patch = matches!(selection, Selection::Commit { .. } | Selection::Tag { .. });
+-    if !show_patch {
+-        return inspector_working_hint(tokens, reading);
+-    }
+-
+-    // Do not give the column `Length::Fill` height: it sits inside a
+-    // scrollable, and iced panics when a vertically filling child is laid
+-    // out inside a scrollable viewport.
+-    let mut body = column![row![icon_button(
+-        "Γîé",
+-        "Working tree",
+-        "inspector-working-tree",
+-        app.tip_ready("inspector-working-tree"),
+-        Message::ShowWorkingTree,
+-        true,
+-        false,
+-        tokens,
+-        reading,
+-    )]
+-    .padding([8, 12])]
+-    .spacing(4)
+-    .width(Length::Fill);
+-
+-    if let Selection::Commit { id } = selection {
+-        if let Some(commit) = app.session().state.commits.iter().find(|commit| &commit.id == id) {
+-            let now = SystemTime::now()
+-                .duration_since(UNIX_EPOCH)
+-                .map(|d| d.as_secs() as i64)
+-                .unwrap_or(commit.timestamp);
+-            let meta = format!(
+-                "{} ┬╖ {} ┬╖ {}",
+-                short_hash(&commit.id),
+-                commit.author,
+-                relative_age(now, commit.timestamp)
+-            );
+-            body = body.push(
+-                container(
+-                    column![
+-                        text(commit.message.clone())
+-                            .font(reading.font)
+-                            .size(reading.size)
+-                            .style(move |_| text::Style {
+-                                color: Some(tokens.text_primary),
+-                            }),
+-                        text(meta)
+-                            .font(reading.font)
+-                            .size((reading.size - 2.0).max(11.0))
+-                            .style(move |_| text::Style {
+-                                color: Some(tokens.text_muted),
+-                            }),
+-                    ]
+-                    .spacing(4),
+-                )
+-                .padding([0, 12]),
+-            );
+-        }
+-    } else if let Selection::Tag { name, .. } = selection {
+-        body = body.push(
+-            container(
+-                text(name.clone())
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.text_primary),
+-                    }),
+-            )
+-            .padding([0, 12]),
+-        );
+-    }
+-
+-    body = body.push(commit_files_block(app, tokens, reading));
+-
+-    container(scrollable(body))
+-        .width(Length::Fill)
+-        .height(Length::Fill)
+-        .into()
+-}
+-
+-fn commit_files_block<'a>(
+-    app: &'a GitApp,
+-    tokens: DesignTokens,
+-    reading: Reading,
+-) -> Element<'a, Message> {
+-    let mut block = column![].spacing(2).padding([4, 12]);
+-    if app.session().patch_pending {
+-        return block
+-            .push(
+-                text("Loading filesΓÇª")
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.text_muted),
+-                    }),
+-            )
+-            .into();
+-    }
+-    if let Some(error) = &app.session().patch_error {
+-        return block
+-            .push(
+-                text(error.clone())
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.accent_primary),
+-                    }),
+-            )
+-            .into();
+-    }
+-    if app.session().patches.is_empty() {
+-        return block
+-            .push(
+-                text("No files in this commit")
+-                    .font(reading.font)
+-                    .size(reading.size)
+-                    .style(move |_| text::Style {
+-                        color: Some(tokens.text_muted),
+-                    }),
+-            )
+-            .into();
+-    }
+-
+-    let (total_added, total_removed) = app.session().patches.iter().fold((0, 0), |(a, r), patch| {
+-        let (added, removed) = patch_stats(patch);
+-        (a + added, r + removed)
+-    });
+-    let title = format!(
+-        "Files changed ({})  +{total_added} ΓêÆ{total_removed}",
+-        app.session().patches.len()
+-    );
+-    let mut heading = row![text(title)
+-        .font(reading.font)
+-        .size((reading.size - 2.0).max(11.0))
+-        .style(move |_| text::Style {
+-            color: Some(tokens.text_muted),
+-        })]
+-    .spacing(8)
+-    .align_y(Alignment::Center);
+-    if app.session().focused_diff_path.is_some() {
+-        heading = heading.push(iced::widget::horizontal_space()).push(
+-            command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
+-        );
+-    }
+-    block = block.push(heading);
+-
+-    for patch in &app.session().patches {
+-        let (added, removed) = patch_stats(patch);
+-        let focused = app.session().focused_diff_path.as_deref() == Some(patch.path.as_str());
+-        let stats = if patch.binary {
+-            "binary".to_string()
+-        } else {
+-            format!("+{added} ΓêÆ{removed}")
+-        };
+-        let path = patch.path.clone();
+-        block = block.push(
+-            button(
+-                row![
+-                    text(patch.path.clone())
+-                        .font(reading.mono)
+-                        .size((reading.size - 2.0).max(11.0))
+-                        .wrapping(Wrapping::None)
+-                        .width(Length::Fill),
+-                    text(stats)
+-                        .font(reading.mono)
+-                        .size((reading.size - 2.0).max(11.0))
+-                        .style(move |_| text::Style {
+-                            color: Some(if added > 0 && removed == 0 {
+-                                tokens.added
+-                            } else if removed > 0 && added == 0 {
+-                                tokens.removed
+-                            } else {
+-                                tokens.text_muted
+-                            }),
+-                        }),
+-                ]
+-                .spacing(8)
+-                .align_y(Alignment::Center),
+-            )
+-            .padding([2, 4])
+-            .width(Length::Fill)
+-            .on_press(Message::FocusDiffPath(path))
+-            .style(move |_theme, status| {
+-                let hot = matches!(status, Status::Hovered | Status::Pressed);
+-                iced::widget::button::Style {
+-                    background: Some(Background::Color(if focused || hot {
+-                        tokens.border
+-                    } else {
+-                        Color::TRANSPARENT
+-                    })),
+-                    text_color: tokens.text_secondary,
+-                    border: Border::default(),
+-                    shadow: Shadow::default(),
+-                }
+-            }),
+-        );
+-    }
+-
+-    block.into()
+-}
+-
+ fn inspector_head<'a>(
+     app: &'a GitApp,
+     selection: &Selection,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     let items = placed_commands(
+         selection,
+         can_commit(app),
+         can_stash(app),
+@@ -454,35 +246,20 @@ fn files_head<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message
+             ),
+         ]
+         .spacing(COMMAND_SPACING)
+         .align_y(Alignment::Center)
+         .padding([HEAD_PADDING_Y, HEAD_PADDING_X]),
+         hairline(tokens),
+     ]
+     .into()
+ }
+ 
+-fn inspector_working_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+-    container(
+-        text("Stage and commit from Changes on the left. Select a commit to inspect it.")
+-            .font(reading.font)
+-            .size(reading.size)
+-            .style(move |_| text::Style {
+-                color: Some(tokens.text_muted),
+-            }),
+-    )
+-    .padding([12, 12])
+-    .width(Length::Fill)
+-    .height(Length::Fill)
+-    .into()
+-}
+-
+ fn collapsed_files_rail<'a>(
+     layout: LayoutPreset,
+     tokens: DesignTokens,
+     reading: Reading,
+ ) -> Element<'a, Message> {
+     match layout {
+         LayoutPreset::Stacked => container(
+             row![rail_toggle(tokens, reading)]
+                 .align_y(Alignment::Center)
+                 .padding([2, 8]),
+
