@@ -88,7 +88,6 @@ pub(crate) struct GitApp {
     pub(crate) hunk_mode: HunkMode,
     focus_restore: Option<FocusRestore>,
     pub(crate) branch_list_open: bool,
-    pub(crate) branch_query: String,
     pub(crate) files_as_tree: bool,
     pub(crate) agent_models: Vec<String>,
     pub(crate) agent_models_error: Option<String>,
@@ -142,7 +141,6 @@ pub(crate) enum Message {
     /// Collapse or expand one Explorer accordion section for the active session.
     ToggleExplorerSection(crate::session::ExplorerSection),
     ToggleBranchList,
-    BranchQueryChanged(String),
     ChooseBranch(String),
     ShowWorkingTree,
     FocusFile {
@@ -435,7 +433,6 @@ impl GitApp {
             hunk_mode: HunkMode::Beside,
             focus_restore: None,
             branch_list_open: false,
-            branch_query: String::new(),
             files_as_tree: true,
             agent_models: Vec::new(),
             agent_models_error: None,
@@ -502,7 +499,6 @@ impl GitApp {
         self.close_prompts();
         self.tab_picker_open = false;
         self.branch_list_open = false;
-        self.branch_query.clear();
         self.context_menu = None;
         self.confirm_detach = None;
     }
@@ -1051,18 +1047,10 @@ impl GitApp {
             }
             Message::ToggleBranchList => {
                 self.branch_list_open = !self.branch_list_open;
-                if !self.branch_list_open {
-                    self.branch_query.clear();
-                }
-                Task::none()
-            }
-            Message::BranchQueryChanged(query) => {
-                self.branch_query = query;
                 Task::none()
             }
             Message::ChooseBranch(name) => {
                 self.branch_list_open = false;
-                self.branch_query.clear();
                 let Some(session) = self.active_session() else {
                     return Task::none();
                 };
@@ -1234,7 +1222,6 @@ impl GitApp {
             }
             Message::Select(selection) => {
                 self.branch_list_open = false;
-                self.branch_query.clear();
                 self.confirm_discard = None;
                 self.confirm_drop = None;
                 self.branch_prompt = None;
@@ -2546,7 +2533,6 @@ impl GitApp {
         }
         if self.branch_list_open {
             self.branch_list_open = false;
-            self.branch_query.clear();
             return Task::none();
         }
         if self.error.is_some() {
@@ -2578,6 +2564,11 @@ fn shortcut_message(
             if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("l") =>
         {
             Some(Message::CycleLayout)
+        }
+        Key::Character(c)
+            if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("h") =>
+        {
+            Some(Message::CycleHunkMode)
         }
         Key::Character(c)
             if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("r") =>
@@ -3126,12 +3117,10 @@ mod tests {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.branches = vec![branch("dev", true), branch("feature", false)];
         app.branch_list_open = true;
-        app.branch_query = "feat".to_string();
 
         let _ = app.update(Message::ChooseBranch("feature".to_string()));
 
         assert!(!app.branch_list_open);
-        assert!(app.branch_query.is_empty());
         assert!(app.session_mut().state.loading);
         assert_eq!(
             app.session_mut().selection,

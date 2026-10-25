@@ -35,14 +35,6 @@ pub(crate) enum HunkMode {
 }
 
 impl HunkMode {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Beside => "Beside",
-            Self::Wide => "Wide",
-            Self::Focus => "Focus",
-        }
-    }
-
     /// Toolbar cycle: Beside ↔ Wide (Focus is explicit only).
     pub(crate) fn cycle(self) -> Self {
         match self {
@@ -120,7 +112,7 @@ impl LayoutRatios {
         match mode {
             HunkMode::Beside | HunkMode::Focus => self,
             HunkMode::Wide => Self {
-                graph: self.graph.max(WIDE_GRAPH_RATIO).min(MAX_GRAPH_RATIO),
+                graph: self.graph.clamp(WIDE_GRAPH_RATIO, MAX_GRAPH_RATIO),
                 middle: self.middle.min(WIDE_MIDDLE_RATIO),
                 files: self.files,
             },

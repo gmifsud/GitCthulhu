@@ -160,20 +160,6 @@ pub(super) fn branch_chip<'a>(
     .into()
 }
 
-pub(super) fn section_label<'a>(
-    tokens: DesignTokens,
-    reading: Reading,
-    title: &'static str,
-) -> Element<'a, Message> {
-    text(title)
-        .font(reading.font)
-        .size((reading.size - 2.0).max(11.0))
-        .style(move |_| text::Style {
-            color: Some(tokens.text_muted),
-        })
-        .into()
-}
-
 pub(super) fn panel_style(tokens: DesignTokens, ruled: bool) -> container::Style {
     container::Style {
         background: Some(Background::Color(if ruled {
@@ -271,6 +257,7 @@ pub(super) fn command_button<'a>(
 ///
 /// Always wraps in `tooltip` so the hover target is never remounted when the
 /// two-second tip becomes ready (that remount was clearing hover and flickering).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn icon_button<'a>(
     mark: &'static str,
     title: impl Into<String>,

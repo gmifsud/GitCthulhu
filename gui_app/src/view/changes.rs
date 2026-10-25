@@ -7,12 +7,10 @@ use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
+use iced::widget::{button, column, container, row, text, text_input};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
-use super::chrome::{
-    field_style, fold_mark, glyph, icon_button, panel_style, section_label, Reading,
-};
+use super::chrome::{field_style, fold_mark, glyph, icon_button, Reading};
 
 /// Rows drawn per section. Each row is two buttons, so a huge untracked set would stall layout.
 /// "Select all" still covers every file; only the drawing is bounded.
@@ -53,31 +51,6 @@ pub(crate) fn wip_working_tree_block<'a>(
     changes = changes.push(wip_toolbar(app, selection, tokens, reading));
     changes = changes.push(wip_file_sections(app, selection, status, tokens, reading));
     changes.into()
-}
-
-pub(super) fn changes_pane<'a>(
-    app: &'a GitApp,
-    selection: &Selection,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mut changes = column![section_label(tokens, reading, "Changes")]
-        .spacing(4)
-        .padding(6);
-    changes = changes.push(wip_toolbar(app, selection, tokens, reading));
-    changes = changes.push(wip_file_sections(
-        app,
-        selection,
-        app.session().state.current_status.as_ref(),
-        tokens,
-        reading,
-    ));
-
-    container(scrollable(changes))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_theme: &Theme| panel_style(tokens, true))
-        .into()
 }
 
 fn wip_toolbar<'a>(
