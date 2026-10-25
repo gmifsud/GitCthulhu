@@ -10,7 +10,7 @@ use crate::theme::DesignTokens;
 use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,9 +18,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::chrome::{icon_button, panel_style, Reading};
 
 const COL_GAP: f32 = 10.0;
-const HASH_WIDTH: f32 = 64.0;
+const HASH_WIDTH: f32 = 72.0;
 const WHEN_WIDTH: f32 = 56.0;
-const AUTHOR_WIDTH: f32 = 120.0;
+const AUTHOR_WIDTH: f32 = 100.0;
+const MIN_MESSAGE_WIDTH: f32 = 120.0;
+const PILLS_MIN_WIDTH: f32 = 48.0;
+const MESSAGE_FILL: u16 = 3;
+const PILLS_FILL: u16 = 1;
 /// Floor for the lane canvas so Graph never collapses into Description on resize.
 const MIN_GRAPH_COL_WIDTH: f32 = 40.0;
 const HEADER_SIZE: f32 = 11.0;
@@ -98,21 +102,21 @@ pub(super) fn history_pane<'a>(
         commit_rows = commit_rows.push(
             button(
                 row![
-                    container(text(""))
-                        .width(lanes_width)
-                        .height(Length::Fixed(ROW_HEIGHT)),
-                    single_line("WIP", Length::Fixed(HASH_WIDTH), reading, tokens, true),
-                    description_cell(
-                        Some(RefPill {
+                    pills_cell(
+                        &[RefPill {
                             label: format!("wip · {head}"),
                             kind: RefPillKind::Head,
-                        }),
-                        "Working changes",
+                        }],
                         tokens,
                         reading,
                     ),
+                    container(text(""))
+                        .width(lanes_width)
+                        .height(Length::Fixed(ROW_HEIGHT)),
+                    message_cell("Working changes", tokens, reading),
                     single_line("", Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
                     single_line("", Length::Fixed(WHEN_WIDTH), reading, tokens, false),
+                    single_line("", Length::Fixed(HASH_WIDTH), reading, tokens, true),
                 ]
                 .spacing(COL_GAP)
                 .height(Length::Fixed(ROW_HEIGHT))
@@ -133,17 +137,11 @@ pub(super) fn history_pane<'a>(
         let age = relative_age_compact(now, commit.timestamp);
         let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
         let label = row![
+            pills_cell(&pills, tokens, reading),
             canvas(GraphCell(graph_row))
                 .width(lanes_width)
                 .height(Length::Fixed(ROW_HEIGHT)),
-            single_line(
-                short_hash(&commit.id),
-                Length::Fixed(HASH_WIDTH),
-                reading,
-                tokens,
-                true
-            ),
-            description_with_pills(&pills, &commit.message, tokens, reading),
+            message_cell(&commit.message, tokens, reading),
             single_line(
                 &commit.author,
                 Length::Fixed(AUTHOR_WIDTH),
@@ -152,6 +150,13 @@ pub(super) fn history_pane<'a>(
                 false
             ),
             single_line(&age, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
+            single_line(
+                short_hash(&commit.id),
+                Length::Fixed(HASH_WIDTH),
+                reading,
+                tokens,
+                true
+            ),
         ]
         .spacing(COL_GAP)
         .height(Length::Fixed(ROW_HEIGHT))
@@ -207,19 +212,26 @@ fn column_headers<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     row![
+        header_cell("Refs", Length::FillPortion(PILLS_FILL), tokens, reading),
         container(
             text("Graph")
                 .font(reading.font)
                 .size(HEADER_SIZE)
+                .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
                     color: Some(tokens.text_muted),
                 }),
         )
         .width(lanes_width),
-        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
-        header_cell("Description", Length::Fill, tokens, reading),
+        header_cell(
+            "Description",
+            Length::FillPortion(MESSAGE_FILL),
+            tokens,
+            reading,
+        ),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
+        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
         icon_button(
             "◎",
             if focus {
@@ -252,6 +264,7 @@ fn header_cell<'a>(
         text(label)
             .font(reading.font)
             .size(HEADER_SIZE)
+            .wrapping(Wrapping::None)
             .style(move |_| text::Style {
                 color: Some(tokens.text_muted),
             }),
@@ -260,9 +273,8 @@ fn header_cell<'a>(
     .into()
 }
 
-fn description_with_pills<'a>(
+fn pills_cell<'a>(
     pills: &[RefPill],
-    message: &str,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -275,34 +287,46 @@ fn description_with_pills<'a>(
             text(format!("+{}", pills.len() - 4))
                 .font(reading.font)
                 .size((reading.size - 2.0).max(11.0))
+                .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
                     color: Some(tokens.text_muted),
                 }),
         );
     }
-    cell = cell.push(
-        text(message.to_string())
-            .font(reading.font)
-            .size(reading.size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_primary),
-            }),
-    );
-    container(cell)
-        .width(Length::Fill)
-        .clip(true)
-        .into()
+    fill_column_with_min(PILLS_MIN_WIDTH, PILLS_FILL, cell)
 }
 
-fn description_cell<'a>(
-    pill: Option<RefPill>,
+fn message_cell<'a>(
     message: &str,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let pills = pill.into_iter().collect::<Vec<_>>();
-    description_with_pills(&pills, message, tokens, reading)
+    let body = text(message.to_string())
+        .font(reading.font)
+        .size(reading.size)
+        .wrapping(Wrapping::None)
+        .style(move |_| text::Style {
+            color: Some(tokens.text_primary),
+        });
+    fill_column_with_min(MIN_MESSAGE_WIDTH, MESSAGE_FILL, body)
+}
+
+fn fill_column_with_min<'a>(
+    min_width: f32,
+    portion: u16,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    container(
+        row![
+            Space::new(Length::Fixed(min_width), Length::Fixed(0.0)),
+            content.into(),
+        ]
+        .spacing(0.0)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::FillPortion(portion))
+    .clip(true)
+    .into()
 }
 
 fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
