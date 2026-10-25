@@ -1,5 +1,5 @@
 use crate::app::{GitApp, Message};
-use crate::layout::{LayoutPreset, WorkspacePane};
+use crate::layout::{HunkMode, LayoutPreset, WorkspacePane};
 use crate::selection::{context_label, Selection};
 use crate::theme::DesignTokens;
 use iced::widget::pane_grid::{self, Content};
@@ -46,7 +46,7 @@ pub(super) fn workspace<'a>(
     .width(Length::Fill)
     .height(Length::Fill);
 
-    if app.files_rail_open {
+    if app.files_rail_open || app.hunk_mode == HunkMode::Focus {
         return grid.into();
     }
 

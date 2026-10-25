@@ -20,13 +20,21 @@ use crate::jobs::{
     worktrees_in_background, BranchAction, HistoryAction, SharedRepository, StashAction,
     WorktreeEdit,
 };
-use crate::layout::{self, LayoutPreset, RatioSlot, WorkspacePane};
+use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
 use crate::session::{apply_retention, same_path, WorktreeSession, DIFF_LINES_PER_PAGE};
 use crate::theme::DesignTokens;
 use crate::{
     RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver, WorktreeOpener,
 };
+
+/// Rail visibility and hunk mode to restore when leaving [`HunkMode::Focus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FocusRestore {
+    pub files_rail_open: bool,
+    pub inspector_open: bool,
+    pub hunk_mode: HunkMode,
+}
 
 /// Repository handed from a background open into [`Message::RepositoryOpened`].
 ///
@@ -76,6 +84,9 @@ pub(crate) struct GitApp {
     /// Rebuilt whenever [`Self::install_layout`] constructs a new pane grid.
     split_slots: Vec<(pane_grid::Split, RatioSlot)>,
     pub(crate) files_rail_open: bool,
+    pub(crate) inspector_open: bool,
+    pub(crate) hunk_mode: HunkMode,
+    focus_restore: Option<FocusRestore>,
     pub(crate) branch_list_open: bool,
     pub(crate) branch_query: String,
     pub(crate) files_as_tree: bool,
@@ -162,6 +173,9 @@ pub(crate) enum Message {
     ToggleErrorDetail,
     /// Cycle Columns → InspectorOverDiff → Stacked.
     CycleLayout,
+    SetHunkMode(HunkMode),
+    /// Beside ↔ Wide (Focus is explicit via [`Message::SetHunkMode`]).
+    CycleHunkMode,
     /// Escape: dismiss prompts, errors, overlays, then clear diff focus.
     Escape,
     StageMarked,
@@ -394,7 +408,7 @@ impl GitApp {
         };
         let layout = LayoutPreset::DEFAULT;
         let ratios = layout::default_ratios();
-        let panes = layout::new_panes(layout, &ratios[layout.index()]);
+        let panes = layout::new_panes(layout, &ratios[layout.index()], true, true);
         let split_slots = layout::split_slots(&panes);
         Self {
             sessions,
@@ -417,6 +431,9 @@ impl GitApp {
             ratios,
             split_slots,
             files_rail_open: true,
+            inspector_open: true,
+            hunk_mode: HunkMode::Beside,
+            focus_restore: None,
             branch_list_open: false,
             branch_query: String::new(),
             files_as_tree: true,
@@ -498,13 +515,56 @@ impl GitApp {
     }
 
     fn install_layout(&mut self) {
-        let ratios = self.ratios[self.layout.index()];
-        self.panes = if self.files_rail_open {
-            layout::new_panes(self.layout, &ratios)
-        } else {
-            layout::new_panes_without_files(self.layout, &ratios)
-        };
+        let base = self.ratios[self.layout.index()];
+        let ratios = base.for_hunk_mode(self.hunk_mode);
+        self.panes = layout::new_panes(
+            self.layout,
+            &ratios,
+            self.files_rail_open,
+            self.inspector_open,
+        );
         self.split_slots = layout::split_slots(&self.panes);
+    }
+
+    fn apply_hunk_mode(&mut self, mode: HunkMode) {
+        if mode == HunkMode::Focus {
+            if self.hunk_mode != HunkMode::Focus {
+                self.focus_restore = Some(FocusRestore {
+                    files_rail_open: self.files_rail_open,
+                    inspector_open: self.inspector_open,
+                    hunk_mode: self.hunk_mode,
+                });
+                self.files_rail_open = false;
+                self.inspector_open = false;
+            }
+            self.hunk_mode = HunkMode::Focus;
+        } else {
+            if self.hunk_mode == HunkMode::Focus {
+                if let Some(restore) = self.focus_restore.take() {
+                    self.files_rail_open = restore.files_rail_open;
+                    self.inspector_open = restore.inspector_open;
+                }
+            }
+            self.hunk_mode = mode;
+        }
+        self.install_layout();
+    }
+
+    fn restore_focus_mode(&mut self) -> bool {
+        if self.hunk_mode != HunkMode::Focus {
+            return false;
+        }
+        if let Some(restore) = self.focus_restore.take() {
+            self.files_rail_open = restore.files_rail_open;
+            self.inspector_open = restore.inspector_open;
+            self.hunk_mode = restore.hunk_mode;
+        } else {
+            self.files_rail_open = true;
+            self.inspector_open = true;
+            self.hunk_mode = HunkMode::Beside;
+        }
+        self.install_layout();
+        true
     }
 
     fn start_patch(&mut self) -> Task<Message> {
@@ -827,6 +887,19 @@ impl GitApp {
             Message::CycleLayout => {
                 let next = self.layout.next();
                 self.update(Message::SetLayout(next))
+            }
+            Message::SetHunkMode(mode) => {
+                self.apply_hunk_mode(mode);
+                Task::none()
+            }
+            Message::CycleHunkMode => {
+                let next = if self.hunk_mode == HunkMode::Focus {
+                    HunkMode::Beside
+                } else {
+                    self.hunk_mode.cycle()
+                };
+                self.apply_hunk_mode(next);
+                Task::none()
             }
             Message::Escape => self.handle_escape(),
             Message::StageMarked => self.edit_marked(true),
@@ -2441,6 +2514,9 @@ impl GitApp {
         if self.context_menu.is_some() {
             return self.update(Message::CloseContextMenu);
         }
+        if self.restore_focus_mode() {
+            return Task::none();
+        }
         if self.tip_hover.is_some() || self.tip_ready_key.is_some() {
             self.tip_hover = None;
             self.tip_ready_key = None;
@@ -2919,6 +2995,65 @@ mod tests {
             &[WorkspacePane::Inspector],
         );
         assert_eq!(graph_ratio, layout::MIN_GRAPH_RATIO);
+    }
+
+    #[test]
+    fn enter_focus_remembers_rails_and_escape_restores() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        assert!(app.files_rail_open);
+        assert!(app.inspector_open);
+        assert_eq!(app.hunk_mode, HunkMode::Beside);
+
+        let _ = app.update(Message::SetHunkMode(HunkMode::Focus));
+        assert_eq!(app.hunk_mode, HunkMode::Focus);
+        assert!(!app.files_rail_open);
+        assert!(!app.inspector_open);
+        assert!(splits_of(&app.panes)
+            .iter()
+            .all(|split| !split.left.contains(&WorkspacePane::Inspector)
+                && !split.right.contains(&WorkspacePane::Inspector)
+                && !split.left.contains(&WorkspacePane::Files)
+                && !split.right.contains(&WorkspacePane::Files)));
+
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.hunk_mode, HunkMode::Beside);
+        assert!(app.files_rail_open);
+        assert!(app.inspector_open);
+    }
+
+    #[test]
+    fn cycle_hunk_mode_skips_focus() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        assert_eq!(app.hunk_mode, HunkMode::Beside);
+        let _ = app.update(Message::CycleHunkMode);
+        assert_eq!(app.hunk_mode, HunkMode::Wide);
+        let _ = app.update(Message::CycleHunkMode);
+        assert_eq!(app.hunk_mode, HunkMode::Beside);
+        let _ = app.update(Message::SetHunkMode(HunkMode::Focus));
+        assert_eq!(app.hunk_mode, HunkMode::Focus);
+        let _ = app.update(Message::CycleHunkMode);
+        assert_eq!(app.hunk_mode, HunkMode::Beside);
+        assert!(app.files_rail_open);
+    }
+
+    #[test]
+    fn wide_mode_expands_the_diff_split() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let (_, beside_middle, _) = split_between(
+            &app.panes,
+            &[WorkspacePane::Graph],
+            &[WorkspacePane::Diff],
+        );
+        let _ = app.update(Message::SetHunkMode(HunkMode::Wide));
+        assert_eq!(app.hunk_mode, HunkMode::Wide);
+        assert!(app.files_rail_open);
+        assert!(app.inspector_open);
+        let (_, wide_middle, _) = split_between(
+            &app.panes,
+            &[WorkspacePane::Graph],
+            &[WorkspacePane::Diff],
+        );
+        assert!(wide_middle < beside_middle);
     }
 
     #[test]

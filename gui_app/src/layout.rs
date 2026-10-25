@@ -20,6 +20,37 @@ pub(crate) const MAX_FILES_RATIO: f32 = 0.36;
 /// Floor for the middle history share of the post-staging remainder.
 pub(crate) const MIN_GRAPH_RATIO: f32 = 0.50;
 pub(crate) const MAX_GRAPH_RATIO: f32 = 0.82;
+/// Centre column share (Graph+Diff vs Inspector) when [`HunkMode::Wide`] is active.
+pub(crate) const WIDE_GRAPH_RATIO: f32 = 0.78;
+/// Graph share of the Graph/Diff stack when Wide is active (more room for Diff).
+pub(crate) const WIDE_MIDDLE_RATIO: f32 = 0.36;
+
+/// Diff presentation relative to the graph and side rails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum HunkMode {
+    #[default]
+    Beside,
+    Wide,
+    Focus,
+}
+
+impl HunkMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Beside => "Beside",
+            Self::Wide => "Wide",
+            Self::Focus => "Focus",
+        }
+    }
+
+    /// Toolbar cycle: Beside ↔ Wide (Focus is explicit only).
+    pub(crate) fn cycle(self) -> Self {
+        match self {
+            Self::Beside => Self::Wide,
+            Self::Wide | Self::Focus => Self::Beside,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspacePane {
@@ -85,6 +116,17 @@ impl LayoutRatios {
         }
     }
 
+    pub(crate) fn for_hunk_mode(self, mode: HunkMode) -> Self {
+        match mode {
+            HunkMode::Beside | HunkMode::Focus => self,
+            HunkMode::Wide => Self {
+                graph: self.graph.max(WIDE_GRAPH_RATIO).min(MAX_GRAPH_RATIO),
+                middle: self.middle.min(WIDE_MIDDLE_RATIO),
+                files: self.files,
+            },
+        }
+    }
+
     pub(crate) fn clamp_slot(&mut self, slot: RatioSlot, ratio: f32) {
         match slot {
             RatioSlot::Files => {
@@ -116,19 +158,21 @@ pub(crate) enum RatioSlot {
     Files,
 }
 
-pub(crate) fn new_panes(preset: LayoutPreset, ratios: &LayoutRatios) -> State<WorkspacePane> {
-    State::with_configuration(configuration(preset, ratios, true))
-}
-
-/// The same tree as [`new_panes`] without the staging column.
-pub(crate) fn new_panes_without_files(
+pub(crate) fn new_panes(
     preset: LayoutPreset,
     ratios: &LayoutRatios,
+    show_files: bool,
+    show_inspector: bool,
 ) -> State<WorkspacePane> {
-    State::with_configuration(configuration(preset, ratios, false))
+    State::with_configuration(configuration(
+        preset,
+        ratios,
+        show_files,
+        show_inspector,
+    ))
 }
 
-/// Split handles produced by the latest [`new_panes`] or [`new_panes_without_files`].
+/// Split handles produced by the latest [`new_panes`] call.
 pub(crate) fn split_slots(state: &State<WorkspacePane>) -> Vec<(Split, RatioSlot)> {
     let mut slots = Vec::new();
     collect_slots(state.layout(), state, &mut slots);
@@ -138,15 +182,22 @@ pub(crate) fn split_slots(state: &State<WorkspacePane>) -> Vec<(Split, RatioSlot
 fn configuration(
     preset: LayoutPreset,
     ratios: &LayoutRatios,
-    files: bool,
+    show_files: bool,
+    show_inspector: bool,
 ) -> Configuration<WorkspacePane> {
     let history = match preset {
-        LayoutPreset::Columns => split(
-            Axis::Vertical,
-            ratios.middle,
-            Configuration::Pane(WorkspacePane::Diff),
-            Configuration::Pane(WorkspacePane::Inspector),
-        ),
+        LayoutPreset::Columns => {
+            if show_inspector {
+                split(
+                    Axis::Vertical,
+                    ratios.middle,
+                    Configuration::Pane(WorkspacePane::Diff),
+                    Configuration::Pane(WorkspacePane::Inspector),
+                )
+            } else {
+                Configuration::Pane(WorkspacePane::Diff)
+            }
+        }
         LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
             middle_axis(preset),
             ratios.middle,
@@ -162,15 +213,21 @@ fn configuration(
             Configuration::Pane(WorkspacePane::Graph),
             history,
         ),
-        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
-            outer_axis(preset),
-            ratios.graph,
-            history,
-            Configuration::Pane(WorkspacePane::Inspector),
-        ),
+        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => {
+            if show_inspector {
+                split(
+                    outer_axis(preset),
+                    ratios.graph,
+                    history,
+                    Configuration::Pane(WorkspacePane::Inspector),
+                )
+            } else {
+                history
+            }
+        }
     };
 
-    if files {
+    if show_files {
         split(
             outer_axis(preset),
             ratios.files,
