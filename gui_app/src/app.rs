@@ -1556,15 +1556,9 @@ mod tests {
     }
 
     #[test]
-    fn open_repository_replaces_the_welcome_screen() {
-        let seen = Arc::new(std::sync::Mutex::new(String::new()));
-        let seen_in_opener = Arc::clone(&seen);
-        let open: RepositoryOpener = Arc::new(move |path| {
-            *seen_in_opener.lock().expect("path lock") = path.to_string();
-            Ok(Arc::new(FakeGitRepository::ok()))
-        });
+    fn open_repository_starts_loading_without_blocking() {
         let mut app = GitApp::welcome_with(
-            open,
+            unavailable_opener(),
             unavailable_initialiser(),
             unavailable_cloner(),
             AppSettings::default(),
@@ -1574,10 +1568,43 @@ mod tests {
 
         let _ = app.update(Message::OpenRepository(r"D:\repo".to_string()));
 
+        assert!(app.state.loading);
+        assert!(app.adapter.is_none());
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn repository_opened_replaces_the_welcome_screen() {
+        let mut app = GitApp::welcome();
+        app.state.loading = true;
+
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\repo".to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
+
         assert!(app.adapter.is_some());
         assert_eq!(app.error, None);
         assert_eq!(app.repository_path.as_deref(), Some(r"D:\repo"));
-        assert_eq!(seen.lock().expect("path lock").as_str(), r"D:\repo");
+    }
+
+    #[test]
+    fn opening_a_repository_keeps_the_kilo_connection() {
+        let mut app = GitApp::welcome();
+        app.list_models = Arc::new(|_| crate::ModelList {
+            ids: Ok(vec!["kilo-auto/free".to_string()]),
+            exchange: crate::ProviderExchange::kilo("connected"),
+        });
+        app.state.loading = true;
+
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\repo".to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
+
+        let listed = (app.list_models)(String::new());
+        assert_eq!(listed.exchange.text, "connected");
+        assert!(app.adapter.is_some());
     }
 
     struct ObservedSplit {
@@ -1654,29 +1681,47 @@ mod tests {
             LayoutPreset::Columns => pane_grid::Axis::Vertical,
             LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => pane_grid::Axis::Horizontal,
         };
-        let (graph_axis, graph_ratio, _) = split_between(
-            &app.panes,
-            &[WorkspacePane::Graph],
-            &[
-                WorkspacePane::Inspector,
-                WorkspacePane::Diff,
-                WorkspacePane::Files,
-            ],
-        );
         let (files_axis, files_ratio, _) = split_between(
             &app.panes,
-            &[WorkspacePane::Inspector, WorkspacePane::Diff],
             &[WorkspacePane::Files],
+            &[
+                WorkspacePane::Graph,
+                WorkspacePane::Diff,
+                WorkspacePane::Inspector,
+            ],
         );
-        let (middle_axis, middle_ratio, _) = split_between(
-            &app.panes,
-            &[WorkspacePane::Inspector],
-            &[WorkspacePane::Diff],
-        );
-        assert_eq!(graph_axis, outer);
-        assert_eq!(graph_ratio, ratios.graph);
+        let (graph_axis, graph_ratio, middle_axis, middle_ratio) = match preset {
+            LayoutPreset::Columns => {
+                let (graph_axis, graph_ratio, _) = split_between(
+                    &app.panes,
+                    &[WorkspacePane::Graph],
+                    &[WorkspacePane::Diff, WorkspacePane::Inspector],
+                );
+                let (middle_axis, middle_ratio, _) = split_between(
+                    &app.panes,
+                    &[WorkspacePane::Diff],
+                    &[WorkspacePane::Inspector],
+                );
+                (graph_axis, graph_ratio, middle_axis, middle_ratio)
+            }
+            LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => {
+                let (graph_axis, graph_ratio, _) = split_between(
+                    &app.panes,
+                    &[WorkspacePane::Graph, WorkspacePane::Diff],
+                    &[WorkspacePane::Inspector],
+                );
+                let (middle_axis, middle_ratio, _) = split_between(
+                    &app.panes,
+                    &[WorkspacePane::Graph],
+                    &[WorkspacePane::Diff],
+                );
+                (graph_axis, graph_ratio, middle_axis, middle_ratio)
+            }
+        };
         assert_eq!(files_axis, outer);
         assert_eq!(files_ratio, ratios.files);
+        assert_eq!(graph_axis, outer);
+        assert_eq!(graph_ratio, ratios.graph);
         assert_eq!(middle_axis, middle);
         assert_eq!(middle_ratio, ratios.middle);
         assert_eq!(splits_of(&app.panes).len(), 3);
@@ -1687,10 +1732,11 @@ mod tests {
         let app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         assert_eq!(app.layout, LayoutPreset::InspectorOverDiff);
         assert!(app.files_rail_open);
-        assert_eq!(layout::GRAPH_RATIO, 0.34);
-        assert_eq!(layout::COLUMNS_MIDDLE_RATIO, 0.30);
-        assert_eq!(layout::STACKED_MIDDLE_RATIO, 0.28);
-        assert_eq!(layout::FILES_RATIO, 0.86);
+        assert_eq!(layout::GRAPH_RATIO, 0.68);
+        assert_eq!(layout::COLUMNS_MIDDLE_RATIO, 0.50);
+        assert_eq!(layout::STACKED_MIDDLE_RATIO, 0.48);
+        assert_eq!(layout::FILES_RATIO, 0.22);
+        assert_eq!(layout::MIN_GRAPH_RATIO, 0.50);
         assert_open_preset(&app, LayoutPreset::InspectorOverDiff);
     }
 
@@ -1708,6 +1754,30 @@ mod tests {
         let _ = app.update(Message::SetLayout(LayoutPreset::Stacked));
         assert_eq!(app.layout, LayoutPreset::Stacked);
         assert_open_preset(&app, LayoutPreset::Stacked);
+    }
+
+    #[test]
+    fn cycle_layout_walks_the_three_presets() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        assert_eq!(app.layout, LayoutPreset::InspectorOverDiff);
+        let _ = app.update(Message::CycleLayout);
+        assert_eq!(app.layout, LayoutPreset::Stacked);
+        let _ = app.update(Message::CycleLayout);
+        assert_eq!(app.layout, LayoutPreset::Columns);
+        let _ = app.update(Message::CycleLayout);
+        assert_eq!(app.layout, LayoutPreset::InspectorOverDiff);
+    }
+
+    #[test]
+    fn escape_clears_an_error_then_does_nothing() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.error = Some("boom".into());
+        app.error_expanded = true;
+        let _ = app.update(Message::Escape);
+        assert!(app.error.is_none());
+        assert!(!app.error_expanded);
+        let _ = app.update(Message::Escape);
+        assert!(app.error.is_none());
     }
 
     #[test]
@@ -1747,7 +1817,7 @@ mod tests {
         );
         let (_, middle_ratio, _) = split_between(
             &app.panes,
-            &[WorkspacePane::Inspector],
+            &[WorkspacePane::Graph],
             &[WorkspacePane::Diff],
         );
         assert_eq!(middle_ratio, 0.55);
@@ -1755,37 +1825,59 @@ mod tests {
         let _ = app.update(Message::SetLayout(LayoutPreset::Columns));
         let (_, columns_middle, _) = split_between(
             &app.panes,
-            &[WorkspacePane::Inspector],
             &[WorkspacePane::Diff],
+            &[WorkspacePane::Inspector],
         );
         assert_eq!(columns_middle, layout::COLUMNS_MIDDLE_RATIO);
 
         let _ = app.update(Message::SetLayout(LayoutPreset::InspectorOverDiff));
         let (_, restored, _) = split_between(
             &app.panes,
-            &[WorkspacePane::Inspector],
+            &[WorkspacePane::Graph],
             &[WorkspacePane::Diff],
         );
         assert_eq!(restored, 0.55);
     }
 
     #[test]
+    fn resizing_the_graph_split_respects_the_minimum_width() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let graph = mapped_slot(&app, RatioSlot::Graph);
+
+        let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent {
+            split: graph,
+            ratio: 0.20,
+        }));
+
+        assert_eq!(
+            app.ratios[LayoutPreset::InspectorOverDiff.index()].graph,
+            layout::MIN_GRAPH_RATIO
+        );
+        let (_, graph_ratio, _) = split_between(
+            &app.panes,
+            &[WorkspacePane::Graph, WorkspacePane::Diff],
+            &[WorkspacePane::Inspector],
+        );
+        assert_eq!(graph_ratio, layout::MIN_GRAPH_RATIO);
+    }
+
+    #[test]
     fn toggling_the_files_rail_hides_and_restores_it() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.ratios[LayoutPreset::InspectorOverDiff.index()].files = 0.7;
+        app.ratios[LayoutPreset::InspectorOverDiff.index()].files = 0.30;
         assert!(app.files_rail_open);
 
         let _ = app.update(Message::ToggleFilesRail);
         assert!(!app.files_rail_open);
         let (graph_axis, _, graph_split) = split_between(
             &app.panes,
-            &[WorkspacePane::Graph],
-            &[WorkspacePane::Inspector, WorkspacePane::Diff],
+            &[WorkspacePane::Graph, WorkspacePane::Diff],
+            &[WorkspacePane::Inspector],
         );
         assert_eq!(graph_axis, pane_grid::Axis::Vertical);
         let (_, _, middle_split) = split_between(
             &app.panes,
-            &[WorkspacePane::Inspector],
+            &[WorkspacePane::Graph],
             &[WorkspacePane::Diff],
         );
         assert!(splits_of(&app.panes).iter().all(|split| {
@@ -1803,8 +1895,8 @@ mod tests {
         assert!(!app.files_rail_open);
         let (stacked_axis, _, _) = split_between(
             &app.panes,
-            &[WorkspacePane::Graph],
-            &[WorkspacePane::Inspector, WorkspacePane::Diff],
+            &[WorkspacePane::Graph, WorkspacePane::Diff],
+            &[WorkspacePane::Inspector],
         );
         assert_eq!(stacked_axis, pane_grid::Axis::Horizontal);
         assert!(splits_of(&app.panes).iter().all(|split| {
@@ -1821,7 +1913,7 @@ mod tests {
         );
         assert_eq!(
             app.ratios[LayoutPreset::InspectorOverDiff.index()].files,
-            0.7
+            0.30
         );
         assert_open_preset(&app, LayoutPreset::Stacked);
     }
@@ -1835,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn choosing_another_branch_checks_it_out_and_closes_the_list() {
+    fn choosing_another_branch_checks_it_out() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         app.state.branches = vec![branch("dev", true), branch("feature", false)];
         app.branch_list_open = true;
@@ -1851,6 +1943,76 @@ mod tests {
             Some(Selection::Branch {
                 name: "feature".to_string(),
                 current: false,
+            })
+        );
+    }
+
+    #[test]
+    fn choosing_the_current_branch_only_closes_the_list() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.state.branches = vec![branch("dev", true), branch("feature", false)];
+        app.branch_list_open = true;
+
+        let _ = app.update(Message::ChooseBranch("dev".to_string()));
+
+        assert!(!app.branch_list_open);
+        assert!(!app.state.loading);
+        assert_eq!(
+            app.selection,
+            Some(Selection::Branch {
+                name: "dev".to_string(),
+                current: true,
+            })
+        );
+    }
+
+    #[test]
+    fn creating_a_branch_then_switches_to_it() {
+        let mut app = on_branch("main", true);
+        app.branch_prompt = Some(BranchPrompt::Create {
+            start: "main".to_string(),
+            name: "topic".to_string(),
+        });
+
+        let _ = app.update(Message::ConfirmBranch);
+        assert!(app.state.loading);
+        assert_eq!(app.pending_checkout.as_deref(), Some("topic"));
+
+        let _ = app.update(Message::BranchFinished(Ok(())));
+        assert!(app.pending_checkout.is_none());
+        assert!(app.state.loading);
+        assert_eq!(
+            app.selection,
+            Some(Selection::Branch {
+                name: "topic".to_string(),
+                current: false,
+            })
+        );
+    }
+
+    #[test]
+    fn creating_from_a_remote_uses_that_ref_as_the_start() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.state.branches = vec![
+            branch("main", true),
+            Branch {
+                name: "origin/main".to_string(),
+                is_remote: true,
+                is_head: false,
+                tip: String::new(),
+            },
+        ];
+        app.selection = Some(Selection::Remote {
+            name: "origin/main".to_string(),
+        });
+
+        let _ = app.update(Message::AskCreateBranch);
+
+        assert_eq!(
+            app.branch_prompt,
+            Some(BranchPrompt::Create {
+                start: "origin/main".to_string(),
+                name: String::new(),
             })
         );
     }
@@ -1900,20 +2062,17 @@ mod tests {
     }
 
     #[test]
-    fn open_repository_error_stays_on_the_welcome_screen() {
-        let open: RepositoryOpener =
-            Arc::new(|_| Err(DomainError::Unknown("cannot open that folder".into())));
-        let mut app = GitApp::welcome_with(
-            open,
-            unavailable_initialiser(),
-            unavailable_cloner(),
-            AppSettings::default(),
-            ignore_settings(),
-        );
+    fn repository_open_failure_shows_an_error_on_the_welcome_screen() {
+        let mut app = GitApp::welcome();
+        app.state.loading = true;
 
-        let _ = app.update(Message::OpenRepository(r"D:\repo".to_string()));
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\repo".to_string(),
+            Err(DomainError::Unknown("cannot open that folder".into())),
+        ));
 
         assert!(app.adapter.is_none());
+        assert!(!app.state.loading);
         assert_eq!(app.error.as_deref(), Some("cannot open that folder"));
     }
 
@@ -2301,17 +2460,15 @@ mod tests {
 
     #[test]
     fn init_then_opens_the_repository() {
-        let open: RepositoryOpener = Arc::new(|_| Ok(Arc::new(FakeGitRepository::ok())));
-        let mut app = GitApp::welcome_with(
-            open,
-            unavailable_initialiser(),
-            unavailable_cloner(),
-            AppSettings::default(),
-            ignore_settings(),
-        );
+        let mut app = GitApp::welcome();
         let _ = app.update(Message::InitFinished(r"D:\fresh".to_string(), Ok(())));
+        assert!(app.state.loading);
+        assert!(app.adapter.is_none());
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\fresh".to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
         assert!(app.adapter.is_some());
-        assert!(!app.state.loading);
         assert_eq!(app.error, None);
     }
 
@@ -2344,22 +2501,15 @@ mod tests {
 
     #[test]
     fn clone_then_opens_the_created_directory() {
-        let seen = Arc::new(std::sync::Mutex::new(String::new()));
-        let seen_in_opener = Arc::clone(&seen);
-        let open: RepositoryOpener = Arc::new(move |path| {
-            *seen_in_opener.lock().expect("path lock") = path.to_string();
-            Ok(Arc::new(FakeGitRepository::ok()))
-        });
-        let mut app = GitApp::welcome_with(
-            open,
-            unavailable_initialiser(),
-            unavailable_cloner(),
-            AppSettings::default(),
-            ignore_settings(),
-        );
+        let mut app = GitApp::welcome();
         let _ = app.update(Message::CloneFinished(Ok(r"D:\parent\repo".to_string())));
+        assert!(app.state.loading);
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\parent\repo".to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
         assert!(app.adapter.is_some());
-        assert_eq!(seen.lock().expect("path lock").as_str(), r"D:\parent\repo");
+        assert_eq!(app.repository_path.as_deref(), Some(r"D:\parent\repo"));
     }
 
     #[test]
