@@ -159,9 +159,12 @@ fn section_block<'a>(
     if let Some(action) = trailing {
         header_row = header_row.push(action);
     }
-    let header = container(header_row)
-        .width(Length::Fill)
-        .padding([0, 4, 0, 0]);
+    let header = container(header_row).width(Length::Fill).padding(Padding {
+        top: 0.0,
+        right: 4.0,
+        bottom: 0.0,
+        left: 0.0,
+    });
 
     let mut block = column![header].width(Length::Fill);
     if let Some(body) = body {
