@@ -8,6 +8,7 @@ mod commit_graph;
 mod context_menu;
 mod jobs;
 mod layout;
+mod palette;
 mod reachability;
 mod ref_pills;
 mod selection;

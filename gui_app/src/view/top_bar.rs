@@ -1,4 +1,5 @@
-use crate::app::{GitApp, Message};
+use crate::app::{GitApp, Message, HISTORY_SEARCH_ID};
+use crate::palette::REPOSITORY_SCOPE;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use iced::widget::text::Wrapping;
@@ -18,9 +19,10 @@ const CLUSTER_SPACING: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 
 const APP_NAME: &str = "GitCthulhu";
-const SEARCH_PLACEHOLDER: &str = "Search commits, refs, files…";
+const SEARCH_PLACEHOLDER: &str = "Filter history: message, author, hash, ref…";
 const SEARCH_SHORTCUT: &str = "Ctrl K";
 const OPEN_REPOSITORY: &str = "Open…";
+const RECENT_REPOSITORIES: &str = "Recent";
 const SETTINGS: &str = "Settings";
 const MARK_HEIGHT: f32 = 11.0;
 const MARK_THICKNESS: f32 = 2.0;
@@ -70,6 +72,13 @@ pub(super) fn top_bar<'a>(
     right = right.push(hunk_segment(app.hunk_mode, tokens));
     right = right.push(layout_segment(app.layout, tokens));
     right = right.push(quiet_button(
+        RECENT_REPOSITORIES,
+        Message::TogglePalette(format!("{REPOSITORY_SCOPE} ")),
+        !app.session().state.loading && app.settings.recent_repositories.len() > 1,
+        tokens,
+        reading,
+    ));
+    right = right.push(quiet_button(
         OPEN_REPOSITORY,
         Message::ChooseRepositoryFolder,
         !app.session().state.loading,
@@ -84,7 +93,7 @@ pub(super) fn top_bar<'a>(
         reading,
     ));
 
-    let bar = row![left, search_field(tokens, reading), right,]
+    let bar = row![left, search_field(&app.history_query, tokens, reading), right,]
         .spacing(CLUSTER_SPACING)
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -139,7 +148,11 @@ fn tracking<'a>(summary: String, tokens: DesignTokens, reading: Reading) -> Elem
         .into()
 }
 
-fn search_field<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+fn search_field<'a>(
+    query: &'a str,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
     container(
         row![
             glyph(
@@ -148,7 +161,11 @@ fn search_field<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Messa
                 tokens.text_secondary,
                 &reading,
             ),
-            text_input(SEARCH_PLACEHOLDER, "")
+            text_input(SEARCH_PLACEHOLDER, query)
+                .id(HISTORY_SEARCH_ID)
+                .on_input(Message::HistoryQueryChanged)
+                .font(reading.font)
+                .size(reading.size)
                 .padding(0)
                 .width(Length::Fill)
                 .style(embedded_field_style(tokens)),
