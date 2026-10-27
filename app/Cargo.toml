@@ -15,7 +15,8 @@ config_adapter = { path = "../config_adapter" }
 core_domain = { path = "../core_domain" }
 iced = "0.13" # Only for the `iced::Result` returned by main
 serde_json = "1"
-ureq = { version = "2.12", features = ["json"] }
+# json for chat payloads; proxy-from-env so corporate HTTPS_PROXY works (old host timed out without it).
+ureq = { version = "2.12", default-features = true, features = ["json", "proxy-from-env"] }
 
 [build-dependencies]
 winresource = "0.1"

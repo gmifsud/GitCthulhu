@@ -41,6 +41,10 @@ pub struct Branch {
     pub is_head: bool,
     /// Peeled commit id this branch currently points at (full hex).
     pub tip: String,
+    /// Commits on this branch not on its upstream. `0` when unknown or no upstream.
+    pub ahead: usize,
+    /// Commits on the upstream not on this branch. `0` when unknown or no upstream.
+    pub behind: usize,
 }
 
 /// One entry from `git worktree list`.

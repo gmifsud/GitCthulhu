@@ -1,9 +1,13 @@
+//! History table — Graph | Description | Author | When | Hash.
+//! Ref pills are NOT a table column: they sit in a left gutter, right-aligned
+//! so they touch the graph node. Description holds the commit message only.
+
 use crate::app::{GitApp, Message};
-use crate::commit_graph::{graph_rows, graph_width, GraphCell, ROW_HEIGHT};
+use crate::commit_graph::{graph_rows, graph_width, GraphCell, NodeMark, ROW_HEIGHT};
 use crate::context_menu::ContextTarget;
 use crate::jobs::COMMIT_PAGE_SIZE;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
-use crate::ref_pills::{refs_at, RefPill, RefPillKind};
+use crate::ref_pills::{pill_mark, primary_node_kind, refs_at, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
 use crate::session::{basename, WorktreeSession};
 use crate::theme::DesignTokens;
@@ -15,19 +19,23 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme}
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::chrome::{icon_button, panel_style, Reading};
+use super::chrome::{glyph, icon_button, panel_style, Reading};
 
 const COL_GAP: f32 = 10.0;
+/// Pills hug the graph node.
+const PILL_GRAPH_GAP: f32 = 2.0;
 const HASH_WIDTH: f32 = 72.0;
 const WHEN_WIDTH: f32 = 56.0;
-const AUTHOR_WIDTH: f32 = 100.0;
-/// Floor for the lane canvas so Graph never collapses into Description on resize.
-const MIN_GRAPH_COL_WIDTH: f32 = 40.0;
+const AUTHOR_WIDTH: f32 = 120.0;
+const MIN_GRAPH_COL_WIDTH: f32 = 32.0;
+/// Left gutter for pills (not a table column — no header, right-aligned content).
+const PILL_GUTTER: f32 = 260.0;
 const HEADER_SIZE: f32 = 11.0;
 const PILL_PAD_Y: f32 = 1.0;
-const PILL_PAD_X: f32 = 6.0;
+const PILL_PAD_X: f32 = 5.0;
 const PILL_RADIUS: f32 = 3.0;
-const PILL_GAP: f32 = 4.0;
+const PILL_GAP: f32 = 3.0;
+const MAX_PILLS_SHOWN: usize = 3;
 
 pub(super) fn history_pane<'a>(
     app: &'a GitApp,
@@ -60,13 +68,15 @@ pub(super) fn history_pane<'a>(
         Vec::new()
     };
     let page_end = session.state.dag_nodes.len().min(COMMIT_PAGE_SIZE);
-    let shown_nodes: &[DagNode] = if focus {
+    // Focus must never blank the graph when commits are loaded (e.g. tip was
+    // pushed off the page by newer tips on other local branches).
+    let shown_nodes: &[DagNode] = if focus && !filtered_owned.is_empty() {
         &filtered_owned
     } else {
         &session.state.dag_nodes[..page_end]
     };
     let rows = graph_rows(shown_nodes);
-    let lanes_width = Length::Fixed(graph_width(&rows).max(MIN_GRAPH_COL_WIDTH));
+    let graph_w = graph_width(&rows).max(MIN_GRAPH_COL_WIDTH);
     let commits_by_id: HashMap<&str, &Commit> = session
         .state
         .commits
@@ -78,10 +88,9 @@ pub(super) fn history_pane<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let mut commit_rows = column![column_headers(app, lanes_width, focus, tokens, reading)];
+    let mut commit_rows =
+        column![column_headers(app, graph_w, focus, tokens, reading)].width(Length::Fill);
 
-    // One WIP row per open session with changes, in tab order. Only the active tab's row can
-    // be selected: the selection belongs to that session. Focus-current hides other sessions.
     for (index, session) in app.sessions.iter().enumerate() {
         if focus && index != app.active {
             continue;
@@ -96,28 +105,16 @@ pub(super) fn history_pane<'a>(
             );
         let head = wip_label(session);
         commit_rows = commit_rows.push(
-            button(
-                row![
-                    container(text(""))
-                        .width(lanes_width)
-                        .height(Length::Fixed(ROW_HEIGHT)),
-                    description_cell(
-                        &[RefPill {
-                            label: format!("wip · {head}"),
-                            kind: RefPillKind::Head,
-                        }],
-                        "Working changes",
-                        tokens,
-                        reading,
-                    ),
-                    single_line("", Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
-                    single_line("", Length::Fixed(WHEN_WIDTH), reading, tokens, false),
-                    single_line("", Length::Fixed(HASH_WIDTH), reading, tokens, true),
-                ]
-                .spacing(COL_GAP)
-                .height(Length::Fixed(ROW_HEIGHT))
-                .align_y(Alignment::Center),
-            )
+            button(history_row(
+                pill_gutter(&[], tokens, reading),
+                graph_cell_empty(graph_w),
+                wip_description_cell(&head, tokens, reading),
+                "",
+                "",
+                "",
+                tokens,
+                reading,
+            ))
             .width(Length::Fill)
             .padding(0)
             .on_press(Message::ShowSessionWorkingTree(index))
@@ -131,33 +128,29 @@ pub(super) fn history_pane<'a>(
         };
         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
         let age = relative_age_compact(now, commit.timestamp);
-        let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
-        // Graph first (screenshot parity); pills then subject stacked so the
-        // message is never crushed beside a long pill row.
-        let label = row![
-            canvas(GraphCell(graph_row))
-                .width(lanes_width)
-                .height(Length::Fixed(ROW_HEIGHT)),
-            description_cell(&pills, &commit.message, tokens, reading),
-            single_line(
-                &commit.author,
-                Length::Fixed(AUTHOR_WIDTH),
-                reading,
-                tokens,
-                false
-            ),
-            single_line(&age, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
-            single_line(
-                short_hash(&commit.id),
-                Length::Fixed(HASH_WIDTH),
-                reading,
-                tokens,
-                true
-            ),
-        ]
-        .spacing(COL_GAP)
-        .height(Length::Fixed(ROW_HEIGHT))
-        .align_y(Alignment::Center);
+        let pills = refs_at(
+            &commit.id,
+            &app.session().state.branches,
+            &app.session().state.tags,
+            &app.worktree_catalogue,
+        );
+        let mark = node_mark_for(&pills);
+        let label = history_row(
+            pill_gutter(&pills, tokens, reading),
+            canvas(GraphCell {
+                row: graph_row,
+                mark,
+            })
+            .width(Length::Fixed(graph_w))
+            .height(Length::Fixed(ROW_HEIGHT))
+            .into(),
+            message_cell(&commit.message, tokens, reading),
+            &commit.author,
+            &age,
+            short_hash(&commit.id),
+            tokens,
+            reading,
+        );
         let id = commit.id.clone();
         let right_target = ContextTarget::Commit {
             id: commit.id.clone(),
@@ -177,15 +170,18 @@ pub(super) fn history_pane<'a>(
     }
 
     let any_wip = if focus {
-        app.sessions
-            .get(app.active)
-            .is_some_and(session_dirty)
+        app.sessions.get(app.active).is_some_and(session_dirty)
     } else {
         app.sessions.iter().any(session_dirty)
     };
     if shown_nodes.is_empty() && !any_wip {
+        let empty = if session.state.commits.is_empty() {
+            "No commits yet"
+        } else {
+            "No commits on this view — try turning off Focus"
+        };
         commit_rows = commit_rows.push(
-            text("No commits yet")
+            text(empty)
                 .font(reading.font)
                 .size(reading.size)
                 .style(move |_| text::Style {
@@ -194,31 +190,57 @@ pub(super) fn history_pane<'a>(
         );
     }
 
-    container(scrollable(commit_rows.padding([2, 8])))
+    container(scrollable(commit_rows.padding([2, 8])).width(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_theme: &Theme| panel_style(tokens, false))
         .into()
 }
 
+fn history_row<'a>(
+    pills: Element<'a, Message>,
+    graph: Element<'a, Message>,
+    description: Element<'a, Message>,
+    author: &str,
+    when: &str,
+    hash: &str,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    // Pills + graph are tightly coupled; table columns start at Description.
+    let graph_cluster = row![pills, graph]
+        .spacing(PILL_GRAPH_GAP)
+        .align_y(Alignment::Center);
+    row![
+        graph_cluster,
+        description,
+        single_line(author, Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
+        single_line(when, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
+        single_line(hash, Length::Fixed(HASH_WIDTH), reading, tokens, true),
+    ]
+    .spacing(COL_GAP)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
 fn column_headers<'a>(
     app: &'a GitApp,
-    lanes_width: Length,
+    graph_w: f32,
     focus: bool,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    let graph_cluster = row![
+        // Blank spacer matching the pill gutter — not a "Branch" column.
+        container(text("")).width(Length::Fixed(PILL_GUTTER)),
+        header_cell("Graph", Length::Fixed(graph_w), tokens, reading),
+    ]
+    .spacing(PILL_GRAPH_GAP)
+    .align_y(Alignment::Center);
     row![
-        container(
-            text("Graph")
-                .font(reading.font)
-                .size(HEADER_SIZE)
-                .wrapping(Wrapping::None)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_muted),
-                }),
-        )
-        .width(lanes_width),
+        graph_cluster,
         header_cell("Description", Length::Fill, tokens, reading),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
@@ -242,6 +264,7 @@ fn column_headers<'a>(
     .spacing(COL_GAP)
     .padding([4, 0])
     .align_y(Alignment::Center)
+    .width(Length::Fill)
     .into()
 }
 
@@ -264,20 +287,61 @@ fn header_cell<'a>(
     .into()
 }
 
-/// Pills on the first line, subject underneath — keeps the graph column free.
-fn description_cell<'a>(
+fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
+    container(text(""))
+        .width(Length::Fixed(graph_w))
+        .height(Length::Fixed(ROW_HEIGHT))
+        .into()
+}
+
+/// Right-aligned pills in a fixed gutter so the graph column stays put.
+fn pill_gutter<'a>(
     pills: &[RefPill],
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    container(pill_strip(pills, tokens, reading))
+        .width(Length::Fixed(PILL_GUTTER))
+        .height(Length::Fixed(ROW_HEIGHT))
+        .align_x(Alignment::End)
+        .align_y(Alignment::Center)
+        .clip(true)
+        .into()
+}
+
+fn message_cell<'a>(
     message: &str,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    container(
+        text(message.to_string())
+            .font(reading.font)
+            .size(reading.size)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_primary),
+            }),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .clip(true)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn pill_strip<'a>(
+    pills: &[RefPill],
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
     let mut pill_row = row![].spacing(PILL_GAP).align_y(Alignment::Center);
-    for pill in pills.iter().take(4) {
+    for pill in pills.iter().take(MAX_PILLS_SHOWN) {
         pill_row = pill_row.push(ref_pill(pill, tokens, reading));
     }
-    if pills.len() > 4 {
+    if pills.len() > MAX_PILLS_SHOWN {
         pill_row = pill_row.push(
-            text(format!("+{}", pills.len() - 4))
+            text(format!("+{}", pills.len() - MAX_PILLS_SHOWN))
                 .font(reading.font)
                 .size((reading.size - 2.0).max(10.0))
                 .wrapping(Wrapping::None)
@@ -286,18 +350,31 @@ fn description_cell<'a>(
                 }),
         );
     }
-    let subject = text(message.to_string())
-        .font(reading.font)
-        .size(reading.size)
-        .wrapping(Wrapping::None)
-        .style(move |_| text::Style {
-            color: Some(tokens.text_primary),
-        });
-    let stack = if pills.is_empty() {
-        column![subject].spacing(0)
-    } else {
-        column![pill_row, subject].spacing(2)
+    pill_row.into()
+}
+
+fn wip_description_cell<'a>(
+    head: &str,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let pill = RefPill {
+        label: format!("wip · {head}"),
+        kind: RefPillKind::Head,
+        ahead: 0,
+        behind: 0,
     };
+    let stack = column![
+        ref_pill(&pill, tokens, reading),
+        text("Working changes")
+            .font(reading.font)
+            .size((reading.size - 1.0).max(11.0))
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_secondary),
+            }),
+    ]
+    .spacing(2);
     container(stack)
         .width(Length::Fill)
         .height(Length::Fixed(ROW_HEIGHT))
@@ -309,32 +386,70 @@ fn description_cell<'a>(
 fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let (fg, bg, border) = match pill.kind {
         RefPillKind::Head => (tokens.bg_app, tokens.accent_primary, tokens.accent_primary),
+        RefPillKind::Worktree => (tokens.accent_primary, tokens.bg_raised, tokens.accent_primary),
         RefPillKind::Local => (tokens.text_secondary, tokens.chip, tokens.chip_border),
         RefPillKind::Remote => (tokens.text_muted, tokens.bg_raised, tokens.border),
         RefPillKind::Tag => (tokens.added, tokens.chip, tokens.added),
     };
-    container(
+    let mark = pill_mark(pill.kind);
+    let mut body = row![
+        glyph(mark, (reading.size - 3.0).max(9.0), fg, &reading),
         text(pill.label.clone())
             .font(reading.font)
             .size((reading.size - 3.0).max(10.0))
             .wrapping(Wrapping::None)
             .style(move |_| text::Style { color: Some(fg) }),
-    )
-    .padding([PILL_PAD_Y, PILL_PAD_X])
-    .style(move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(bg)),
-        text_color: Some(fg),
-        border: Border {
-            color: border,
-            width: 1.0,
-            radius: PILL_RADIUS.into(),
-        },
-        shadow: Shadow::default(),
-    })
-    .into()
+    ]
+    .spacing(3)
+    .align_y(Alignment::Center);
+    if pill.ahead > 0 {
+        let ahead = pill.ahead;
+        body = body.push(
+            text(format!("+{ahead}"))
+                .font(reading.font)
+                .size((reading.size - 4.0).max(9.0))
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style {
+                    color: Some(tokens.added),
+                }),
+        );
+    }
+    if pill.behind > 0 {
+        let behind = pill.behind;
+        body = body.push(
+            text(format!("-{behind}"))
+                .font(reading.font)
+                .size((reading.size - 4.0).max(9.0))
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style {
+                    color: Some(tokens.removed),
+                }),
+        );
+    }
+    container(body)
+        .padding([PILL_PAD_Y, PILL_PAD_X])
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(bg)),
+            text_color: Some(fg),
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: PILL_RADIUS.into(),
+            },
+            shadow: Shadow::default(),
+        })
+        .into()
 }
 
-/// Human-readable age of a commit from `now` (unix seconds) to `then`.
+fn node_mark_for(pills: &[RefPill]) -> NodeMark {
+    match primary_node_kind(pills) {
+        Some(RefPillKind::Remote) => NodeMark::Remote,
+        Some(RefPillKind::Worktree) => NodeMark::Worktree,
+        Some(RefPillKind::Head) | Some(RefPillKind::Local) => NodeMark::Local,
+        Some(RefPillKind::Tag) | None => NodeMark::Plain,
+    }
+}
+
 pub(crate) fn relative_age(now: i64, then: i64) -> String {
     let compact = relative_age_compact(now, then);
     if compact == "now" {
@@ -344,7 +459,6 @@ pub(crate) fn relative_age(now: i64, then: i64) -> String {
     }
 }
 
-/// Compact age for the graph When column (`21h`, `3d`).
 pub(crate) fn relative_age_compact(now: i64, then: i64) -> String {
     let secs = (now - then).max(0);
     if secs < 60 {
@@ -381,8 +495,6 @@ fn session_dirty(session: &WorktreeSession) -> bool {
     })
 }
 
-/// Name shown on a session's WIP pill: its checked-out branch, else the folder name (a
-/// detached HEAD or a session whose branches have not loaded yet).
 fn wip_label(session: &WorktreeSession) -> String {
     session
         .state
@@ -446,7 +558,11 @@ mod tests {
         session.path = path.to_string();
         session.state.current_status = Some(core_domain::RepoStatus {
             staged_files: Vec::new(),
-            unstaged_files: if dirty { vec!["a.rs".to_string()] } else { Vec::new() },
+            unstaged_files: if dirty {
+                vec!["a.rs".to_string()]
+            } else {
+                Vec::new()
+            },
             untracked_files: Vec::new(),
             tracking: None,
             head_commit_id: None,
@@ -458,6 +574,8 @@ mod tests {
                     is_remote: false,
                     is_head: true,
                     tip: "abc".to_string(),
+                    ahead: 0,
+                    behind: 0,
                 }]
             })
             .unwrap_or_default();
@@ -473,7 +591,10 @@ mod tests {
 
     #[test]
     fn wip_label_is_the_branch_else_the_folder_name() {
-        assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, Some("feature"))), "feature");
+        assert_eq!(
+            wip_label(&session_at(r"D:\repo\wt", true, Some("feature"))),
+            "feature"
+        );
         assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, None)), "wt");
     }
 

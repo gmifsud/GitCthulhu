@@ -379,6 +379,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
             is_remote: false,
             is_head: true,
             tip: tip_id.clone(),
+        ahead: 0,
+        behind: 0,
         })
     );
     assert_eq!(
@@ -388,6 +390,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
             is_remote: false,
             is_head: false,
             tip: tip_id.clone(),
+        ahead: 0,
+        behind: 0,
         })
     );
     assert_eq!(
@@ -397,6 +401,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
             is_remote: true,
             is_head: false,
             tip: tip_id,
+        ahead: 0,
+        behind: 0,
         })
     );
     assert!(

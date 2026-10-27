@@ -1,4 +1,6 @@
-//! Kilo gateway. The window never sees these URLs or the token.
+//! Kilo AI Gateway. The window never sees these URLs or the token.
+//!
+//! Base URL matches https://kilo.ai/docs/gateway — OpenAI-compatible `/api/v1`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,9 +8,11 @@ use std::time::Duration;
 use core_domain::DomainError;
 use gui_app::{CommitSuggester, CommitSuggestion, ModelList, ModelLister, ProviderExchange};
 
-const MODELS_URL: &str = "https://api.kilo.ai/api/gateway/models";
-const COMPLETIONS_URL: &str = "https://api.kilo.ai/api/gateway/chat/completions";
+const MODELS_URL: &str = "https://ai-gateway.kilo.ai/api/v1/models";
+const COMPLETIONS_URL: &str = "https://ai-gateway.kilo.ai/api/v1/chat/completions";
 const DIFF_IN_PROMPT: usize = 12_000;
+/// Free / auto models can be slow on a cold route; 45s was timing out as WSAETIMEDOUT.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub fn lister() -> ModelLister {
     Arc::new(|token| list_models(&token))
@@ -42,16 +46,18 @@ fn suggest(token: &str, model: &str, diff: &str) -> CommitSuggestion {
         };
     }
     let diff = clip(diff, DIFF_IN_PROMPT);
+    let user = format!("Write a one-line subject for this diff:\n\n{diff}");
     let payload = serde_json::json!({
         "model": model,
         "temperature": 0.2,
-        "max_tokens": 80,
+        "max_tokens": 120,
+        "stream": false,
         "messages": [
             {
                 "role": "system",
-                "content": "Reply with one git commit subject only. At most 72 characters. Sentence case. No quotes and no markdown."
+                "content": "You write git subjects. Reply with exactly one line: at most 72 characters, sentence case, no quotes, no markdown, no trailing period unless needed."
             },
-            { "role": "user", "content": diff }
+            { "role": "user", "content": user }
         ]
     });
     match post(COMPLETIONS_URL, token, payload) {
@@ -107,7 +113,8 @@ fn post(url: &str, token: &str, payload: serde_json::Value) -> Result<String, Ht
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(45))
+        .timeout(HTTP_TIMEOUT)
+        .user_agent("GitCthulhu/0.1")
         .build()
 }
 
@@ -138,13 +145,35 @@ fn http_failure(error: ureq::Error, token: &str) -> HttpFailure {
         }
         ureq::Error::Transport(error) => {
             let detail = redact(&error.to_string(), token);
+            let message = transport_hint(&detail);
             HttpFailure {
                 status: 0,
-                error: DomainError::Unknown(detail.clone()),
+                error: DomainError::Unknown(message),
                 detail,
             }
         }
     }
+}
+
+/// Turn opaque WSAETIMEDOUT / DNS failures into an actionable Settings hint.
+fn transport_hint(detail: &str) -> String {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("timed out")
+        || lower.contains("10060")
+        || lower.contains("failed to respond")
+        || lower.contains("network error")
+    {
+        return format!(
+            "Could not reach the Kilo gateway (timed out). Check your network or proxy, then retry. Details: {detail}"
+        );
+    }
+    if lower.contains("dns") || lower.contains("name resolution") || lower.contains("no such host")
+    {
+        return format!(
+            "Could not resolve ai-gateway.kilo.ai. Check DNS or VPN. Details: {detail}"
+        );
+    }
+    format!("Kilo gateway network error: {detail}")
 }
 
 fn redact(text: &str, token: &str) -> String {
@@ -184,28 +213,116 @@ pub(crate) fn parse_model_ids(body: &str) -> Result<Vec<String>, DomainError> {
 pub(crate) fn parse_commit_subject(body: &str) -> Result<String, DomainError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|error| DomainError::Unknown(error.to_string()))?;
-    if let Some(message) = parsed
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(|message| message.as_str())
-    {
-        return Err(DomainError::Unknown(clip(message, 300)));
+    if let Some(message) = gateway_error_message(&parsed) {
+        return Err(DomainError::Unknown(clip(&message, 300)));
     }
-    let content = parsed
-        .pointer("/choices/0/message/content")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| DomainError::Unknown("Kilo returned no commit message.".to_string()))?;
-    let line = content.lines().next().unwrap_or(content).trim();
+    let content = extract_assistant_text(&parsed).ok_or_else(|| {
+        let reason = parsed
+            .pointer("/choices/0/finish_reason")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        DomainError::Unknown(format!(
+            "Kilo returned no commit message (finish_reason={reason}). Try another model under Settings."
+        ))
+    })?;
+    let line = content.lines().next().unwrap_or(content.as_str()).trim();
     let line = line.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`');
-    let line = line.trim();
+    let line = line.trim().trim_start_matches(['*', '-', '#']).trim();
     if line.is_empty() {
         Err(DomainError::Unknown(
-            "Kilo returned no commit message.".to_string(),
+            "Kilo returned an empty commit message. Try another model under Settings.".to_string(),
         ))
     } else {
         Ok(clip(line, 72))
+    }
+}
+
+fn gateway_error_message(parsed: &serde_json::Value) -> Option<String> {
+    if let Some(message) = parsed
+        .pointer("/error/message")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(message.to_string());
+    }
+    // Some gateway failures are a flat `{ "error": "...", "message": "..." }`.
+    if let Some(message) = parsed
+        .get("message")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        if parsed.get("error").is_some() || parsed.get("error_type").is_some() {
+            return Some(message.to_string());
+        }
+    }
+    if let Some(error) = parsed
+        .get("error")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(error.to_string());
+    }
+    None
+}
+
+/// OpenAI-compatible content may be a string or an array of text parts.
+fn extract_assistant_text(parsed: &serde_json::Value) -> Option<String> {
+    let message = parsed.pointer("/choices/0/message")?;
+    if let Some(text) = value_as_text(message.get("content")?) {
+        return Some(text);
+    }
+    // Fallbacks used by some gateway models.
+    for key in ["text", "reasoning", "refusal"] {
+        if let Some(text) = message.get(key).and_then(value_as_text) {
+            return Some(text);
+        }
+    }
+    parsed
+        .pointer("/choices/0/text")
+        .and_then(value_as_text)
+}
+
+fn value_as_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        serde_json::Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                if let Some(text) = part
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(text);
+                    continue;
+                }
+                if part.get("type").and_then(|value| value.as_str()) == Some("text") {
+                    if let Some(text) = part
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                    {
+                        if !out.is_empty() {
+                            out.push(' ');
+                        }
+                        out.push_str(text);
+                    }
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
     }
 }
 
@@ -252,6 +369,25 @@ mod tests {
     }
 
     #[test]
+    fn a_completion_accepts_array_content_parts() {
+        let body = r#"{"choices":[{"message":{"content":[{"type":"text","text":"Update the packages"}]}}]}"#;
+        assert_eq!(
+            parse_commit_subject(body).expect("subject"),
+            "Update the packages"
+        );
+    }
+
+    #[test]
+    fn a_flat_gateway_error_is_surfaced() {
+        let body = r#"{"error":"The upstream provider was unable to process the request","error_type":"upstream_error","message":"The upstream provider was unable to process the request"}"#;
+        let error = parse_commit_subject(body).expect_err("error");
+        assert!(matches!(
+            error,
+            DomainError::Unknown(message) if message.contains("upstream provider")
+        ));
+    }
+
+    #[test]
     fn the_token_is_not_left_in_a_reply() {
         let exchange = reply(
             "POST",
@@ -273,5 +409,18 @@ mod tests {
             error,
             DomainError::Unknown("Rate limit exceeded".to_string())
         );
+    }
+
+    #[test]
+    fn transport_timeout_gets_a_clear_hint() {
+        let hint = transport_hint("Network Error: ... 10060 ... failed to respond");
+        assert!(hint.contains("timed out"));
+        assert!(hint.contains("proxy"));
+    }
+
+    #[test]
+    fn gateway_urls_use_the_documented_host() {
+        assert!(MODELS_URL.starts_with("https://ai-gateway.kilo.ai/api/v1/"));
+        assert!(COMPLETIONS_URL.starts_with("https://ai-gateway.kilo.ai/api/v1/"));
     }
 }

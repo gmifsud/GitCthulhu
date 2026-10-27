@@ -279,6 +279,8 @@ mod tests {
             is_remote,
             is_head,
             tip: String::new(),
+        ahead: 0,
+        behind: 0,
         }
     }
 

@@ -16,11 +16,13 @@ pub(super) const FOLD_CLOSED: &str = "▸";
 pub(super) const FOLD_OPEN: &str = "▾";
 pub(super) const MENU_CLOSED: &str = "▾";
 pub(super) const MENU_OPEN: &str = "▴";
-pub(super) const BRANCH_MARK: &str = "⎇";
+/// Prefer glyphs that render in Segoe UI / Segoe UI Symbol (⎇ often draws blank).
+pub(super) const BRANCH_MARK: &str = "⑂";
 pub(super) const SEARCH_MARK: &str = "⌕";
 pub(super) const REMOTE_MARK: &str = "↑";
 pub(super) const TAG_MARK: &str = "◆";
 pub(super) const STASH_MARK: &str = "≡";
+pub(super) const WORKTREE_MARK: &str = "⧉";
 
 /// The face and size chosen under Appearance. Hashes and paths stay monospace.
 #[derive(Clone, Copy)]

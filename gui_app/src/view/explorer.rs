@@ -18,7 +18,7 @@ use iced::{
 
 use super::chrome::{
     glyph, hairline, icon_button, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED, FOLD_OPEN,
-    REMOTE_MARK, STASH_MARK, TAG_MARK,
+    REMOTE_MARK, STASH_MARK, TAG_MARK, WORKTREE_MARK,
 };
 
 const HEAD_PADDING_Y: f32 = 4.0;
@@ -228,6 +228,8 @@ fn local_rows<'a>(
                 name: branch.name.clone(),
                 tip: branch.tip.clone(),
             }),
+            branch.ahead,
+            branch.behind,
             tokens,
             reading,
         ));
@@ -257,6 +259,8 @@ fn remote_rows<'a>(
             selected,
             false,
             None,
+            0,
+            0,
             tokens,
             reading,
         ));
@@ -308,19 +312,24 @@ fn worktree_row<'a>(
         entry.branch.clone()
     };
 
-    let mut name_row = row![text(basename(&entry.path).to_string())
-        .font(reading.font)
-        .size(reading.size)
-        .wrapping(Wrapping::None)
-        .style(move |_| iced::widget::text::Style {
-            color: Some(if open {
-                tokens.text_primary
-            } else {
-                tokens.text_secondary
-            }),
-        })]
+    let (ahead, behind) = tracking_for_worktree(app, entry);
+
+    let mut name_row = row![
+        text(basename(&entry.path).to_string())
+            .font(reading.font)
+            .size(reading.size)
+            .wrapping(Wrapping::None)
+            .style(move |_| iced::widget::text::Style {
+                color: Some(if open {
+                    tokens.text_primary
+                } else {
+                    tokens.text_secondary
+                }),
+            })
+    ]
     .spacing(6)
-    .align_y(Alignment::Center);
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
 
     if entry.is_main {
         name_row = name_row.push(wt_tag("main", tokens, reading));
@@ -330,28 +339,36 @@ fn worktree_row<'a>(
     }
 
     let marker: Element<'a, Message> = glyph(
-        OPEN_MARK,
-        (reading.size - 4.0).max(7.0),
+        if open { WORKTREE_MARK } else { OPEN_MARK },
+        (reading.size - 2.0).max(9.0),
         if open {
             tokens.accent_primary
         } else {
-            Color::TRANSPARENT
+            tokens.text_muted
         },
         &reading,
     );
+
+    let mut branch_line = row![
+        text(branch)
+            .font(reading.font)
+            .size((reading.size - 2.0).max(11.0))
+            .wrapping(Wrapping::None)
+            .style(move |_| iced::widget::text::Style {
+                color: Some(tokens.accent_primary),
+            })
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+    branch_line = branch_line.push(tracking_badges(ahead, behind, tokens, reading));
 
     let body = button(
         row![
             marker,
             column![
-                name_row,
-                text(branch)
-                    .font(reading.font)
-                    .size((reading.size - 2.0).max(11.0))
-                    .wrapping(Wrapping::None)
-                    .style(move |_| iced::widget::text::Style {
-                        color: Some(tokens.accent_primary),
-                    }),
+                container(name_row).width(Length::Fill).clip(true),
+                container(branch_line).width(Length::Fill).clip(true),
             ]
             .spacing(1)
             .width(Length::Fill),
@@ -389,7 +406,7 @@ fn worktree_row<'a>(
     let remove_key = format!("worktree-remove:{}", entry.path);
     let tip_ready = app.tip_ready(&remove_key);
     row![
-        body,
+        container(body).width(Length::Fill).clip(true),
         icon_button(
             "×",
             "Remove worktree",
@@ -406,6 +423,7 @@ fn worktree_row<'a>(
     ]
     .spacing(4)
     .align_y(Alignment::Center)
+    .width(Length::Fill)
     .into()
 }
 
@@ -449,6 +467,8 @@ fn stash_rows<'a>(stashes: &'a [Stash], tokens: DesignTokens, reading: Reading) 
             false,
             false,
             None,
+            0,
+            0,
             tokens,
             reading,
         ));
@@ -475,6 +495,8 @@ fn tag_rows<'a>(tags: &'a [Tag], tokens: DesignTokens, reading: Reading) -> Elem
             false,
             false,
             None,
+            0,
+            0,
             tokens,
             reading,
         ));
@@ -495,6 +517,8 @@ fn branch_row<'a>(
     selected: bool,
     accent: bool,
     context: Option<ContextTarget>,
+    ahead: usize,
+    behind: usize,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -515,13 +539,18 @@ fn branch_row<'a>(
     let row = button(
         row![
             glyph(mark, reading.size, mark_color, &reading),
-            text(label)
-                .font(reading.font)
-                .size(reading.size)
-                .wrapping(Wrapping::None)
-                .style(move |_| iced::widget::text::Style {
-                    color: Some(label_color),
-                }),
+            container(
+                text(label)
+                    .font(reading.font)
+                    .size(reading.size)
+                    .wrapping(Wrapping::None)
+                    .style(move |_| iced::widget::text::Style {
+                        color: Some(label_color),
+                    }),
+            )
+            .width(Length::Fill)
+            .clip(true),
+            tracking_badges(ahead, behind, tokens, reading),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -553,6 +582,74 @@ fn branch_row<'a>(
     } else {
         row.into()
     }
+}
+
+/// Ahead/behind for a worktree: its own open session first, else the branch tip in any session.
+fn tracking_for_worktree(app: &GitApp, entry: &Worktree) -> (usize, usize) {
+    if let Some(session) = app
+        .sessions
+        .iter()
+        .find(|session| same_path(&session.path, &entry.path))
+    {
+        if let Some(branch) = session
+            .state
+            .branches
+            .iter()
+            .find(|b| b.is_head && !b.is_remote)
+        {
+            return (branch.ahead, branch.behind);
+        }
+    }
+    if entry.branch.is_empty() {
+        return (0, 0);
+    }
+    for session in &app.sessions {
+        if let Some(branch) = session
+            .state
+            .branches
+            .iter()
+            .find(|b| !b.is_remote && b.name == entry.branch)
+        {
+            return (branch.ahead, branch.behind);
+        }
+    }
+    (0, 0)
+}
+
+fn tracking_badges<'a>(
+    ahead: usize,
+    behind: usize,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    if ahead == 0 && behind == 0 {
+        return Space::with_width(0).into();
+    }
+    let size = (reading.size - 1.0).max(11.0);
+    let mut badges = row![].spacing(4).align_y(Alignment::Center);
+    if ahead > 0 {
+        badges = badges.push(
+            text(format!("+{ahead}"))
+                .font(reading.font)
+                .size(size)
+                .wrapping(Wrapping::None)
+                .style(move |_| iced::widget::text::Style {
+                    color: Some(tokens.added),
+                }),
+        );
+    }
+    if behind > 0 {
+        badges = badges.push(
+            text(format!("-{behind}"))
+                .font(reading.font)
+                .size(size)
+                .wrapping(Wrapping::None)
+                .style(move |_| iced::widget::text::Style {
+                    color: Some(tokens.removed),
+                }),
+        );
+    }
+    badges.into()
 }
 
 fn empty_hint<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {

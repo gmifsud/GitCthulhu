@@ -18,7 +18,7 @@ use crate::jobs::{
     init_in_background, list_models_in_background, load_patch_in_background,
     load_repository_in_background, open_repository_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
-    stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
+    shell_in_background, stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
     worktrees_in_background, BranchAction, HistoryAction, SharedRepository, StashAction,
     WorktreeEdit,
 };
@@ -99,6 +99,10 @@ pub(crate) struct GitApp {
     pub(crate) terminal: crate::terminal::Transcript,
     pub(crate) terminal_log: text_editor::Content,
     pub(crate) terminal_open: bool,
+    /// Draft line for the interactive terminal.
+    pub(crate) shell_input: String,
+    /// A shell command is running in the active worktree.
+    pub(crate) shell_busy: bool,
     pub(crate) list_models: crate::ModelLister,
     pub(crate) suggest_commit: crate::CommitSuggester,
     pub(crate) error: Option<String>,
@@ -206,6 +210,12 @@ pub(crate) enum Message {
     ToggleTerminal,
     TerminalEdited(text_editor::Action),
     ClearTerminal,
+    /// User typed in the terminal command field.
+    ShellInputChanged(String),
+    /// User pressed Enter to run the terminal command.
+    ShellSubmit,
+    /// Background shell finished: (command, output body).
+    ShellFinished(String, String),
     CloseSettings,
     /// Disk write finished. No UI effect; keeps the task from being discarded silently.
     SettingsSaved,
@@ -452,6 +462,8 @@ impl GitApp {
             terminal: crate::terminal::Transcript::new(),
             terminal_log: text_editor::Content::new(),
             terminal_open: true,
+            shell_input: String::new(),
+            shell_busy: false,
             list_models: unavailable_model_lister(),
             suggest_commit: unavailable_suggester(),
             error: None,
@@ -688,10 +700,24 @@ impl GitApp {
                 .map(|mark| (mark.path.clone(), mark.place))
                 .collect();
         }
-        match &session.selection {
-            Some(Selection::File { path, place }) => vec![(path.clone(), *place)],
-            _ => Vec::new(),
+        if let Some(Selection::File { path, place }) = &session.selection {
+            return vec![(path.clone(), *place)];
         }
+        // Fall back to the whole working tree so ✦ works without a focused file.
+        let Some(status) = session.state.current_status.as_ref() else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for path in &status.staged_files {
+            files.push((path.clone(), FileDisposition::Staged));
+        }
+        for path in &status.unstaged_files {
+            files.push((path.clone(), FileDisposition::Unstaged));
+        }
+        for path in &status.untracked_files {
+            files.push((path.clone(), FileDisposition::Untracked));
+        }
+        files
     }
 
     fn store_appearance(&mut self, font: &str, size: u8) -> Task<Message> {
@@ -1341,6 +1367,17 @@ impl GitApp {
             }
             Message::ClearTerminal => {
                 self.terminal.clear();
+                self.sync_terminal_log();
+                Task::none()
+            }
+            Message::ShellInputChanged(value) => {
+                self.shell_input = value;
+                Task::none()
+            }
+            Message::ShellSubmit => self.submit_shell(),
+            Message::ShellFinished(_command, output) => {
+                self.shell_busy = false;
+                self.terminal.finish_last(output);
                 self.sync_terminal_log();
                 Task::none()
             }
@@ -2242,6 +2279,56 @@ impl GitApp {
         self.terminal_log = text_editor::Content::with_text(&self.terminal.shell_text());
     }
 
+    fn submit_shell(&mut self) -> Task<Message> {
+        if self.shell_busy {
+            return Task::none();
+        }
+        let command = self.shell_input.trim().to_string();
+        if command.is_empty() {
+            return Task::none();
+        }
+        let Some(session) = self.active_session() else {
+            self.terminal.record(crate::ProviderExchange::new(
+                "shell",
+                "Open a repository before running commands.",
+            ));
+            self.sync_terminal_log();
+            return Task::none();
+        };
+        let cwd = session.path.clone();
+        self.shell_input.clear();
+        self.shell_busy = true;
+        self.terminal.record(crate::ProviderExchange::new(
+            format!("shell · {command}"),
+            "Running…",
+        ));
+        self.sync_terminal_log();
+        Task::perform(shell_in_background(cwd, command), |(command, output)| {
+            Message::ShellFinished(command, output)
+        })
+    }
+
+    /// Label for the status strip while work is in flight.
+    pub(crate) fn activity_label(&self) -> &'static str {
+        if self.shell_busy {
+            "Running command…"
+        } else if self.worktree_busy {
+            "Worktree…"
+        } else if self.agent_busy {
+            "Agent…"
+        } else if self.opening || self.worktree_opening.is_some() {
+            "Opening…"
+        } else if self.active_session().is_some_and(|s| s.state.loading) {
+            "Loading…"
+        } else {
+            "Ready"
+        }
+    }
+
+    pub(crate) fn activity_busy(&self) -> bool {
+        self.activity_label() != "Ready"
+    }
+
     fn confirm_branch(&mut self) -> Task<Message> {
         let Some(prompt) = self.branch_prompt.clone() else {
             return Task::none();
@@ -2773,6 +2860,8 @@ mod tests {
             is_remote: false,
             is_head,
             tip: String::new(),
+        ahead: 0,
+        behind: 0,
         }
     }
 
@@ -3316,6 +3405,8 @@ mod tests {
                 is_remote: true,
                 is_head: false,
                 tip: String::new(),
+            ahead: 0,
+            behind: 0,
             },
         ];
         app.session_mut().selection = Some(Selection::Remote {

@@ -14,7 +14,6 @@ const STATUS_PADDING: f32 = 12.0;
 const STATUS_GAP: f32 = 14.0;
 const DOT_SIZE: f32 = 7.0;
 const NO_UPSTREAM: &str = "No upstream";
-const READY: &str = "Ready";
 const ENCODING: &str = "UTF-8";
 
 pub(super) fn status_bar<'a>(
@@ -29,7 +28,8 @@ pub(super) fn status_bar<'a>(
     } else {
         STATUS_BAR_HEIGHT
     };
-    let mut bar = row![loading_dot(app.session().state.loading, tokens)]
+    let busy = app.activity_busy();
+    let mut bar = row![loading_dot(busy, tokens)]
         .spacing(STATUS_GAP)
         .align_y(if expanded {
             Alignment::Start
@@ -43,11 +43,7 @@ pub(super) fn status_bar<'a>(
         bar = bar.push(error_cluster(error, app.error_expanded, quiet, tokens, reading));
     } else {
         bar = bar.push(status_text(
-            if app.session().state.loading {
-                "Loading…".to_string()
-            } else {
-                READY.to_string()
-            },
+            app.activity_label().to_string(),
             quiet,
             tokens,
             reading,
