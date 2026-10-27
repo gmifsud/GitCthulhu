@@ -16,8 +16,8 @@ Standalone three-way Git conflict resolver.
 | diff3 planner + marker renderer | ✅ | `Merge/` |
 | S2 planner vs git | ✅ Go | `docs/spikes/S2-planner-oracle.md` |
 | S4 atomic save | ✅ Linux; Windows/macOS/WSL pending | `docs/spikes/S4-atomic-save.md` |
-| S1 three-pane editor latency | ⏳ next | — |
-| S3 editor accessibility | ⏳ needs NVDA / VoiceOver on a real machine | — |
+| S1 three-pane editor latency | ⚠ Conditional go (Linux CPU raster); GPU re-measure pending | `docs/spikes/S1-S3-editor.md`, `spikes/S1.ThreePane/` |
+| S3 editor accessibility | ❌ Kill criterion met; decision O1 needed (A navigator vs B Monaco) | `docs/spikes/S1-S3-editor.md` |
 
 What each component guarantees:
 
@@ -25,6 +25,8 @@ What each component guarantees:
 - **Unmerged index reader, stage acquisition:** inputs come from index stages in working-tree form (`cat-file --filters`), never from markers.
 - **Text codec:** byte-exact round trip; lines split on LF only, like xdiff; no lossy decoding.
 - **Line diffs:** the plan uses git's own Histogram diffs (S2); the in-process diffs are display-only.
+
+`spikes/` holds throwaway measurement harnesses. They are not part of the solution, so CI doesn't build them. Run them from their own folders.
 
 ## Build & test
 

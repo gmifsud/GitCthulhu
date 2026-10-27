@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Spike S1: throwaway measurement harness, not product code (spec §13 Phase 0). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>S1.ThreePane</RootNamespace>
+    <NoWarn>$(NoWarn);CA1515;CA1812;CA2000;CA1305;CA1303;CA1001;CA1852;CA1062;CA1859;CA2007;CA1869</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.AvaloniaEdit" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Resolve.Core/Resolve.Core.csproj" />
+  </ItemGroup>
+</Project>
