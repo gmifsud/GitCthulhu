@@ -7,6 +7,7 @@ mod confirm;
 mod context_overlay;
 mod explorer;
 mod history;
+mod palette;
 mod patch;
 mod refs;
 mod settings;
@@ -27,6 +28,7 @@ use branch::branch_prompt;
 use chrome::{compact, hairline, reading};
 use confirm::{confirm_detach, confirm_discard, confirm_drop_stash, history_prompt};
 use context_overlay::context_menu_overlay;
+use palette::palette_overlay;
 use settings::settings_dialog;
 use status_bar::status_bar;
 use tabs::tab_strip;
@@ -111,7 +113,9 @@ impl GitApp {
             border: Border::default(),
             shadow: Shadow::default(),
         });
-        if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
+        if let Some(overlay) = palette_overlay(self, tokens, reading) {
+            stack![main, overlay].into()
+        } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
             stack![main, overlay].into()
         } else {
             main.into()

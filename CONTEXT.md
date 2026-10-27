@@ -38,9 +38,17 @@ Open a repository from the command line or from the welcome screen's folder dial
 
 **WIP rows.** The history graph shows one Working changes row for each open session that has staged, unstaged, or untracked paths, at the top in tab order. The pill carries that session's branch, or the folder name when HEAD is detached. Pressing a row switches to its session and shows its working tree. A worktree with no tab has no row.
 
+## Finding things
+
+**History search.** The top-bar field (Ctrl+K) narrows the history table to loaded commits whose message, author, hash prefix, or tip ref name contains every typed term. Matches show their lane dot without lines, and a line under the headers says how many of the loaded commits matched. It searches what is loaded, not the whole repository.
+
+**Quick open.** Ctrl+P opens one field over branches, remotes, worktrees, tags, stashes, changed files, loaded commits, and recent repositories, ranked by a subsequence score that favours word starts. A prefix scopes it: `b:` `t:` `s:` `w:` `c:` `f:` `r:`. Enter selects a branch, tag, stash, commit, or file (nothing is checked out), opens a worktree in a tab, or opens a repository. Esc, Ctrl+P, and Ctrl+K work while a text field has focus.
+
+**Recent repositories.** `recent_repositories` in the settings, newest first, at most twelve. The repository opener and a command-line path add to it; worktree tabs do not. The welcome screen lists them and the top bar's Recent opens Quick open on `r:`.
+
 ### Later: several repositories
 
-A session is a worktree of the repository that was opened. Unrelated clones in one window are not covered. `last_repo_path` is still a single path. A later session could keep a list of repositories in the composition root and open each through the same opener.
+A session is a worktree of the repository that was opened. Unrelated clones in one window are not covered. `last_repo_path` is still the one path reopened at launch; the recent list only offers the others.
 
 ## Later: the changes list
 

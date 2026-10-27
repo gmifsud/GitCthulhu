@@ -50,7 +50,23 @@ impl std::fmt::Debug for OpenedRepository {
     }
 }
 
+/// Text-input id of the top-bar history search (focused by Ctrl+K).
+pub(crate) const HISTORY_SEARCH_ID: &str = "history-search";
+/// Text-input id of the quick-open palette field.
+pub(crate) const PALETTE_INPUT_ID: &str = "quick-open";
+
+/// The open Ctrl+P palette: its query and the highlighted row among the ranked results.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PaletteState {
+    pub query: String,
+    pub selected: usize,
+}
+
 pub(crate) struct GitApp {
+    /// Top-bar search: narrows the history table. Window-wide, not per tab.
+    pub(crate) history_query: String,
+    /// Quick-open palette, when showing.
+    pub(crate) palette: Option<PaletteState>,
     /// One per open worktree tab. Empty on the welcome screen.
     pub(crate) sessions: Vec<WorktreeSession>,
     /// Index into `sessions` of the tab bound to the window.
@@ -355,6 +371,19 @@ pub(crate) enum Message {
         path: String,
         result: Result<(), DomainError>,
     },
+    /// Top-bar search text changed.
+    HistoryQueryChanged(String),
+    /// Ctrl+K: put the caret in the top-bar search.
+    FocusHistorySearch,
+    /// Ctrl+P: open the palette (closes it when already open). The text prefills the query.
+    TogglePalette(String),
+    PaletteQueryChanged(String),
+    /// Arrow keys: move the highlighted palette row by this many rows.
+    PaletteMove(i32),
+    /// Enter in the palette field: activate the highlighted row.
+    PaletteSubmit,
+    /// Click on a palette row: its position among the ranked results.
+    PaletteActivate(usize),
 }
 
 /// A worktree create or remove waiting for the user to confirm.
@@ -475,6 +504,8 @@ impl GitApp {
             branch_prompt: None,
             history_prompt: None,
             clone_url: String::new(),
+            history_query: String::new(),
+            palette: None,
             open_repository,
             open_worktree,
             initialise,
@@ -936,6 +967,61 @@ impl GitApp {
                 Task::none()
             }
             Message::Escape => self.handle_escape(),
+            Message::HistoryQueryChanged(query) => {
+                self.history_query = query;
+                Task::none()
+            }
+            Message::FocusHistorySearch => {
+                if self.sessions.is_empty() {
+                    return Task::none();
+                }
+                self.palette = None;
+                Task::batch([
+                    iced::widget::text_input::focus(HISTORY_SEARCH_ID),
+                    iced::widget::text_input::select_all(HISTORY_SEARCH_ID),
+                ])
+            }
+            Message::TogglePalette(prefill) => {
+                if self.sessions.is_empty() || self.palette.take().is_some() {
+                    return Task::none();
+                }
+                self.context_menu = None;
+                self.palette = Some(PaletteState {
+                    query: prefill,
+                    selected: 0,
+                });
+                Task::batch([
+                    iced::widget::text_input::focus(PALETTE_INPUT_ID),
+                    iced::widget::text_input::move_cursor_to_end(PALETTE_INPUT_ID),
+                ])
+            }
+            Message::PaletteQueryChanged(query) => {
+                if let Some(palette) = &mut self.palette {
+                    palette.query = query;
+                    palette.selected = 0;
+                }
+                Task::none()
+            }
+            Message::PaletteMove(step) => {
+                let count = self.palette_results().1.len();
+                if let Some(palette) = &mut self.palette {
+                    palette.selected = step_selection(palette.selected, step, count);
+                }
+                Task::none()
+            }
+            Message::PaletteSubmit => {
+                let selected = self.palette.as_ref().map_or(0, |palette| palette.selected);
+                self.update(Message::PaletteActivate(selected))
+            }
+            Message::PaletteActivate(position) => {
+                let (items, ranked) = self.palette_results();
+                let Some(item) = ranked.get(position).and_then(|&index| items.get(index)) else {
+                    return Task::none();
+                };
+                let next = palette_message(item.target.clone());
+                self.palette = None;
+                self.update(next)
+            }
             Message::StageMarked => self.edit_marked(true),
             Message::UnstageMarked => self.edit_marked(false),
             Message::CheckoutBranch(branch) => {
@@ -1179,7 +1265,9 @@ impl GitApp {
                 let initialise = Arc::clone(&self.initialise);
                 let clone_repository = Arc::clone(&self.clone_repository);
                 let save_settings = Arc::clone(&self.save_settings);
-                let settings = self.settings.clone();
+                // The opener already stored this on disk; keep the window's copy in step.
+                let mut settings = self.settings.clone();
+                settings.remember_recent(&path);
                 let list_models = Arc::clone(&self.list_models);
                 let suggest_commit = Arc::clone(&self.suggest_commit);
                 *self = Self::new(
@@ -2681,6 +2769,15 @@ impl GitApp {
 
     pub(crate) fn subscription(&self) -> iced::Subscription<Message> {
         let keys = iced::keyboard::on_key_press(shortcut_message);
+        // A focused text input captures every key but Tab and the vertical arrows, and
+        // `on_key_press` only sees ignored keys. These few must work while typing.
+        let typing_keys = iced::event::listen_with(|event, status, _id| match (event, status) {
+            (
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }),
+                iced::event::Status::Captured,
+            ) => typing_shortcut(&key, modifiers),
+            _ => None,
+        });
         let cursor = iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                 Some(Message::CursorMoved {
@@ -2699,12 +2796,13 @@ impl GitApp {
         if waiting_tip {
             iced::Subscription::batch([
                 keys,
+                typing_keys,
                 cursor,
                 iced::time::every(iced::time::Duration::from_millis(200))
                     .map(|_| Message::IconTipTick),
             ])
         } else {
-            iced::Subscription::batch([keys, cursor])
+            iced::Subscription::batch([keys, typing_keys, cursor])
         }
     }
 
@@ -2714,6 +2812,9 @@ impl GitApp {
     }
 
     fn handle_escape(&mut self) -> Task<Message> {
+        if self.palette.take().is_some() {
+            return Task::none();
+        }
         if self.confirm_detach.is_some() {
             return self.update(Message::CancelDetach);
         }
@@ -2779,6 +2880,11 @@ fn shortcut_message(
     match key {
         Key::Named(Named::Escape) => Some(Message::Escape),
         Key::Named(Named::F5) => Some(Message::Fetch),
+        Key::Named(Named::ArrowDown) => Some(Message::PaletteMove(1)),
+        Key::Named(Named::ArrowUp) => Some(Message::PaletteMove(-1)),
+        Key::Character(_) if typing_shortcut(&key, modifiers).is_some() => {
+            typing_shortcut(&key, modifiers)
+        }
         Key::Character(c)
             if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("l") =>
         {
@@ -2800,6 +2906,79 @@ fn shortcut_message(
             Some(Message::StageMarked)
         }
         _ => None,
+    }
+}
+
+/// Shortcuts honoured even while a text input has focus: Escape, Ctrl+P, Ctrl+K.
+fn typing_shortcut(
+    key: &iced::keyboard::Key,
+    modifiers: iced::keyboard::Modifiers,
+) -> Option<Message> {
+    use iced::keyboard::key::Named;
+    use iced::keyboard::Key;
+
+    let ctrl = modifiers.control() || modifiers.logo();
+    match key {
+        Key::Named(Named::Escape) => Some(Message::Escape),
+        Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("p") => {
+            Some(Message::TogglePalette(String::new()))
+        }
+        Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("k") => {
+            Some(Message::FocusHistorySearch)
+        }
+        _ => None,
+    }
+}
+
+/// Wrap-around move of the highlighted palette row. An empty list stays at 0.
+fn step_selection(selected: usize, step: i32, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let count = count as i64;
+    (selected as i64 + step as i64).rem_euclid(count) as usize
+}
+
+/// The existing message each palette row stands for. Nothing here checks out or edits:
+/// branches, tags, commits, and stashes are selected; worktrees and repositories open.
+fn palette_message(target: crate::palette::PaletteTarget) -> Message {
+    use crate::palette::PaletteTarget;
+    match target {
+        PaletteTarget::Branch { name, current } => {
+            Message::Select(Selection::Branch { name, current })
+        }
+        PaletteTarget::Remote { name } => Message::Select(Selection::Remote { name }),
+        PaletteTarget::Tag { name, commit_id } => {
+            Message::Select(Selection::Tag { name, commit_id })
+        }
+        PaletteTarget::Stash { index, message } => {
+            Message::Select(Selection::Stash { index, message })
+        }
+        PaletteTarget::Commit { id } => Message::Select(Selection::Commit { id }),
+        PaletteTarget::File { path, place } => Message::FocusFile { path, place },
+        PaletteTarget::Worktree { path } => Message::OpenWorktree(path),
+        PaletteTarget::Repository { path } => Message::OpenRepository(path),
+    }
+}
+
+impl GitApp {
+    /// Palette index for the active session and its ranking for the current query.
+    pub(crate) fn palette_results(&self) -> (Vec<crate::palette::PaletteItem>, Vec<usize>) {
+        let (Some(palette), Some(session)) = (self.palette.as_ref(), self.active_session()) else {
+            return (Vec::new(), Vec::new());
+        };
+        let items = crate::palette::palette_items(&crate::palette::PaletteSource {
+            branches: &session.state.branches,
+            tags: &session.state.tags,
+            stashes: &session.state.stashes,
+            worktrees: &self.worktree_catalogue,
+            commits: &session.state.commits,
+            status: session.state.current_status.as_ref(),
+            recent_repositories: &self.settings.recent_repositories,
+            current_path: &session.path,
+        });
+        let ranked = crate::palette::rank(&items, &palette.query);
+        (items, ranked)
     }
 }
 
@@ -5049,5 +5228,87 @@ mod tests {
 
         assert!(app.confirm_detach.is_none());
         assert!(app.session().state.loading);
+    }
+
+    #[test]
+    fn ctrl_p_and_ctrl_k_work_while_typing() {
+        use iced::keyboard::{Key, Modifiers};
+        assert!(matches!(
+            typing_shortcut(&Key::Character("p".into()), Modifiers::CTRL),
+            Some(Message::TogglePalette(_))
+        ));
+        assert!(matches!(
+            typing_shortcut(&Key::Character("K".into()), Modifiers::CTRL),
+            Some(Message::FocusHistorySearch)
+        ));
+        assert!(typing_shortcut(&Key::Character("p".into()), Modifiers::empty()).is_none());
+    }
+
+    #[test]
+    fn the_palette_toggles_and_escape_closes_it_first() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.error = Some("kept".to_string());
+        let _ = app.update(Message::TogglePalette("b: ".to_string()));
+        assert_eq!(app.palette.as_ref().map(|p| p.query.as_str()), Some("b: "));
+        let _ = app.update(Message::Escape);
+        assert!(app.palette.is_none());
+        assert_eq!(app.error.as_deref(), Some("kept"), "Escape only closed the palette");
+        let _ = app.update(Message::TogglePalette(String::new()));
+        let _ = app.update(Message::TogglePalette(String::new()));
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn palette_rows_wrap_around() {
+        assert_eq!(step_selection(0, -1, 3), 2);
+        assert_eq!(step_selection(2, 1, 3), 0);
+        assert_eq!(step_selection(0, 1, 0), 0);
+    }
+
+    #[test]
+    fn activating_a_commit_row_selects_it_and_closes_the_palette() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.commits = vec![commit("aaaaaaa1")];
+        let _ = app.update(Message::TogglePalette("c:".to_string()));
+        let _ = app.update(Message::PaletteSubmit);
+        assert!(app.palette.is_none());
+        assert_eq!(
+            app.session().selection,
+            Some(Selection::Commit {
+                id: "aaaaaaa1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn typing_resets_the_highlighted_row() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.commits = vec![commit("aaaaaaa1"), commit("bbbbbbb2")];
+        let _ = app.update(Message::TogglePalette(String::new()));
+        let _ = app.update(Message::PaletteMove(1));
+        assert_eq!(app.palette.as_ref().map(|p| p.selected), Some(1));
+        let _ = app.update(Message::PaletteQueryChanged("b".to_string()));
+        assert_eq!(app.palette.as_ref().map(|p| p.selected), Some(0));
+    }
+
+    #[test]
+    fn opening_a_repository_puts_it_first_in_the_recent_list() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.settings.recent_repositories = vec![r"D:\old".to_string()];
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\new".to_string(),
+            Ok(OpenedRepository(std::sync::Arc::new(FakeGitRepository::ok()))),
+        ));
+        assert_eq!(
+            app.settings.recent_repositories,
+            vec![r"D:\new".to_string(), r"D:\old".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_history_query_is_kept_as_typed() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::HistoryQueryChanged("fork ".to_string()));
+        assert_eq!(app.history_query, "fork ");
     }
 }

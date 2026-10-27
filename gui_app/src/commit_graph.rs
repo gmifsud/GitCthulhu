@@ -11,8 +11,8 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 
 use crate::theme::hex_color;
 
-/// Height of one commit row. Enough for a WIP dual-line description cell.
-pub(crate) const ROW_HEIGHT: f32 = 40.0;
+/// Height of one commit row: one line of text, pills inline.
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
 /// Horizontal distance between lane centres.
 const LANE_SPACING: f32 = 16.0;
 const DOT_RADIUS: f32 = 4.0;

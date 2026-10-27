@@ -1,11 +1,13 @@
-//! History table — Graph | Description | Author | When | Hash.
-//! Ref pills are NOT a table column: they sit in a left gutter, right-aligned
-//! so they touch the graph node. Description holds the commit message only.
+//! History table — Graph | Description | Author | When | Hash, one dense line per commit.
+//! The graph is only as wide as its lanes. Ref pills sit at the right end of the
+//! Description cell, after the subject, so rows without refs give the subject the room.
+//! The top-bar search narrows the table to matching loaded commits.
 
 use crate::app::{GitApp, Message};
-use crate::commit_graph::{graph_rows, graph_width, GraphCell, NodeMark, ROW_HEIGHT};
+use crate::commit_graph::{graph_rows, graph_width, GraphCell, GraphRow, NodeMark, ROW_HEIGHT};
 use crate::context_menu::ContextTarget;
 use crate::jobs::COMMIT_PAGE_SIZE;
+use crate::palette::commit_matches;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
 use crate::ref_pills::{pill_mark, primary_node_kind, refs_at, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
@@ -22,20 +24,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::chrome::{glyph, icon_button, panel_style, Reading};
 
 const COL_GAP: f32 = 10.0;
-/// Pills hug the graph node.
-const PILL_GRAPH_GAP: f32 = 2.0;
-const HASH_WIDTH: f32 = 72.0;
-const WHEN_WIDTH: f32 = 56.0;
+/// Space between the subject and the first ref pill.
+const SUBJECT_PILL_GAP: f32 = 8.0;
+const HASH_WIDTH: f32 = 64.0;
+const WHEN_WIDTH: f32 = 44.0;
 const AUTHOR_WIDTH: f32 = 120.0;
-const MIN_GRAPH_COL_WIDTH: f32 = 32.0;
-/// Left gutter for pills (not a table column — no header, right-aligned content).
-const PILL_GUTTER: f32 = 260.0;
+const MIN_GRAPH_COL_WIDTH: f32 = 24.0;
+/// The header's focus toggle; data rows reserve the same width so columns line up.
+const FOCUS_SLOT: f32 = 28.0;
 const HEADER_SIZE: f32 = 11.0;
-const PILL_PAD_Y: f32 = 1.0;
+const PILL_PAD_Y: f32 = 0.0;
 const PILL_PAD_X: f32 = 5.0;
 const PILL_RADIUS: f32 = 3.0;
 const PILL_GAP: f32 = 3.0;
-const MAX_PILLS_SHOWN: usize = 3;
+const MAX_PILLS_SHOWN: usize = 2;
+/// Widest the pill strip may grow; the subject keeps the rest of the cell.
+const PILL_STRIP_MAX: f32 = 240.0;
+/// One text line inside a pill. iced 0.13 can still wrap `Wrapping::None` text when
+/// squeezed, so pills are clamped to this height and clipped.
+const PILL_HEIGHT: f32 = 16.0;
+/// Most rows a history search draws.
+const MAX_SEARCH_ROWS: usize = 200;
 
 pub(super) fn history_pane<'a>(
     app: &'a GitApp,
@@ -75,6 +84,8 @@ pub(super) fn history_pane<'a>(
     } else {
         &session.state.dag_nodes[..page_end]
     };
+    let query = app.history_query.trim();
+    let searching = !query.is_empty();
     let rows = graph_rows(shown_nodes);
     let graph_w = graph_width(&rows).max(MIN_GRAPH_COL_WIDTH);
     let commits_by_id: HashMap<&str, &Commit> = session
@@ -88,10 +99,59 @@ pub(super) fn history_pane<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    // A search runs over every loaded commit, not only the first page. Lane lines mean
+    // nothing between non-adjacent rows, so matches draw their dot alone.
+    let table: Vec<(&DagNode, GraphRow)> = if searching {
+        session
+            .state
+            .dag_nodes
+            .iter()
+            .filter(|node| {
+                commits_by_id.get(node.commit_id.as_str()).is_some_and(|commit| {
+                    let names = ref_names_at(&commit.id, session);
+                    commit_matches(commit, &names, query)
+                })
+            })
+            .take(MAX_SEARCH_ROWS)
+            .map(|node| {
+                (
+                    node,
+                    GraphRow {
+                        lane: node.lane,
+                        incoming: Vec::new(),
+                        passing: Vec::new(),
+                        outgoing: Vec::new(),
+                    },
+                )
+            })
+            .collect()
+    } else {
+        shown_nodes.iter().zip(rows).collect()
+    };
+    let graph_w = if searching {
+        table
+            .iter()
+            .map(|(_, row)| graph_width(std::slice::from_ref(row)))
+            .fold(MIN_GRAPH_COL_WIDTH, f32::max)
+    } else {
+        graph_w
+    };
+
     let mut commit_rows =
         column![column_headers(app, graph_w, focus, tokens, reading)].width(Length::Fill);
+    if searching {
+        commit_rows = commit_rows.push(search_summary(
+            table.len(),
+            session.state.dag_nodes.len(),
+            tokens,
+            reading,
+        ));
+    }
 
     for (index, session) in app.sessions.iter().enumerate() {
+        if searching {
+            break;
+        }
         if focus && index != app.active {
             continue;
         }
@@ -106,7 +166,6 @@ pub(super) fn history_pane<'a>(
         let head = wip_label(session);
         commit_rows = commit_rows.push(
             button(history_row(
-                pill_gutter(&[], tokens, reading),
                 graph_cell_empty(graph_w),
                 wip_description_cell(&head, tokens, reading),
                 "",
@@ -122,7 +181,7 @@ pub(super) fn history_pane<'a>(
         );
     }
 
-    for (node, graph_row) in shown_nodes.iter().zip(rows) {
+    for (node, graph_row) in table {
         let Some(&commit) = commits_by_id.get(node.commit_id.as_str()) else {
             continue;
         };
@@ -136,7 +195,6 @@ pub(super) fn history_pane<'a>(
         );
         let mark = node_mark_for(&pills);
         let label = history_row(
-            pill_gutter(&pills, tokens, reading),
             canvas(GraphCell {
                 row: graph_row,
                 mark,
@@ -144,7 +202,7 @@ pub(super) fn history_pane<'a>(
             .width(Length::Fixed(graph_w))
             .height(Length::Fixed(ROW_HEIGHT))
             .into(),
-            message_cell(&commit.message, tokens, reading),
+            description_cell(&commit.message, &pills, tokens, reading),
             &commit.author,
             &age,
             short_hash(&commit.id),
@@ -174,7 +232,9 @@ pub(super) fn history_pane<'a>(
     } else {
         app.sessions.iter().any(session_dirty)
     };
-    if shown_nodes.is_empty() && !any_wip {
+    if searching {
+        // The summary line already says how many matched.
+    } else if shown_nodes.is_empty() && !any_wip {
         let empty = if session.state.commits.is_empty() {
             "No commits yet"
         } else {
@@ -197,8 +257,8 @@ pub(super) fn history_pane<'a>(
         .into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn history_row<'a>(
-    pills: Element<'a, Message>,
     graph: Element<'a, Message>,
     description: Element<'a, Message>,
     author: &str,
@@ -207,16 +267,13 @@ fn history_row<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    // Pills + graph are tightly coupled; table columns start at Description.
-    let graph_cluster = row![pills, graph]
-        .spacing(PILL_GRAPH_GAP)
-        .align_y(Alignment::Center);
     row![
-        graph_cluster,
+        graph,
         description,
         single_line(author, Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
         single_line(when, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
         single_line(hash, Length::Fixed(HASH_WIDTH), reading, tokens, true),
+        container(text("")).width(Length::Fixed(FOCUS_SLOT)),
     ]
     .spacing(COL_GAP)
     .height(Length::Fixed(ROW_HEIGHT))
@@ -232,20 +289,14 @@ fn column_headers<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let graph_cluster = row![
-        // Blank spacer matching the pill gutter — not a "Branch" column.
-        container(text("")).width(Length::Fixed(PILL_GUTTER)),
-        header_cell("Graph", Length::Fixed(graph_w), tokens, reading),
-    ]
-    .spacing(PILL_GRAPH_GAP)
-    .align_y(Alignment::Center);
     row![
-        graph_cluster,
+        // The graph column has no title: "Description" lines up with the subjects.
+        container(text("")).width(Length::Fixed(graph_w)),
         header_cell("Description", Length::Fill, tokens, reading),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
         header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
-        icon_button(
+        container(icon_button(
             "◎",
             if focus {
                 "Show all branches"
@@ -259,10 +310,12 @@ fn column_headers<'a>(
             focus,
             tokens,
             reading,
-        ),
+        ))
+        .width(Length::Fixed(FOCUS_SLOT))
+        .align_x(Alignment::Center),
     ]
     .spacing(COL_GAP)
-    .padding([4, 0])
+    .padding([2, 0])
     .align_y(Alignment::Center)
     .width(Length::Fill)
     .into()
@@ -294,28 +347,15 @@ fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
         .into()
 }
 
-/// Right-aligned pills in a fixed gutter so the graph column stays put.
-fn pill_gutter<'a>(
+/// Subject first, taking what is left; ref pills after it at their natural width.
+fn description_cell<'a>(
+    message: &str,
     pills: &[RefPill],
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    container(pill_strip(pills, tokens, reading))
-        .width(Length::Fixed(PILL_GUTTER))
-        .height(Length::Fixed(ROW_HEIGHT))
-        .align_x(Alignment::End)
-        .align_y(Alignment::Center)
-        .clip(true)
-        .into()
-}
-
-fn message_cell<'a>(
-    message: &str,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    container(
-        text(message.to_string())
+    let subject = container(
+        text(message.lines().next().unwrap_or_default().to_string())
             .font(reading.font)
             .size(reading.size)
             .wrapping(Wrapping::None)
@@ -324,10 +364,67 @@ fn message_cell<'a>(
             }),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(ROW_HEIGHT))
-    .clip(true)
-    .align_y(Alignment::Center)
+    .clip(true);
+    let mut cell = row![subject]
+        .spacing(SUBJECT_PILL_GAP)
+        .align_y(Alignment::Center);
+    if !pills.is_empty() {
+        cell = cell.push(
+            container(pill_strip(pills, tokens, reading))
+                .max_width(PILL_STRIP_MAX)
+                .clip(true),
+        );
+    }
+    container(cell)
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .clip(true)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// "N of M loaded commits match" under the headers while searching.
+fn search_summary<'a>(
+    matches: usize,
+    loaded: usize,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let capped = if matches >= MAX_SEARCH_ROWS {
+        format!(" (first {MAX_SEARCH_ROWS} shown)")
+    } else {
+        String::new()
+    };
+    container(
+        text(format!("{matches} of {loaded} loaded commits match{capped}"))
+            .font(reading.font)
+            .size(HEADER_SIZE)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_muted),
+            }),
+    )
+    .padding([2, 0])
     .into()
+}
+
+/// Branch and tag names that tip at `commit_id`, for the history search.
+fn ref_names_at<'s>(commit_id: &str, session: &'s WorktreeSession) -> Vec<&'s str> {
+    session
+        .state
+        .branches
+        .iter()
+        .filter(|branch| branch.tip == commit_id)
+        .map(|branch| branch.name.as_str())
+        .chain(
+            session
+                .state
+                .tags
+                .iter()
+                .filter(|tag| tag.commit_id == commit_id)
+                .map(|tag| tag.name.as_str()),
+        )
+        .collect()
 }
 
 fn pill_strip<'a>(
@@ -364,17 +461,18 @@ fn wip_description_cell<'a>(
         ahead: 0,
         behind: 0,
     };
-    let stack = column![
-        ref_pill(&pill, tokens, reading),
+    let stack = row![
         text("Working changes")
             .font(reading.font)
-            .size((reading.size - 1.0).max(11.0))
+            .size(reading.size)
             .wrapping(Wrapping::None)
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
+        ref_pill(&pill, tokens, reading),
     ]
-    .spacing(2);
+    .spacing(SUBJECT_PILL_GAP)
+    .align_y(Alignment::Center);
     container(stack)
         .width(Length::Fill)
         .height(Length::Fixed(ROW_HEIGHT))
@@ -427,6 +525,9 @@ fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Eleme
         );
     }
     container(body)
+        .height(Length::Fixed(PILL_HEIGHT))
+        .clip(true)
+        .align_y(Alignment::Center)
         .padding([PILL_PAD_Y, PILL_PAD_X])
         .style(move |_theme: &Theme| container::Style {
             background: Some(Background::Color(bg)),

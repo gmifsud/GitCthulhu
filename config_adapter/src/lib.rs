@@ -24,6 +24,9 @@ struct AppSettingsDto {
     /// Absent in settings written before worktree tabs existed.
     #[serde(default)]
     pub worktree_tab_retention: WorktreeTabRetention,
+    /// Absent in settings written before the recent list existed.
+    #[serde(default)]
+    pub recent_repositories: Vec<String>,
 }
 
 fn default_ui_font() -> String {
@@ -49,6 +52,7 @@ impl Default for AppSettingsDto {
             agent_token: String::new(),
             agent_model: default_agent_model(),
             worktree_tab_retention: WorktreeTabRetention::default(),
+            recent_repositories: Vec::new(),
         }
     }
 }
@@ -64,6 +68,7 @@ impl From<AppSettingsDto> for AppSettings {
             agent_token: dto.agent_token,
             agent_model: dto.agent_model,
             worktree_tab_retention: dto.worktree_tab_retention,
+            recent_repositories: dto.recent_repositories,
         }
     }
 }
@@ -79,6 +84,7 @@ impl From<&AppSettings> for AppSettingsDto {
             agent_token: domain.agent_token.clone(),
             agent_model: domain.agent_model.clone(),
             worktree_tab_retention: domain.worktree_tab_retention,
+            recent_repositories: domain.recent_repositories.clone(),
         }
     }
 }
