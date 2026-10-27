@@ -77,4 +77,5 @@ Review weekly — prune anything stale.
 - ADR 0001: window does not name the git adapter.
 - ADR 0002: app state stays a reducer.
 - ADR 0003: sessions-first GitLens path — worktree tabs own `AppState`; compare + split diff after WP1. Spec: `docs/superpowers/specs/2026-10-25-worktree-tabs-design.md`.
+- ADR 0004–0006 (proposed): conflict resolver — .NET + Avalonia/AvaloniaEdit behind `IEditorSurface`; git CLI authoritative; immutable merge plan + anchored result. Spec: `docs/superpowers/specs/2026-10-27-conflict-resolver-design.md`.
 
