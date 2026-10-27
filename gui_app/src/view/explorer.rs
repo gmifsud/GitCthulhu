@@ -11,8 +11,10 @@ use core_domain::{Branch, Stash, Tag, Worktree};
 use iced::widget::button::Status;
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
-use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Shadow};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
+use iced::{
+    mouse, Alignment, Background, Border, Color, Element, Length, Padding, Shadow,
+};
 
 use super::chrome::{
     glyph, hairline, icon_button, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED, FOLD_OPEN,
@@ -31,7 +33,8 @@ pub(super) fn explorer_pane<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let session = app.session();
-    let collapsed = &session.explorer_collapsed;
+    let collapsed = session.explorer_collapsed;
+    let weights = session.explorer_weights;
 
     let branches = &session.state.branches;
     let stashes = &session.state.stashes;
@@ -47,6 +50,7 @@ pub(super) fn explorer_pane<'a>(
             locals.len(),
             ExplorerSection::Local,
             collapsed.local,
+            weights.get(ExplorerSection::Local),
             (!collapsed.local).then(|| local_rows(&locals, tokens, reading)),
             None,
             tokens,
@@ -58,6 +62,7 @@ pub(super) fn explorer_pane<'a>(
             remotes.len(),
             ExplorerSection::Remote,
             collapsed.remote,
+            weights.get(ExplorerSection::Remote),
             (!collapsed.remote).then(|| remote_rows(&remotes, tokens, reading)),
             None,
             tokens,
@@ -69,6 +74,7 @@ pub(super) fn explorer_pane<'a>(
             worktrees.len(),
             ExplorerSection::Worktrees,
             collapsed.worktrees,
+            weights.get(ExplorerSection::Worktrees),
             (!collapsed.worktrees).then(|| worktrees_rows(app, worktrees, tokens, reading)),
             Some(icon_button(
                 "+",
@@ -90,6 +96,7 @@ pub(super) fn explorer_pane<'a>(
             stashes.len(),
             ExplorerSection::Stashes,
             collapsed.stashes,
+            weights.get(ExplorerSection::Stashes),
             (!collapsed.stashes).then(|| stash_rows(stashes, tokens, reading)),
             None,
             tokens,
@@ -101,6 +108,7 @@ pub(super) fn explorer_pane<'a>(
             tags.len(),
             ExplorerSection::Tags,
             collapsed.tags,
+            weights.get(ExplorerSection::Tags),
             (!collapsed.tags).then(|| tag_rows(tags, tokens, reading)),
             None,
             tokens,
@@ -112,12 +120,13 @@ pub(super) fn explorer_pane<'a>(
     .into()
 }
 
-/// One collapsible accordion block: header + optional body (body omitted when collapsed).
+/// One collapsible accordion block: header + optional weighted body + resize grip.
 fn section_block<'a>(
     title: &'static str,
     count: usize,
     section: ExplorerSection,
     collapsed: bool,
+    weight: u16,
     body: Option<Element<'a, Message>>,
     trailing: Option<Element<'a, Message>>,
     tokens: DesignTokens,
@@ -169,9 +178,34 @@ fn section_block<'a>(
     let mut block = column![header].width(Length::Fill);
     if let Some(body) = body {
         debug_assert!(!collapsed);
-        block = block.push(body);
+        let pane = container(scrollable(body).direction(Direction::Vertical(
+            Scrollbar::new().width(6).scroller_width(6).spacing(4),
+        )))
+        .width(Length::Fill)
+        .height(Length::FillPortion(weight.max(1)));
+        block = block
+            .push(pane)
+            .push(resize_grip(section, tokens))
+            .height(Length::FillPortion(weight.max(1)));
     }
     block.into()
+}
+
+/// Thin drag handle under an open section — drag vertically to grow/shrink it.
+fn resize_grip<'a>(section: ExplorerSection, tokens: DesignTokens) -> Element<'a, Message> {
+    mouse_area(
+        container(Space::new(Length::Fill, Length::Fixed(5.0))).style(
+            move |_theme: &iced::Theme| container::Style {
+                background: Some(Background::Color(tokens.border)),
+                text_color: None,
+                border: Border::default(),
+                shadow: Shadow::default(),
+            },
+        ),
+    )
+    .interaction(mouse::Interaction::ResizingVertically)
+    .on_press(Message::ExplorerResizeStart(section))
+    .into()
 }
 
 // ── LOCAL ────────────────────────────────────────────────────────────────────
@@ -250,11 +284,8 @@ fn worktrees_rows<'a>(
     for entry in worktrees {
         rows = rows.push(worktree_row(app, entry, tokens, reading));
     }
-    // Embedded scrollbar so it takes layout space and does not cover buttons.
-    let list = scrollable(rows).direction(Direction::Vertical(
-        Scrollbar::new().width(8).scroller_width(8).spacing(6),
-    ));
-    container(list).max_height(160.0).width(Length::Fill).into()
+    // Height comes from the section's FillPortion + parent scrollable.
+    rows.width(Length::Fill).into()
 }
 
 fn worktree_row<'a>(

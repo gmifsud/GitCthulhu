@@ -255,22 +255,25 @@ fn diff_line<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    // Match dense Git clients: bright body ink on solid washes, never muted-on-tint.
     let (mark, text_color, mark_color, tint) = match line.kind {
         DiffLineKind::Added => ("+", tokens.added, tokens.added, tokens.added_bg),
         DiffLineKind::Removed => ("-", tokens.removed, tokens.removed, tokens.removed_bg),
         DiffLineKind::Context => (
             " ",
-            tokens.text_secondary,
+            tokens.text_primary,
             tokens.text_muted,
             Color::TRANSPARENT,
         ),
     };
     let gutter = tokens.text_muted;
+    let body_size = (reading.size + 1.0).max(12.0);
+    let gutter_size = reading.size.max(11.0);
     container(
         row![
             text(format_line_no(old_no))
                 .font(reading.mono)
-                .size((reading.size - 2.0).max(11.0))
+                .size(gutter_size)
                 .width(Length::Fixed(LINE_NO_WIDTH))
                 .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
@@ -278,7 +281,7 @@ fn diff_line<'a>(
                 }),
             text(format_line_no(new_no))
                 .font(reading.mono)
-                .size((reading.size - 2.0).max(11.0))
+                .size(gutter_size)
                 .width(Length::Fixed(LINE_NO_WIDTH))
                 .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
@@ -286,7 +289,7 @@ fn diff_line<'a>(
                 }),
             text(mark)
                 .font(reading.mono)
-                .size(reading.size)
+                .size(body_size)
                 .width(Length::Fixed(MARK_WIDTH))
                 .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
@@ -294,16 +297,16 @@ fn diff_line<'a>(
                 }),
             text(line.text.clone())
                 .font(reading.mono)
-                .size(reading.size)
+                .size(body_size)
                 .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
                     color: Some(text_color),
                 }),
         ]
-        .spacing(2)
+        .spacing(4)
         .align_y(Alignment::Center),
     )
-    .padding([1, 4])
+    .padding([2, 6])
     .width(Length::Fill)
     .style(move |_theme: &Theme| container::Style {
         background: Some(Background::Color(tint)),

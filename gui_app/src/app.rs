@@ -8,12 +8,14 @@ use iced::widget::{pane_grid, text_editor};
 use iced::Task;
 
 use crate::appearance::{font_family, font_size};
-use crate::changes::{marked_paths, MarkedFile};
+use crate::changes::{marked_paths, matching_change_paths, MarkedFile};
+use crate::context_menu::gitignore_pattern;
 use crate::jobs::{
-    add_worktree_in_background, branch_in_background, checkout_in_background,
-    choose_repository_folder, clone_in_background, discard_hunk_in_background,
-    discard_in_background, edit_in_background, error_message, fetch_in_background,
-    history_in_background, init_in_background, list_models_in_background, load_patch_in_background,
+    add_worktree_in_background, append_gitignore_in_background, branch_in_background,
+    checkout_in_background, choose_repository_folder, clone_in_background,
+    discard_hunk_in_background, discard_paths_in_background,
+    edit_in_background, error_message, fetch_in_background, history_in_background,
+    init_in_background, list_models_in_background, load_patch_in_background,
     load_repository_in_background, open_repository_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
     stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
@@ -74,6 +76,8 @@ pub(crate) struct GitApp {
     pub(crate) tip_ready_key: Option<String>,
     /// Last pointer position in window coordinates (for tips and context menus).
     pub(crate) cursor: (f32, f32),
+    /// Dragging an Explorer section height grip: section, start y, start weight.
+    explorer_resize: Option<(crate::session::ExplorerSection, f32, u16)>,
     /// Authoritative, global settings. Fanned into each session's `AppState`.
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
@@ -102,7 +106,8 @@ pub(crate) struct GitApp {
     pub(crate) error_expanded: bool,
     pub(crate) tokens: DesignTokens,
     pub(crate) settings_open: bool,
-    pub(crate) confirm_discard: Option<(String, FileDisposition)>,
+    /// Paths to discard after the confirm dialog (one file, or every match under a folder).
+    pub(crate) confirm_discard: Option<(Vec<String>, FileDisposition)>,
     pub(crate) confirm_drop: Option<Stash>,
     pub(crate) branch_prompt: Option<BranchPrompt>,
     pub(crate) history_prompt: Option<HistoryPrompt>,
@@ -140,6 +145,10 @@ pub(crate) enum Message {
     ToggleFilesRail,
     /// Collapse or expand one Explorer accordion section for the active session.
     ToggleExplorerSection(crate::session::ExplorerSection),
+    /// Begin dragging the height grip under an open Explorer section.
+    ExplorerResizeStart(crate::session::ExplorerSection),
+    /// End an Explorer height-grip drag.
+    ExplorerResizeEnd,
     ToggleBranchList,
     ChooseBranch(String),
     ShowWorkingTree,
@@ -215,6 +224,8 @@ pub(crate) enum Message {
     CancelDiscard,
     ConfirmDiscard,
     DiscardFinished(String, Result<(), DomainError>),
+    /// Finished appending patterns to `.gitignore`.
+    IgnoreFinished(String, Result<(), DomainError>),
     StageHunk {
         path: String,
         index: usize,
@@ -422,6 +433,7 @@ impl GitApp {
             tip_hover: None,
             tip_ready_key: None,
             cursor: (0.0, 0.0),
+            explorer_resize: None,
             settings,
             opening: false,
             panes,
@@ -1045,6 +1057,16 @@ impl GitApp {
                 self.session_mut().toggle_explorer(section);
                 Task::none()
             }
+            Message::ExplorerResizeStart(section) => {
+                let start_y = self.cursor.1;
+                let start_w = self.session().explorer_weights.get(section);
+                self.explorer_resize = Some((section, start_y, start_w));
+                Task::none()
+            }
+            Message::ExplorerResizeEnd => {
+                self.explorer_resize = None;
+                Task::none()
+            }
             Message::ToggleBranchList => {
                 // Legacy dropdown was removed with the left Changes rail; the chip
                 // now reveals LOCAL branches in the Explorer accordion.
@@ -1375,7 +1397,7 @@ impl GitApp {
                     return Task::none();
                 };
                 if let Selection::File { path, place } = session.shown_selection() {
-                    self.confirm_discard = Some((path, place));
+                    self.confirm_discard = Some((vec![path], place));
                 }
                 Task::none()
             }
@@ -1384,13 +1406,13 @@ impl GitApp {
                 Task::none()
             }
             Message::ConfirmDiscard => {
-                let Some((path, place)) = self.confirm_discard.clone() else {
+                let Some((paths, place)) = self.confirm_discard.clone() else {
                     return Task::none();
                 };
                 let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if session.state.loading {
+                if session.state.loading || paths.is_empty() {
                     return Task::none();
                 }
                 let repo = session.adapter.clone();
@@ -1399,11 +1421,12 @@ impl GitApp {
                 self.session_mut().state.loading = true;
                 self.error = None;
                 Task::perform(
-                    discard_in_background(repo, path, place),
+                    discard_paths_in_background(repo, paths, place),
                     move |result| Message::DiscardFinished(session_path.clone(), result),
                 )
             }
             Message::DiscardFinished(path, result) => self.finish_reload(&path, result),
+            Message::IgnoreFinished(path, result) => self.finish_reload(&path, result),
             Message::StageHunk { path, index } => self.edit_hunk(path, index, true),
             Message::DiscardHunk { path, index } => self.edit_hunk(path, index, false),
             Message::HunkFinished(path, result) => self.finish_reload(&path, result),
@@ -1657,6 +1680,12 @@ impl GitApp {
             }
             Message::CursorMoved { x, y } => {
                 self.cursor = (x, y);
+                if let Some((section, start_y, start_w)) = self.explorer_resize {
+                    // ~36px of drag ≈ one FillPortion step.
+                    let delta = ((y - start_y) / 36.0).round() as i32;
+                    let next = (i32::from(start_w) + delta).clamp(1, 12) as u16;
+                    self.session_mut().explorer_weights.set(section, next);
+                }
                 Task::none()
             }
             Message::ContextMenuAction(kind) => {
@@ -1673,6 +1702,28 @@ impl GitApp {
                     }),
                     crate::context_menu::ContextActionKind::DetachHead { commit_id } => {
                         self.update(Message::AskDetachHead { commit_id })
+                    }
+                    crate::context_menu::ContextActionKind::StageChange { path, unstage } => {
+                        if unstage {
+                            self.update(Message::EditWorktree(WorktreeEdit::Unstage(vec![path])))
+                        } else {
+                            self.update(Message::EditWorktree(WorktreeEdit::Stage(vec![path])))
+                        }
+                    }
+                    crate::context_menu::ContextActionKind::DiscardChange {
+                        path,
+                        place,
+                        is_dir,
+                    } => self.ask_discard_change(path, place, is_dir),
+                    crate::context_menu::ContextActionKind::IgnoreChange { path, is_dir } => {
+                        self.run_ignore_change(path, is_dir)
+                    }
+                    crate::context_menu::ContextActionKind::StashChange { path } => {
+                        self.run_stash(StashAction::PushPaths(vec![path]))
+                    }
+                    crate::context_menu::ContextActionKind::OpenInOs { path, is_dir } => {
+                        self.open_change_in_os(&path, is_dir);
+                        Task::none()
                     }
                 }
             }
@@ -2415,6 +2466,79 @@ impl GitApp {
         })
     }
 
+    fn ask_discard_change(
+        &mut self,
+        path: String,
+        place: FileDisposition,
+        is_dir: bool,
+    ) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        let Some(status) = session.state.current_status.as_ref() else {
+            return Task::none();
+        };
+        let paths = matching_change_paths(status, place, &path, is_dir);
+        if paths.is_empty() {
+            return Task::none();
+        }
+        self.confirm_drop = None;
+        self.confirm_discard = Some((paths, place));
+        Task::none()
+    }
+
+    fn run_ignore_change(&mut self, path: String, is_dir: bool) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        let pattern = gitignore_pattern(&path, is_dir);
+        let repo = session.adapter.clone();
+        let session_path = session.path.clone();
+        self.session_mut().state.loading = true;
+        self.error = None;
+        Task::perform(
+            append_gitignore_in_background(repo, vec![pattern]),
+            move |result| Message::IgnoreFinished(session_path.clone(), result),
+        )
+    }
+
+    fn open_change_in_os(&self, rel_path: &str, is_dir: bool) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let root = std::path::Path::new(&session.path);
+        let target = root.join(rel_path.trim_end_matches(['/', '\\']));
+        let open_path = if is_dir {
+            target
+        } else {
+            target
+                .parent()
+                .unwrap_or(root)
+                .to_path_buf()
+        };
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("explorer")
+                .arg(open_path.as_os_str())
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg(open_path.as_os_str())
+                .spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(open_path.as_os_str())
+                .spawn();
+        }
+    }
+
     fn run_stash(&mut self, action: StashAction) -> Task<Message> {
         let Some(session) = self.active_session() else {
             return Task::none();
@@ -2477,6 +2601,9 @@ impl GitApp {
                     y: position.y,
                 })
             }
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )) => Some(Message::ExplorerResizeEnd),
             _ => None,
         });
         let waiting_tip = self.tip_hover.is_some()

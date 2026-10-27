@@ -1,8 +1,5 @@
 use iced::Color;
 
-/// Tint behind an added or removed diff line. The wireframe uses 22%.
-const DIFF_TINT: f32 = 0.22;
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DesignTokens {
     pub bg_app: Color,
@@ -18,7 +15,9 @@ pub(crate) struct DesignTokens {
     pub chip_border: Color,
     pub added: Color,
     pub removed: Color,
+    /// Solid dark wash behind added lines (opaque — not a translucent overlay).
     pub added_bg: Color,
+    /// Solid dark wash behind removed lines.
     pub removed_bg: Color,
 }
 
@@ -39,10 +38,11 @@ impl DesignTokens {
             accent_primary: hex_color(0xF27D26),
             chip: hex_color(0x232429),
             chip_border: hex_color(0x3A3B40),
-            added: hex_color(0x7DCEA0),
-            removed: hex_color(0xE07A7A),
-            added_bg: hex_color_alpha(0x7DCEA0, DIFF_TINT),
-            removed_bg: hex_color_alpha(0xE07A7A, DIFF_TINT),
+            // Diff ink: bright enough to read on the solid washes below.
+            added: hex_color(0x7EE787),
+            removed: hex_color(0xFFA198),
+            added_bg: hex_color(0x163227),
+            removed_bg: hex_color(0x3B1719),
         }
     }
 }
@@ -53,11 +53,4 @@ pub(crate) fn hex_color(hex: u32) -> Color {
         ((hex >> 8) & 0xFF) as f32 / 255.0,
         (hex & 0xFF) as f32 / 255.0,
     )
-}
-
-fn hex_color_alpha(hex: u32, alpha: f32) -> Color {
-    Color {
-        a: alpha,
-        ..hex_color(hex)
-    }
 }

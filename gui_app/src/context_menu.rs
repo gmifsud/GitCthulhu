@@ -1,6 +1,6 @@
-//! Right-click actions for graph commits and local branches.
+//! Right-click actions for graph commits, local branches, and WIP change rows.
 
-use core_domain::Worktree;
+use core_domain::{FileDisposition, Worktree};
 
 use crate::selection::short_hash;
 use crate::session::same_path;
@@ -10,12 +10,18 @@ use crate::session::same_path;
 pub(crate) enum ContextTarget {
     Commit { id: String },
     LocalBranch { name: String, tip: String },
+    /// A file or folder row in the working-tree changes list.
+    ChangePath {
+        path: String,
+        place: FileDisposition,
+        is_dir: bool,
+    },
 }
 
 /// One row in the context menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContextAction {
-    pub label: &'static str,
+    pub label: String,
     pub enabled: bool,
     pub kind: ContextActionKind,
 }
@@ -28,6 +34,26 @@ pub(crate) enum ContextActionKind {
         start_point: Option<String>,
     },
     DetachHead { commit_id: String },
+    /// Stage (or unstage when `unstage`) this path — a file or directory prefix.
+    StageChange {
+        path: String,
+        unstage: bool,
+    },
+    /// Discard every matching change under `path` (file or folder prefix).
+    DiscardChange {
+        path: String,
+        place: FileDisposition,
+        is_dir: bool,
+    },
+    /// Append a `.gitignore` pattern for this path.
+    IgnoreChange {
+        path: String,
+        is_dir: bool,
+    },
+    /// `git stash push -- <path>` (file or folder).
+    StashChange { path: String },
+    /// Reveal the path (or its parent for a file) in the OS file manager.
+    OpenInOs { path: String, is_dir: bool },
 }
 
 /// Open-menu state: target plus approximate pointer position for the overlay.
@@ -41,6 +67,16 @@ pub(crate) struct ContextMenuState {
 /// Whether `branch` is already checked out in some catalogue worktree.
 pub(crate) fn branch_checked_out_elsewhere(catalogue: &[Worktree], branch: &str) -> bool {
     catalogue.iter().any(|row| row.branch == branch)
+}
+
+/// `.gitignore` pattern for a change path (folders keep a trailing slash).
+pub(crate) fn gitignore_pattern(path: &str, is_dir: bool) -> String {
+    let trimmed = path.trim().trim_end_matches('/');
+    if is_dir {
+        format!("{trimmed}/")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Build menu rows for `target`. Pure; unit-tested.
@@ -57,7 +93,7 @@ pub(crate) fn context_actions(
             let detach_enabled = !loading && active_head != Some(id.as_str());
             vec![
                 ContextAction {
-                    label: "Open as worktree…",
+                    label: "Open as worktree…".into(),
                     enabled: open_enabled,
                     kind: ContextActionKind::OpenAsWorktree {
                         branch: format!("wip/{short}"),
@@ -66,7 +102,7 @@ pub(crate) fn context_actions(
                     },
                 },
                 ContextAction {
-                    label: "Detach HEAD here",
+                    label: "Detach HEAD here".into(),
                     enabled: detach_enabled,
                     kind: ContextActionKind::DetachHead {
                         commit_id: id.clone(),
@@ -79,7 +115,7 @@ pub(crate) fn context_actions(
             let detach_enabled = !loading && active_head != Some(tip.as_str());
             vec![
                 ContextAction {
-                    label: "Open as worktree…",
+                    label: "Open as worktree…".into(),
                     enabled: open_enabled,
                     kind: ContextActionKind::OpenAsWorktree {
                         branch: name.clone(),
@@ -88,7 +124,7 @@ pub(crate) fn context_actions(
                     },
                 },
                 ContextAction {
-                    label: "Detach at tip",
+                    label: "Detach at tip".into(),
                     enabled: detach_enabled,
                     kind: ContextActionKind::DetachHead {
                         commit_id: tip.clone(),
@@ -96,7 +132,95 @@ pub(crate) fn context_actions(
                 },
             ]
         }
+        ContextTarget::ChangePath {
+            path,
+            place,
+            is_dir,
+        } => change_path_actions(path, *place, *is_dir, loading),
     }
+}
+
+fn change_path_actions(
+    path: &str,
+    place: FileDisposition,
+    is_dir: bool,
+    loading: bool,
+) -> Vec<ContextAction> {
+    let idle = !loading;
+    let display = path.trim_end_matches('/');
+    let (stage_label, unstage) = match place {
+        FileDisposition::Staged => {
+            if is_dir {
+                ("Unstage folder", true)
+            } else {
+                ("Unstage file", true)
+            }
+        }
+        FileDisposition::Unstaged | FileDisposition::Untracked => {
+            if is_dir {
+                ("Stage folder", false)
+            } else {
+                ("Stage file", false)
+            }
+        }
+    };
+    let discard_label = if is_dir {
+        "Discard all changes in folder"
+    } else {
+        "Discard changes"
+    };
+    let ignore_label = if is_dir {
+        format!("Ignore all files in '{display}/'")
+    } else {
+        format!("Ignore '{display}'")
+    };
+    let stash_label = if is_dir { "Stash folder" } else { "Stash file" };
+    let open_label = if is_dir { "Open folder" } else { "Open containing folder" };
+
+    vec![
+        ContextAction {
+            label: stage_label.into(),
+            enabled: idle,
+            kind: ContextActionKind::StageChange {
+                path: path.to_string(),
+                unstage,
+            },
+        },
+        ContextAction {
+            label: discard_label.into(),
+            enabled: idle,
+            kind: ContextActionKind::DiscardChange {
+                path: path.to_string(),
+                place,
+                is_dir,
+            },
+        },
+        ContextAction {
+            label: ignore_label,
+            enabled: idle,
+            kind: ContextActionKind::IgnoreChange {
+                path: path.to_string(),
+                is_dir,
+            },
+        },
+        ContextAction {
+            label: stash_label.into(),
+            // Stash pathspecs need tracked changes; untracked-only folders still get the row
+            // but git may refuse — keep enabled when idle and let git report.
+            enabled: idle && place != FileDisposition::Untracked,
+            kind: ContextActionKind::StashChange {
+                path: path.to_string(),
+            },
+        },
+        ContextAction {
+            label: open_label.into(),
+            enabled: true,
+            kind: ContextActionKind::OpenInOs {
+                path: path.to_string(),
+                is_dir,
+            },
+        },
+    ]
 }
 
 /// True when the catalogue row is the session's own path (same folder).
@@ -165,5 +289,43 @@ mod tests {
         };
         let actions = context_actions(&target, &[], Some("other"), true);
         assert!(actions.iter().all(|a| !a.enabled));
+    }
+
+    #[test]
+    fn folder_menu_offers_stage_discard_ignore_stash_open() {
+        let target = ContextTarget::ChangePath {
+            path: "scripts".into(),
+            place: FileDisposition::Unstaged,
+            is_dir: true,
+        };
+        let actions = context_actions(&target, &[], None, false);
+        assert_eq!(actions.len(), 5);
+        assert_eq!(actions[0].label, "Stage folder");
+        assert!(actions[2].label.contains("scripts/"));
+        assert!(matches!(
+            &actions[2].kind,
+            ContextActionKind::IgnoreChange { is_dir: true, .. }
+        ));
+    }
+
+    #[test]
+    fn staged_file_offers_unstage() {
+        let target = ContextTarget::ChangePath {
+            path: "a.rs".into(),
+            place: FileDisposition::Staged,
+            is_dir: false,
+        };
+        let actions = context_actions(&target, &[], None, false);
+        assert_eq!(actions[0].label, "Unstage file");
+        assert!(matches!(
+            &actions[0].kind,
+            ContextActionKind::StageChange { unstage: true, .. }
+        ));
+    }
+
+    #[test]
+    fn gitignore_pattern_adds_slash_for_dirs() {
+        assert_eq!(gitignore_pattern("scripts", true), "scripts/");
+        assert_eq!(gitignore_pattern("a.rs", false), "a.rs");
     }
 }
