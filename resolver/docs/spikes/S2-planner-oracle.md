@@ -37,7 +37,7 @@ All runs use fixed seeds and are reproducible with `dotnet test --filter OracleT
    - EAGER identical-change rule
    - git adds a newline before a marker when a section ends without one
 2. **Alignment is where tools differ.** On repetitive text many minimal edit scripts exist. xdiff picks one by its own tie-breaking and slides change groups (`xdl_change_compact`), and our diffs pick another. Both are valid, but users see git's choice in their IDE and terminal markers.
-3. **`git merge` and `git merge-file` disagree.** `merge-file` defaults to Myers. ort's content merge matched Histogram in every conflicted case on git 2.43, so the spec's assumption of "Myers as git's default" is wrong for merges. The release that switched ort to histogram is **[unverified]**.
+3. **`git merge` and `git merge-file` disagree.** (CI confirms histogram parity on git 2.56 for Windows and on the macOS runner's git.) `merge-file` defaults to Myers. ort's content merge matched Histogram in every conflicted case on git 2.43, so the spec's assumption of "Myers as git's default" is wrong for merges. The release that switched ort to histogram is **[unverified]**.
 
 ## Decisions (spec and ADR 0005 amended)
 
