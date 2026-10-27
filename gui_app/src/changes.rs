@@ -127,6 +127,38 @@ pub(crate) fn marked_paths(marks: &[MarkedFile], stage: bool) -> Vec<String> {
         .collect()
 }
 
+/// Files under `path` in `status` for `place`. A file target returns itself when listed.
+pub(crate) fn matching_change_paths(
+    status: &RepoStatus,
+    place: FileDisposition,
+    path: &str,
+    is_dir: bool,
+) -> Vec<String> {
+    let files = match place {
+        FileDisposition::Staged => &status.staged_files,
+        FileDisposition::Unstaged => &status.unstaged_files,
+        FileDisposition::Untracked => &status.untracked_files,
+    };
+    if !is_dir {
+        return files
+            .iter()
+            .find(|file| file.as_str() == path)
+            .cloned()
+            .into_iter()
+            .collect();
+    }
+    let prefix = path.trim_end_matches(['/', '\\']);
+    let with_slash = format!("{prefix}/");
+    files
+        .iter()
+        .filter(|file| {
+            let normalized = file.replace('\\', "/");
+            normalized == prefix || normalized.starts_with(&with_slash)
+        })
+        .cloned()
+        .collect()
+}
+
 #[derive(Default)]
 struct Node {
     dirs: BTreeMap<String, Node>,
@@ -339,6 +371,23 @@ mod tests {
                     place: FileDisposition::Untracked,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn matching_change_paths_expands_a_folder_prefix() {
+        let status = repo_status(
+            &[],
+            &["scripts/a.sh", "scripts/b.sh", "other.rs"],
+            &[],
+        );
+        assert_eq!(
+            matching_change_paths(&status, FileDisposition::Unstaged, "scripts", true),
+            vec!["scripts/a.sh".to_string(), "scripts/b.sh".to_string()]
+        );
+        assert_eq!(
+            matching_change_paths(&status, FileDisposition::Unstaged, "other.rs", false),
+            vec!["other.rs".to_string()]
         );
     }
 }

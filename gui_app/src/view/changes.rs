@@ -7,7 +7,7 @@ use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
 use super::chrome::{field_style, fold_mark, glyph, icon_button, Reading};
@@ -326,29 +326,37 @@ fn change_line<'a>(
             } else {
                 name.clone()
             };
-            row![
-                indent,
-                button(
-                    row![
-                        glyph(fold_mark(folded), row_size, tokens.text_muted, &reading),
-                        text(label)
-                            .font(reading.font)
-                            .size(row_size)
-                            .line_height(1.0)
-                            .style(move |_| text::Style {
-                                color: Some(tokens.text_secondary),
-                            }),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                )
-                .padding([1, 4])
-                .on_press(Message::ToggleChangeDir {
-                    prefix: prefix.clone(),
-                    place,
-                })
-                .style(move |_theme, status| fold_button_style(tokens, status)),
-            ]
+            let target = crate::context_menu::ContextTarget::ChangePath {
+                path: prefix.clone(),
+                place,
+                is_dir: true,
+            };
+            mouse_area(
+                row![
+                    indent,
+                    button(
+                        row![
+                            glyph(fold_mark(folded), row_size, tokens.text_muted, &reading),
+                            text(label)
+                                .font(reading.font)
+                                .size(row_size)
+                                .line_height(1.0)
+                                .style(move |_| text::Style {
+                                    color: Some(tokens.text_secondary),
+                                }),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([1, 4])
+                    .on_press(Message::ToggleChangeDir {
+                        prefix: prefix.clone(),
+                        place,
+                    })
+                    .style(move |_theme, status| fold_button_style(tokens, status)),
+                ],
+            )
+            .on_right_press(Message::OpenContextMenu { target })
             .into()
         }
         ChangeRow::File {
@@ -368,29 +376,37 @@ fn change_line<'a>(
                 path: path.clone(),
                 place: *place,
             };
-            row![
-                indent,
-                compact_mark(
-                    if marked { "–" } else { "+" },
-                    mark,
-                    marked,
-                    tokens,
-                    row_size
-                ),
-                compact_name(
-                    name.clone(),
-                    Message::FocusFile {
-                        path: path.clone(),
-                        place: *place,
-                    },
-                    focused || marked,
-                    *place == FileDisposition::Staged,
-                    tokens,
-                    reading,
-                    row_size,
-                ),
-            ]
-            .spacing(2)
+            let target = crate::context_menu::ContextTarget::ChangePath {
+                path: path.clone(),
+                place: *place,
+                is_dir: false,
+            };
+            mouse_area(
+                row![
+                    indent,
+                    compact_mark(
+                        if marked { "–" } else { "+" },
+                        mark,
+                        marked,
+                        tokens,
+                        row_size
+                    ),
+                    compact_name(
+                        name.clone(),
+                        Message::FocusFile {
+                            path: path.clone(),
+                            place: *place,
+                        },
+                        focused || marked,
+                        *place == FileDisposition::Staged,
+                        tokens,
+                        reading,
+                        row_size,
+                    ),
+                ]
+                .spacing(2),
+            )
+            .on_right_press(Message::OpenContextMenu { target })
             .into()
         }
     }

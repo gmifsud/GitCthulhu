@@ -7,13 +7,21 @@ use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 use super::chrome::{accent_button, command_button, Reading};
 
 pub(super) fn confirm_discard<'a>(
-    path: &str,
+    paths: &[String],
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    let (title, detail) = match paths {
+        [] => ("Discard changes?", "No matching files.".to_string()),
+        [path] => ("Discard this file?", path.clone()),
+        _ => (
+            "Discard these changes?",
+            format!("{} files", paths.len()),
+        ),
+    };
     dialog(
-        "Discard this file?",
-        path,
+        title,
+        &detail,
         "A tracked file is restored to HEAD. An untracked file is deleted.",
         true,
         "Discard",

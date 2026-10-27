@@ -1,4 +1,4 @@
-//! Floating context menu for commits and local branches.
+//! Floating context menu for commits, local branches, and WIP change rows.
 
 use crate::app::{GitApp, Message};
 use crate::context_menu::context_actions;
@@ -36,7 +36,7 @@ pub(super) fn context_menu_overlay<'a>(
         let enabled = action.enabled;
         list = list.push(
             button(
-                text(action.label)
+                text(action.label.clone())
                     .font(reading.font)
                     .size(reading.size)
                     .style(move |_| text::Style {
@@ -91,7 +91,7 @@ pub(super) fn context_menu_overlay<'a>(
     );
 
     let panel = container(list)
-        .width(Length::Fixed(220.0))
+        .width(Length::Fixed(280.0))
         .style(move |_theme: &Theme| container::Style {
             background: Some(Background::Color(tokens.bg_chrome)),
             text_color: Some(tokens.text_primary),

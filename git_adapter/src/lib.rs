@@ -519,6 +519,10 @@ impl GitRepository for GitoxideAdapter {
     }
 
     fn stash_push(&self, message: &str) -> Result<(), DomainError> {
+        self.stash_push_paths(message, &[])
+    }
+
+    fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), DomainError> {
         self.open_repo()?;
         if message.contains('\0') {
             return Err(DomainError::Unknown(
@@ -526,11 +530,45 @@ impl GitRepository for GitoxideAdapter {
             ));
         }
         let message = message.trim();
-        if message.is_empty() {
-            run_git(&self.repo_path, &["stash", "push"])
-        } else {
-            run_git(&self.repo_path, &["stash", "push", "-m", message])
+        let mut args: Vec<&str> = vec!["stash", "push"];
+        if !message.is_empty() {
+            args.push("-m");
+            args.push(message);
         }
+        if paths.is_empty() {
+            run_git(&self.repo_path, &args)
+        } else {
+            run_git_paths(&self.repo_path, &args, paths)
+        }
+    }
+
+    fn append_gitignore(&self, patterns: &[String]) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if patterns.is_empty() {
+            return Err(DomainError::Unknown(
+                "gitignore patterns must not be empty".to_string(),
+            ));
+        }
+        for pattern in patterns {
+            require_gitignore_pattern(pattern)?;
+        }
+        let path = std::path::Path::new(&self.repo_path).join(".gitignore");
+        let mut body = if path.exists() {
+            std::fs::read_to_string(&path).map_err(unknown)?
+        } else {
+            String::new()
+        };
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        for pattern in patterns {
+            if body.lines().any(|line| line.trim() == pattern.trim()) {
+                continue;
+            }
+            body.push_str(pattern.trim());
+            body.push('\n');
+        }
+        std::fs::write(&path, body).map_err(unknown)
     }
 
     fn stash_apply(&self, index: usize) -> Result<(), DomainError> {
@@ -639,6 +677,18 @@ fn require_safe_path(path: &str) -> Result<(), DomainError> {
     } else {
         Ok(())
     }
+}
+
+fn require_gitignore_pattern(pattern: &str) -> Result<(), DomainError> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') || trimmed.contains(['\n', '\r']) {
+        return Err(DomainError::Unknown(format!(
+            "invalid gitignore pattern: {pattern:?}"
+        )));
+    }
+    // Strip a trailing slash for the path check; folder patterns keep it when written.
+    let for_path = trimmed.trim_end_matches('/');
+    require_safe_path(for_path)
 }
 
 fn tracked_at_head(repo_path: &str, path: &str) -> Result<bool, DomainError> {

@@ -21,8 +21,6 @@ const COL_GAP: f32 = 10.0;
 const HASH_WIDTH: f32 = 72.0;
 const WHEN_WIDTH: f32 = 56.0;
 const AUTHOR_WIDTH: f32 = 100.0;
-const MESSAGE_FILL: u16 = 3;
-const PILLS_FILL: u16 = 1;
 /// Floor for the lane canvas so Graph never collapses into Description on resize.
 const MIN_GRAPH_COL_WIDTH: f32 = 40.0;
 const HEADER_SIZE: f32 = 11.0;
@@ -100,18 +98,18 @@ pub(super) fn history_pane<'a>(
         commit_rows = commit_rows.push(
             button(
                 row![
-                    pills_cell(
+                    container(text(""))
+                        .width(lanes_width)
+                        .height(Length::Fixed(ROW_HEIGHT)),
+                    description_cell(
                         &[RefPill {
                             label: format!("wip · {head}"),
                             kind: RefPillKind::Head,
                         }],
+                        "Working changes",
                         tokens,
                         reading,
                     ),
-                    container(text(""))
-                        .width(lanes_width)
-                        .height(Length::Fixed(ROW_HEIGHT)),
-                    message_cell("Working changes", tokens, reading),
                     single_line("", Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
                     single_line("", Length::Fixed(WHEN_WIDTH), reading, tokens, false),
                     single_line("", Length::Fixed(HASH_WIDTH), reading, tokens, true),
@@ -134,12 +132,13 @@ pub(super) fn history_pane<'a>(
         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
         let age = relative_age_compact(now, commit.timestamp);
         let pills = refs_at(&commit.id, &app.session().state.branches, &app.session().state.tags);
+        // Graph first (screenshot parity); pills then subject stacked so the
+        // message is never crushed beside a long pill row.
         let label = row![
-            pills_cell(&pills, tokens, reading),
             canvas(GraphCell(graph_row))
                 .width(lanes_width)
                 .height(Length::Fixed(ROW_HEIGHT)),
-            message_cell(&commit.message, tokens, reading),
+            description_cell(&pills, &commit.message, tokens, reading),
             single_line(
                 &commit.author,
                 Length::Fixed(AUTHOR_WIDTH),
@@ -210,7 +209,6 @@ fn column_headers<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     row![
-        header_cell("Refs", Length::FillPortion(PILLS_FILL), tokens, reading),
         container(
             text("Graph")
                 .font(reading.font)
@@ -221,12 +219,7 @@ fn column_headers<'a>(
                 }),
         )
         .width(lanes_width),
-        header_cell(
-            "Description",
-            Length::FillPortion(MESSAGE_FILL),
-            tokens,
-            reading,
-        ),
+        header_cell("Description", Length::Fill, tokens, reading),
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
         header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
@@ -271,48 +264,45 @@ fn header_cell<'a>(
     .into()
 }
 
-fn pills_cell<'a>(
+/// Pills on the first line, subject underneath — keeps the graph column free.
+fn description_cell<'a>(
     pills: &[RefPill],
+    message: &str,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let mut cell = row![].spacing(PILL_GAP).align_y(Alignment::Center);
+    let mut pill_row = row![].spacing(PILL_GAP).align_y(Alignment::Center);
     for pill in pills.iter().take(4) {
-        cell = cell.push(ref_pill(pill, tokens, reading));
+        pill_row = pill_row.push(ref_pill(pill, tokens, reading));
     }
     if pills.len() > 4 {
-        cell = cell.push(
+        pill_row = pill_row.push(
             text(format!("+{}", pills.len() - 4))
                 .font(reading.font)
-                .size((reading.size - 2.0).max(11.0))
+                .size((reading.size - 2.0).max(10.0))
                 .wrapping(Wrapping::None)
                 .style(move |_| text::Style {
                     color: Some(tokens.text_muted),
                 }),
         );
     }
-    container(cell)
-        .width(Length::FillPortion(PILLS_FILL))
-        .clip(true)
-        .into()
-}
-
-fn message_cell<'a>(
-    message: &str,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let body = text(message.to_string())
+    let subject = text(message.to_string())
         .font(reading.font)
         .size(reading.size)
         .wrapping(Wrapping::None)
         .style(move |_| text::Style {
             color: Some(tokens.text_primary),
         });
-    // Share remaining width with pills; clip long subjects.
-    container(body)
-        .width(Length::FillPortion(MESSAGE_FILL))
+    let stack = if pills.is_empty() {
+        column![subject].spacing(0)
+    } else {
+        column![pill_row, subject].spacing(2)
+    };
+    container(stack)
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
         .clip(true)
+        .align_y(Alignment::Center)
         .into()
 }
 

@@ -378,9 +378,11 @@ pub(crate) fn load_patch_in_background(
 }
 
 /// Push, apply, pop, or drop. The index is the `stash@{n}` slot from the last list.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum StashAction {
     Push,
+    /// `git stash push -- <paths>…`
+    PushPaths(Vec<String>),
     Apply(usize),
     Pop(usize),
     Drop(usize),
@@ -447,6 +449,7 @@ pub(crate) fn stash_in_background(
     in_background(
         move || match action {
             StashAction::Push => repo.stash_push(""),
+            StashAction::PushPaths(paths) => repo.stash_push_paths("", &paths),
             StashAction::Apply(index) => repo.stash_apply(index),
             StashAction::Pop(index) => repo.stash_pop(index),
             StashAction::Drop(index) => repo.stash_drop(index),
@@ -455,14 +458,33 @@ pub(crate) fn stash_in_background(
     )
 }
 
-pub(crate) fn discard_in_background(
+pub(crate) fn discard_paths_in_background(
     repo: SharedRepository,
-    path: String,
+    paths: Vec<String>,
     place: FileDisposition,
 ) -> impl Future<Output = Result<(), DomainError>> {
     in_background(
-        move || repo.discard_path(&path, place),
+        move || {
+            for path in &paths {
+                repo.discard_path(path, place)?;
+            }
+            Ok(())
+        },
         || Err(DomainError::Unknown("discard was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn append_gitignore_in_background(
+    repo: SharedRepository,
+    patterns: Vec<String>,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.append_gitignore(&patterns),
+        || {
+            Err(DomainError::Unknown(
+                "gitignore update was interrupted".to_string(),
+            ))
+        },
     )
 }
 
@@ -650,6 +672,12 @@ mod tests {
             unreachable!("not used by load_repository")
         }
         fn stash_push(&self, _message: &str) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn stash_push_paths(&self, _message: &str, _paths: &[String]) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn append_gitignore(&self, _patterns: &[String]) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
         fn stash_apply(&self, _index: usize) -> Result<(), DomainError> {

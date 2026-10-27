@@ -69,6 +69,10 @@ pub trait GitRepository {
     ) -> Result<(), DomainError>;
     /// `git stash push`. A blank message keeps git's own subject. Untracked files stay put.
     fn stash_push(&self, message: &str) -> Result<(), DomainError>;
+    /// `git stash push [-- <paths>…]`. Empty `paths` matches [`Self::stash_push`].
+    fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), DomainError>;
+    /// Append `patterns` to `.gitignore` (creating the file when missing). Patterns are relative.
+    fn append_gitignore(&self, patterns: &[String]) -> Result<(), DomainError>;
     /// `git stash apply stash@{index}`. The stash entry remains.
     fn stash_apply(&self, index: usize) -> Result<(), DomainError>;
     /// `git stash pop stash@{index}`. Git drops the entry only when the apply succeeds.

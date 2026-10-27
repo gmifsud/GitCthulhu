@@ -223,6 +223,14 @@ impl GitRepository for FakeGitRepository {
         self.stash_push_result.clone()
     }
 
+    fn stash_push_paths(&self, _message: &str, _paths: &[String]) -> Result<(), DomainError> {
+        self.stash_push_result.clone()
+    }
+
+    fn append_gitignore(&self, _patterns: &[String]) -> Result<(), DomainError> {
+        Ok(())
+    }
+
     fn stash_apply(&self, _index: usize) -> Result<(), DomainError> {
         self.stash_apply_result.clone()
     }

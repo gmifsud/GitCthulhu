@@ -63,6 +63,57 @@ pub(crate) struct ExplorerCollapsed {
     pub tags: bool,
 }
 
+/// Relative height shares for open Explorer sections (`FillPortion` weights).
+///
+/// Dragging the grip under a section raises or lowers that section's weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplorerWeights {
+    pub local: u16,
+    pub remote: u16,
+    pub worktrees: u16,
+    pub stashes: u16,
+    pub tags: u16,
+}
+
+impl Default for ExplorerWeights {
+    fn default() -> Self {
+        Self {
+            local: 2,
+            remote: 2,
+            worktrees: 2,
+            stashes: 1,
+            tags: 1,
+        }
+    }
+}
+
+impl ExplorerWeights {
+    const MIN: u16 = 1;
+    const MAX: u16 = 12;
+
+    pub(crate) fn get(self, section: ExplorerSection) -> u16 {
+        match section {
+            ExplorerSection::Local => self.local,
+            ExplorerSection::Remote => self.remote,
+            ExplorerSection::Worktrees => self.worktrees,
+            ExplorerSection::Stashes => self.stashes,
+            ExplorerSection::Tags => self.tags,
+        }
+        .clamp(Self::MIN, Self::MAX)
+    }
+
+    pub(crate) fn set(&mut self, section: ExplorerSection, weight: u16) {
+        let weight = weight.clamp(Self::MIN, Self::MAX);
+        match section {
+            ExplorerSection::Local => self.local = weight,
+            ExplorerSection::Remote => self.remote = weight,
+            ExplorerSection::Worktrees => self.worktrees = weight,
+            ExplorerSection::Stashes => self.stashes = weight,
+            ExplorerSection::Tags => self.tags = weight,
+        }
+    }
+}
+
 /// Everything bound to one open worktree path.
 pub(crate) struct WorktreeSession {
     /// Absolute working directory this session opened.
@@ -90,6 +141,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) focus_current_branch: bool,
     /// Which Explorer accordion sections are currently collapsed.
     pub(crate) explorer_collapsed: ExplorerCollapsed,
+    /// Height shares for open Explorer sections (user-adjustable).
+    pub(crate) explorer_weights: ExplorerWeights,
 }
 
 impl WorktreeSession {
@@ -115,6 +168,7 @@ impl WorktreeSession {
             pending_checkout: None,
             focus_current_branch: false,
             explorer_collapsed: ExplorerCollapsed::default(),
+            explorer_weights: ExplorerWeights::default(),
         }
     }
 
@@ -318,6 +372,15 @@ mod tests {
         session.toggle_explorer(ExplorerSection::Tags);
         session.toggle_explorer(ExplorerSection::Tags);
         assert!(!session.explorer_collapsed.tags);
+    }
+
+    #[test]
+    fn explorer_weights_clamp_when_set() {
+        let mut weights = ExplorerWeights::default();
+        weights.set(ExplorerSection::Local, 0);
+        assert_eq!(weights.get(ExplorerSection::Local), 1);
+        weights.set(ExplorerSection::Worktrees, 99);
+        assert_eq!(weights.get(ExplorerSection::Worktrees), 12);
     }
 
     fn dirty_session() -> WorktreeSession {

@@ -61,8 +61,8 @@ impl GitApp {
                 return confirm_detach(commit_id, tokens, reading);
             }
         }
-        if let Some((path, _)) = &self.confirm_discard {
-            return confirm_discard(path, tokens, reading);
+        if let Some((paths, _)) = &self.confirm_discard {
+            return confirm_discard(paths, tokens, reading);
         }
         if let Some(stash) = &self.confirm_drop {
             return confirm_drop_stash(&stash.message, tokens, reading);

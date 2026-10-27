@@ -11,9 +11,9 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 
 use crate::theme::hex_color;
 
-/// Height of one commit row. Rows are single-line so graph segments meet exactly.
-/// Tall enough for a ref pill beside the message.
-pub(crate) const ROW_HEIGHT: f32 = 28.0;
+/// Height of one commit row. Tall enough for pills above the subject so the
+/// graph column stays first without crushing the message into the same line.
+pub(crate) const ROW_HEIGHT: f32 = 40.0;
 /// Horizontal distance between lane centres.
 const LANE_SPACING: f32 = 14.0;
 const DOT_RADIUS: f32 = 4.0;
