@@ -4,15 +4,15 @@ spike: S4
 title: Atomic save and external-change guard
 status: partial
 date: 2026-10-27
-platforms_done: [linux-ext4]
-platforms_pending: [windows-ntfs, macos-apfs, wsl-9p]
-result: go-on-linux
+platforms_done: [linux-ext4, windows-ntfs, macos-apfs]
+platforms_pending: [wsl-9p, disk-full]
+result: go
 tags: [cthulhu-resolve, phase-0, safety]
 ---
 
 # S4 — Atomic save and external-change guard
 
-**Verdict: Go on Linux/ext4. Windows, macOS and WSL `/mnt/c` are still pending**, because this sandbox only has Linux.
+**Verdict: Go on Linux/ext4, Windows NTFS (Server 2025, git 2.56) and macOS APFS.** All `AtomicFileWriterTests` pass in the CI matrix (`.github/workflows/resolver.yml`). WSL `/mnt/c` and disk-full are still pending.
 
 ## Design under test (`AtomicFileWriter`)
 

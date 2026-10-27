@@ -112,11 +112,16 @@ internal sealed class GitFixture : IDisposable
     {
         try
         {
+            // git writes loose objects read-only; Windows refuses to delete read-only files.
+            foreach (var file in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
             Directory.Delete(Root, recursive: true);
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            // Best effort on Windows if an antivirus scanner holds a handle.
+            // Best effort: a scanner holding a handle must not fail a passing test.
         }
     }
 }
