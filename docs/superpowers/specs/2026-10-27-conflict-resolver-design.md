@@ -1,7 +1,7 @@
 ---
 type: spec
 title: Cthulhu Resolve — standalone Git conflict resolver
-status: draft-for-signoff
+status: approved
 created: 2026-10-27
 owner: grego
 related: [ADR-0004, ADR-0005, ADR-0006, CONTEXT.md]
@@ -10,7 +10,7 @@ tags: [gitcthulhu, merge-tool, prd, architecture]
 
 # Cthulhu Resolve — standalone Git conflict resolver
 
-Status: **Draft for sign-off.** This is the PRD-first gate: no execution code until §0 Sign-off is ticked.
+Status: **Approved 2026-10-27**, with every §0 default accepted. **Amended by spike S2** (§10.1, §10.3): plans use git's own histogram diffs. Phase 0 code lives in `resolver/` (see D6).
 Related: ADR 0004 (stack), ADR 0005 (Git CLI is authoritative), ADR 0006 (immutable merge plan + anchored result).
 
 > **Evidence key.** `[V-SRC]` verified from JetBrains' open-source platform strings/keymaps (intellij-community, first-hand).
@@ -30,7 +30,7 @@ Related: ADR 0004 (stack), ADR 0005 (Git CLI is authoritative), ADR 0006 (immuta
 | D3 | Result model | Immutable merge plan from index stages; result is a text buffer with anchored regions (ADR 0006) |
 | D4 | Initial result | Base + all non-conflicting changes applied (each shown as applied, individually revertible); conflicts start showing base text, **unresolved** |
 | D5 | Staging | Never implicit. Mergetool mode: caller (git) stages. Repo mode: explicit *Stage* action |
-| D6 | Repository | New repo `cthulhu-resolve` (.NET); GitCthulhu (Rust/iced) integrates over the CLI contract only |
+| D6 | Repository | New repo `cthulhu-resolve` (.NET); GitCthulhu (Rust/iced) integrates over the CLI contract only. *Until that repo exists, the code lives self-contained in `resolver/` and is extracted with `git subtree split --prefix=resolver`* |
 
 ---
 
@@ -734,6 +734,7 @@ The resolver never silently stages, commits/continues, aborts/resets/cleans, ove
 ### 10.1 Two-way diffs
 
 - Compute `base→left` and `base→right` on line arrays using **histogram diff** (Git's `diff.algorithm=histogram`, a patience extension `[V-GIT config/diff.adoc]`), with **Myers O(ND)** (Myers 1986) as the fallback for pathological inputs.
+- **Amended by S2:** the *plan* is built from **git's own** line diffs (`git diff --no-index -U0 --diff-algorithm=histogram --no-indent-heuristic`, hunk headers only). On git 2.43, real `git merge` (ort) matched git's histogram diffs in 99/99 conflicted merges and Myers in only 46/99. `git merge-file` defaults to Myers, so the two commands disagree. The in-process diffs are kept for display (word highlights, result-vs-input views) and the no-git fallback. Per file, the algorithm is confirmed by reproducing the worktree's markers (`resolver/docs/spikes/S2-planner-oracle.md`, D-S2-2).
 - Line equality is on decoded text including the terminator. That gives the *exact* mode; display modes compare normalised keys instead (§10.6).
 
 ### 10.2 diff3 planning
@@ -753,6 +754,9 @@ The resolver never silently stages, commits/continues, aborts/resets/cleans, ove
 - `git merge-file -p --zdiff3 -L … left base right` (or `--object-id` on 2.43+) is the oracle `[V-GIT git-merge-file.adoc]`.
 - For each fixture and property-based case, our plan rendered with markers must match Git's **conflict count**, and the union of non-conflicting output must match exactly.
 - Divergences are allowed only in a documented list (e.g. Git's `XDL_MERGE_ZEALOUS` refinements). Each allowed divergence needs a test that names it.
+- **S2 result:**
+  - Fed git's edit scripts, the planner matched `merge-file --diff3` byte for byte on 400/400 ambiguous cases and 300/300 unique-line cases.
+  - The residual difference with the in-process diffs (Myers 76.5 % count agreement) is alignment tie-breaking only, which is why D-S2-1 exists.
 
 ### 10.4 Range mapping and anchors
 
@@ -969,7 +973,7 @@ Relative effort assumes one senior engineer and is given as S/M/L/XL (≈ 1 / 2�
 | O4 | Where the code lives (D6) | Separate `cthulhu-resolve` repo | Mixed-stack monorepo friction if merged | Revisit after Phase 1 |
 | O5 | WSL handling | Linux build inside WSL; Windows build for Windows paths; never cross the boundary in one session | Users invoking the `.exe` from WSL git get `\\wsl$` paths | Detect `/mnt/<drive>` and `\\wsl$` and warn; S4 |
 | O6 | Minimum Git | 2.38 | Older distros (e.g. RHEL 8 ships 2.31 `[U]`) | Version probe with a clear error |
-| O7 | Diff library | Own histogram; DiffPlex for Myers fallback | Maintenance of ~1k LOC | S2 results vs the oracle |
+| O7 | Diff library | **Resolved by S2:** plans from git's diffs; in-process Myers/Histogram (~400 LOC, no dependency) for display | — | `OracleTests` |
 | O8 | Session text at rest | Plain in user profile with ACL | Sensitive repos | Optional DPAPI/Keychain-wrapped key, Phase 3 |
 | O9 | Monaco fallback host | `Avalonia.Controls.WebView` (MIT ≥ 11.4) | Linux engine is unverified | Only matters if S1/S3 fail |
 

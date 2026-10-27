@@ -1,6 +1,6 @@
 # ADR 0006: Immutable merge plan; the result is an anchored document
 
-Status: Proposed
+Status: Accepted 2026-10-27
 
 ## Context
 

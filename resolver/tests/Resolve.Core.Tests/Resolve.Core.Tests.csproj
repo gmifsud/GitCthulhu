@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <!-- Test names are sentences (CA1707); range slices read better than spans in assertions (CA1832). -->
+    <NoWarn>$(NoWarn);CA1707;CA1515;CA1861;CA1832</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="CsCheck" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <ProjectReference Include="../../src/Resolve.Core/Resolve.Core.csproj" />
+  </ItemGroup>
+</Project>

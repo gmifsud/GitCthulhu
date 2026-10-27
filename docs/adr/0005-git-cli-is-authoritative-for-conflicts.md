@@ -1,6 +1,6 @@
 # ADR 0005: The git CLI is authoritative for conflict inputs, staging and continuation
 
-Status: Proposed
+Status: Accepted 2026-10-27; amended by spike S2
 
 ## Context
 
@@ -30,6 +30,7 @@ The CLI gives Git's own semantics, including the user's config, `safe.directory`
 
 ## Consequences
 
+- Git is authoritative for **alignment** too (S2). Plans are built from `git diff --no-index -U0 --diff-algorithm=histogram --no-indent-heuristic` hunk headers, which reproduced real `git merge` output in 99/99 conflicted cases on 2.43. `git merge-file` defaults to Myers and is therefore not the oracle for merges.
 - A version probe gates features.
 - Paths and output are handled as bytes.
 - Configured clean/smudge filters run during staging, and the UI discloses this.

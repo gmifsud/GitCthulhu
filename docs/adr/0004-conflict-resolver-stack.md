@@ -1,6 +1,6 @@
 # ADR 0004: Conflict resolver is .NET + Avalonia + AvaloniaEdit, editor behind a port
 
-Status: Proposed (awaiting spikes S1 and S3)
+Status: Accepted 2026-10-27. Spikes S1 (latency) and S3 (accessibility) still decide between AvaloniaEdit and the Monaco fallback.
 
 ## Context
 
