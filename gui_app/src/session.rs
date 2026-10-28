@@ -180,6 +180,13 @@ impl WorktreeSession {
                 Some(PatchQuery::Commit(id))
             }
             Some(Selection::File { path, place }) => Some(PatchQuery::File { path, place }),
+            // A stash is a commit; its first-parent diff is the stashed change.
+            Some(Selection::Stash { index, message }) => self
+                .state
+                .stashes
+                .iter()
+                .find(|stash| stash.index == index && stash.message == message)
+                .map(|stash| PatchQuery::Commit(stash.commit_id.clone())),
             _ => None,
         }
     }

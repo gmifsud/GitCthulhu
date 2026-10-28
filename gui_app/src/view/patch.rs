@@ -21,6 +21,11 @@ pub(super) fn patch_pane<'a>(
         body = body.push(note("No changes", tokens, reading));
     } else {
         let busy = app.session().state.loading;
+        // Stage/discard act on the working tree, so they belong to working-tree files only.
+        let hunk_place = match app.session().selection.as_ref() {
+            Some(crate::selection::Selection::File { place, .. }) => Some(*place),
+            _ => None,
+        };
         let mut budget = app.session().diff_lines_limit;
         let patches = visible_patches(&app.session().patches, app.session().focused_diff_path.as_deref());
         let hidden = {
@@ -84,9 +89,10 @@ pub(super) fn patch_pane<'a>(
                     budget -= 1;
                     body = body.push(diff_line(line, old_no, new_no, tokens, reading));
                 }
-                body = body.push(
-                    row![
-                        command_button(
+                if let Some(place) = hunk_place {
+                    let mut actions = row![].spacing(8).align_y(Alignment::Center);
+                    if place != core_domain::FileDisposition::Staged {
+                        actions = actions.push(command_button(
                             "Stage hunk",
                             Message::StageHunk {
                                 path: path.clone(),
@@ -95,18 +101,17 @@ pub(super) fn patch_pane<'a>(
                             !busy,
                             tokens,
                             reading,
-                        ),
-                        command_button(
-                            "Discard hunk",
-                            Message::DiscardHunk { path, index },
-                            !busy,
-                            tokens,
-                            reading,
-                        ),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                );
+                        ));
+                    }
+                    actions = actions.push(command_button(
+                        "Discard hunk",
+                        Message::DiscardHunk { path, index },
+                        !busy,
+                        tokens,
+                        reading,
+                    ));
+                    body = body.push(actions);
+                }
             }
         }
         if hidden > 0 {

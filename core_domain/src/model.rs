@@ -31,6 +31,9 @@ pub struct Tag {
 pub struct Stash {
     pub index: usize,
     pub message: String,
+    /// The stash commit. Its first parent is the HEAD it was taken on, so its first-parent
+    /// diff is what `git stash show -p` prints for tracked files.
+    pub commit_id: String,
 }
 
 /// Represents a Git branch.

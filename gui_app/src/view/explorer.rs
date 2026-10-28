@@ -16,7 +16,7 @@ use iced::{
     mouse, Alignment, Background, Border, Color, Element, Length, Padding, Shadow,
 };
 
-use super::chrome::{
+use super::chrome::{one_line, 
     glyph, hairline, icon_button, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED, FOLD_OPEN,
     REMOTE_MARK, STASH_MARK, TAG_MARK, WORKTREE_MARK,
 };
@@ -539,7 +539,7 @@ fn branch_row<'a>(
     let row = button(
         row![
             glyph(mark, reading.size, mark_color, &reading),
-            container(
+            one_line(
                 text(label)
                     .font(reading.font)
                     .size(reading.size)
@@ -547,9 +547,9 @@ fn branch_row<'a>(
                     .style(move |_| iced::widget::text::Style {
                         color: Some(label_color),
                     }),
-            )
-            .width(Length::Fill)
-            .clip(true),
+                reading.size,
+                Length::Fill,
+            ),
             tracking_badges(ahead, behind, tokens, reading),
         ]
         .spacing(8)

@@ -490,6 +490,7 @@ mod tests {
         let stashes = vec![Stash {
             index: 0,
             message: "On main: other".to_string(),
+            commit_id: "5ta5h0".to_string(),
         }];
         let branches = vec![branch("dev", false, true)];
         let visible = visible_selection(Some(&stored), &branches, &[], &stashes, &[], None);

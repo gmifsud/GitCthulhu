@@ -476,7 +476,9 @@ impl GitRepository for GitoxideAdapter {
         }
         let text = run_git_stdout(
             &self.repo_path,
-            &["show", "--format=", "--unified=3", commit_id],
+            // -m --first-parent: a merge (and a stash, which is a merge commit) diffs against
+            // its first parent. Without it `git show` prints a combined diff, usually empty.
+            &["show", "--format=", "--unified=3", "-m", "--first-parent", commit_id],
         )?;
         Ok(parse_patches(&text))
     }
@@ -566,7 +568,7 @@ impl GitRepository for GitoxideAdapter {
 
     fn stashes(&self) -> Result<Vec<Stash>, DomainError> {
         self.open_repo()?;
-        let text = run_git_stdout(&self.repo_path, &["stash", "list"])?;
+        let text = run_git_stdout(&self.repo_path, &stash::LIST_ARGS)?;
         stash::parse_stash_list(&text)
     }
 
