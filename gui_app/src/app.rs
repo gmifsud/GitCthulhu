@@ -93,14 +93,17 @@ pub(crate) struct GitApp {
     /// Last pointer position in window coordinates (for tips and context menus).
     pub(crate) cursor: (f32, f32),
     /// Dragging an Explorer section height grip: section, start y, start weight.
-    explorer_resize: Option<(crate::session::ExplorerSection, f32, u16)>,
+    /// The last branch-tree click, to recognise a double-click (checkout).
+    last_ref_click: Option<(String, std::time::Instant)>,
+    /// Branch-tree filter text ("Branch or tag"). Window-wide.
+    pub(crate) ref_filter: String,
     /// Authoritative, global settings. Fanned into each session's `AppState`.
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
     pub(crate) opening: bool,
     pub(crate) panes: pane_grid::State<WorkspacePane>,
     pub(crate) layout: LayoutPreset,
-    ratios: [layout::LayoutRatios; 3],
+    ratios: [layout::LayoutRatios; LayoutPreset::COUNT],
     /// Rebuilt whenever [`Self::install_layout`] constructs a new pane grid.
     split_slots: Vec<(pane_grid::Split, RatioSlot)>,
     pub(crate) files_rail_open: bool,
@@ -165,12 +168,20 @@ pub(crate) enum Message {
     ToggleFilesRail,
     /// Collapse or expand one Explorer accordion section for the active session.
     ToggleExplorerSection(crate::session::ExplorerSection),
-    /// Begin dragging the height grip under an open Explorer section.
-    ExplorerResizeStart(crate::session::ExplorerSection),
-    /// End an Explorer height-grip drag.
-    ExplorerResizeEnd,
+    /// Branch-tree filter text changed.
+    RefFilterChanged(String),
+    /// Open or close a branch-tree folder by key.
+    ToggleRefFolder(String),
+    /// A branch in the tree was clicked: filter the log to it; a second click soon after
+    /// checks out a local branch.
+    RefClicked { name: String, remote: bool },
+    /// Drop the log's branch filter.
+    ClearBranchFilter,
+    /// The filter bar's Branch ▾: All, HEAD, or one branch.
+    BranchChoicePicked(crate::log_filter::LogChoice),
+    /// The filter bar's User ▾: All, or one author.
+    AuthorChoicePicked(crate::log_filter::LogChoice),
     ToggleBranchList,
-    ChooseBranch(String),
     ShowWorkingTree,
     FocusFile {
         path: String,
@@ -278,6 +289,10 @@ pub(crate) enum Message {
     ConfirmDropStash,
     StashFinished(String, Result<(), DomainError>),
     AskCreateBranch,
+    /// Open the New Branch dialog at any ref or commit (context menus).
+    AskCreateBranchFrom(String),
+    /// The New Branch dialog's "Checkout branch" box.
+    BranchCheckoutToggled(bool),
     AskRenameBranch,
     AskDeleteBranch,
     BranchNameChanged(String),
@@ -416,7 +431,12 @@ pub(crate) enum HistoryPrompt {
 /// A create, rename, or delete waiting for the user to confirm the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BranchPrompt {
-    Create { start: String, name: String },
+    /// `checkout` switches to the new branch once it exists (JetBrains' default).
+    Create {
+        start: String,
+        name: String,
+        checkout: bool,
+    },
     Rename { from: String, to: String },
     Delete { name: String },
 }
@@ -472,7 +492,8 @@ impl GitApp {
             tip_hover: None,
             tip_ready_key: None,
             cursor: (0.0, 0.0),
-            explorer_resize: None,
+            last_ref_click: None,
+            ref_filter: String::new(),
             settings,
             opening: false,
             panes,
@@ -490,7 +511,8 @@ impl GitApp {
             agent_busy: false,
             terminal: crate::terminal::Transcript::new(),
             terminal_log: text_editor::Content::new(),
-            terminal_open: true,
+            // Collapsed by default: it costs ~130 px of History. Ctrl+` / the status bar opens it.
+            terminal_open: false,
             shell_input: String::new(),
             shell_busy: false,
             list_models: unavailable_model_lister(),
@@ -1169,14 +1191,41 @@ impl GitApp {
                 self.session_mut().toggle_explorer(section);
                 Task::none()
             }
-            Message::ExplorerResizeStart(section) => {
-                let start_y = self.cursor.1;
-                let start_w = self.session().explorer_weights.get(section);
-                self.explorer_resize = Some((section, start_y, start_w));
+            Message::RefFilterChanged(filter) => {
+                self.ref_filter = filter;
                 Task::none()
             }
-            Message::ExplorerResizeEnd => {
-                self.explorer_resize = None;
+            Message::ToggleRefFolder(key) => {
+                self.session_mut().toggle_ref_folder(&key);
+                Task::none()
+            }
+            Message::RefClicked { name, remote } => self.ref_clicked(name, remote),
+            Message::ClearBranchFilter => {
+                if let Some(session) = self.active_session_mut() {
+                    session.branch_filter = None;
+                    session.focus_current_branch = false;
+                }
+                Task::none()
+            }
+            Message::BranchChoicePicked(choice) => {
+                use crate::log_filter::LogChoice;
+                if let Some(session) = self.active_session_mut() {
+                    session.focus_current_branch = choice == LogChoice::Head;
+                    session.branch_filter = match choice {
+                        LogChoice::Named(name) => Some(name),
+                        LogChoice::All | LogChoice::Head => None,
+                    };
+                }
+                Task::none()
+            }
+            Message::AuthorChoicePicked(choice) => {
+                use crate::log_filter::LogChoice;
+                if let Some(session) = self.active_session_mut() {
+                    session.author_filter = match choice {
+                        LogChoice::Named(name) => Some(name),
+                        LogChoice::All | LogChoice::Head => None,
+                    };
+                }
                 Task::none()
             }
             Message::ToggleBranchList => {
@@ -1186,30 +1235,6 @@ impl GitApp {
                 self.branch_list_open = false;
                 self.session_mut().explorer_collapsed.local = false;
                 self.install_layout();
-                Task::none()
-            }
-            Message::ChooseBranch(name) => {
-                self.branch_list_open = false;
-                let Some(session) = self.active_session() else {
-                    return Task::none();
-                };
-                let current = session
-                    .state
-                    .branches
-                    .iter()
-                    .any(|branch| !branch.is_remote && branch.is_head && branch.name == name);
-                if current {
-                    self.session_mut().selection =
-                        Some(Selection::Branch { name, current: true });
-                    return Task::none();
-                }
-                if self.has_local_branch(&name) {
-                    return self.update(Message::CheckoutBranch(name));
-                }
-                self.session_mut().selection = Some(Selection::Branch {
-                    name,
-                    current: false,
-                });
                 Task::none()
             }
             Message::ShowWorkingTree => {
@@ -1603,6 +1628,23 @@ impl GitApp {
             Message::AskCreateBranch => self.ask_branch(BranchAsk::Create),
             Message::AskRenameBranch => self.ask_branch(BranchAsk::Rename),
             Message::AskDeleteBranch => self.ask_branch(BranchAsk::Delete),
+            Message::AskCreateBranchFrom(start) => {
+                if self.active_session().is_none_or(|session| session.state.loading) {
+                    return Task::none();
+                }
+                self.branch_prompt = Some(BranchPrompt::Create {
+                    start,
+                    name: String::new(),
+                    checkout: true,
+                });
+                Task::none()
+            }
+            Message::BranchCheckoutToggled(on) => {
+                if let Some(BranchPrompt::Create { checkout, .. }) = &mut self.branch_prompt {
+                    *checkout = on;
+                }
+                Task::none()
+            }
             Message::BranchNameChanged(name) => {
                 match &mut self.branch_prompt {
                     Some(BranchPrompt::Create { name: field, .. }) => *field = name,
@@ -1794,6 +1836,7 @@ impl GitApp {
             Message::ToggleFocusCurrentBranch => {
                 if let Some(session) = self.active_session_mut() {
                     session.focus_current_branch = !session.focus_current_branch;
+                    session.branch_filter = None;
                 }
                 Task::none()
             }
@@ -1811,12 +1854,6 @@ impl GitApp {
             }
             Message::CursorMoved { x, y } => {
                 self.cursor = (x, y);
-                if let Some((section, start_y, start_w)) = self.explorer_resize {
-                    // ~36px of drag ≈ one FillPortion step.
-                    let delta = ((y - start_y) / 36.0).round() as i32;
-                    let next = (i32::from(start_w) + delta).clamp(1, 12) as u16;
-                    self.session_mut().explorer_weights.set(section, next);
-                }
                 Task::none()
             }
             Message::ContextMenuAction(kind) => {
@@ -1856,6 +1893,7 @@ impl GitApp {
                         self.open_change_in_os(&path, is_dir);
                         Task::none()
                     }
+                    other => self.run_object_action(other),
                 }
             }
             Message::AskDetachHead { commit_id } => self.ask_detach_head(commit_id),
@@ -2338,6 +2376,7 @@ impl GitApp {
                 BranchPrompt::Create {
                     start,
                     name: String::new(),
+                    checkout: true,
                 }
             }
             BranchAsk::Rename => {
@@ -2428,15 +2467,19 @@ impl GitApp {
             return Task::none();
         };
         let action = match prompt {
-            BranchPrompt::Create { start, name } => {
+            BranchPrompt::Create {
+                start,
+                name,
+                checkout,
+            } => {
                 let name = name.trim().to_string();
                 if name.is_empty() {
                     return Task::none();
                 }
-                if start != "HEAD" && !self.has_local_branch(&start) {
+                if !self.start_point_exists(&start) {
                     return self.branch_is_gone();
                 }
-                BranchAction::Create { name, start }
+                return self.run_branch_then(BranchAction::Create { name, start }, checkout);
             }
             BranchPrompt::Rename { from, to } => {
                 let to = to.trim().to_string();
@@ -2466,6 +2509,21 @@ impl GitApp {
         self.history_prompt = None;
         self.error = Some("That branch is no longer there.".to_string());
         Task::none()
+    }
+
+    /// A start point the window still lists: HEAD, a local or remote branch, a tag, a stash
+    /// commit, or a loaded commit. Remote starts used to be refused here although the dialog
+    /// offered them, so "New branch" from a remote failed with "no longer there".
+    fn start_point_exists(&self, start: &str) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        start == "HEAD"
+            || session.local_branch(start).is_some()
+            || session.remote_branch(start).is_some()
+            || session.state.tags.iter().any(|tag| tag.name == start)
+            || session.state.stashes.iter().any(|stash| stash.commit_id == start)
+            || session.commit_loaded(start)
     }
 
     fn has_local_branch(&self, name: &str) -> bool {
@@ -2498,6 +2556,11 @@ impl GitApp {
     }
 
     fn run_branch(&mut self, action: BranchAction) -> Task<Message> {
+        self.run_branch_then(action, true)
+    }
+
+    /// Runs a branch job. A create checks the new branch out afterwards only when `checkout`.
+    fn run_branch_then(&mut self, action: BranchAction, checkout: bool) -> Task<Message> {
         let Some(session) = self.active_session() else {
             return Task::none();
         };
@@ -2508,8 +2571,8 @@ impl GitApp {
         let path = session.path.clone();
         let session = self.session_mut();
         session.pending_checkout = match &action {
-            BranchAction::Create { name, .. } => Some(name.clone()),
-            BranchAction::Rename { .. } | BranchAction::Delete { .. } => None,
+            BranchAction::Create { name, .. } if checkout => Some(name.clone()),
+            BranchAction::Create { .. } | BranchAction::Rename { .. } | BranchAction::Delete { .. } => None,
         };
         session.state.loading = true;
         self.branch_prompt = None;
@@ -2545,12 +2608,18 @@ impl GitApp {
                 }
             }
             HistoryAsk::Merge | HistoryAsk::Rebase => {
-                let Selection::Branch { name, current } = visible else {
-                    return Task::none();
+                // A local branch other than the current one, or a remote-tracking branch
+                // (merging origin/development is the everyday case).
+                let name = match visible {
+                    Selection::Branch { name, current } => {
+                        if current || session.local_branch(&name).is_none() {
+                            return Task::none();
+                        }
+                        name
+                    }
+                    Selection::Remote { name } if session.remote_branch(&name).is_some() => name,
+                    _ => return Task::none(),
                 };
-                if current || session.local_branch(&name).is_none() {
-                    return Task::none();
-                }
                 if matches!(ask, HistoryAsk::Merge) {
                     HistoryPrompt::Merge { name }
                 } else {
@@ -2611,6 +2680,16 @@ impl GitApp {
                 Task::none()
             }
             Some(false) => {
+                if merge {
+                    self.run_history(HistoryAction::Merge { name })
+                } else {
+                    self.run_history(HistoryAction::Rebase { name })
+                }
+            }
+            None if self
+                .active_session()
+                .is_some_and(|session| session.remote_branch(&name).is_some()) =>
+            {
                 if merge {
                     self.run_history(HistoryAction::Merge { name })
                 } else {
@@ -2686,6 +2765,118 @@ impl GitApp {
         )
     }
 
+    /// One click selects a branch and filters the log to it (JetBrains). A second click on the
+    /// same local branch within [`DOUBLE_CLICK`] checks it out; a click never checks out alone.
+    fn ref_clicked(&mut self, name: String, remote: bool) -> Task<Message> {
+        let now = std::time::Instant::now();
+        let double = self
+            .last_ref_click
+            .as_ref()
+            .is_some_and(|(last, at)| *last == name && now.duration_since(*at) <= DOUBLE_CLICK);
+        self.last_ref_click = Some((name.clone(), now));
+        let Some(session) = self.active_session_mut() else {
+            return Task::none();
+        };
+        let current = !remote
+            && session
+                .state
+                .branches
+                .iter()
+                .any(|branch| !branch.is_remote && branch.is_head && branch.name == name);
+        session.focus_current_branch = false;
+        session.branch_filter = Some(name.clone());
+        session.selection = Some(if remote {
+            Selection::Remote { name: name.clone() }
+        } else {
+            Selection::Branch {
+                name: name.clone(),
+                current,
+            }
+        });
+        if double && !remote && !current {
+            self.last_ref_click = None;
+            return self.update(Message::CheckoutBranch(name));
+        }
+        Task::none()
+    }
+
+    /// Context-menu actions on refs, stashes and worktrees. Each maps onto an existing message;
+    /// actions that ask about "the selection" select their target first, so the dialog is
+    /// about the row that was right-clicked.
+    fn run_object_action(&mut self, kind: crate::context_menu::ContextActionKind) -> Task<Message> {
+        use crate::context_menu::ContextActionKind as Kind;
+        let select = |this: &mut Self, selection: Selection| {
+            if let Some(session) = this.active_session_mut() {
+                session.selection = Some(selection);
+            }
+        };
+        match kind {
+            Kind::CheckoutBranch { name } => self.update(Message::CheckoutBranch(name)),
+            Kind::CheckoutRemote { remote, local } => {
+                if self.has_local_branch(&local) {
+                    self.update(Message::CheckoutBranch(local))
+                } else {
+                    // `git branch <local> <remote>` sets the upstream (branch.autoSetupMerge).
+                    self.run_branch_then(BranchAction::Create { name: local, start: remote }, true)
+                }
+            }
+            Kind::NewBranchFrom { start } => self.update(Message::AskCreateBranchFrom(start)),
+            Kind::MergeIntoCurrent { name } => {
+                select(self, branch_or_remote(&name, self.has_local_branch(&name)));
+                self.update(Message::AskMerge)
+            }
+            Kind::RebaseCurrentOnto { name } => {
+                select(self, branch_or_remote(&name, self.has_local_branch(&name)));
+                self.update(Message::AskRebase)
+            }
+            Kind::RenameBranch { name } => {
+                let current = self.local_branch_is_head(&name).unwrap_or(false);
+                select(self, Selection::Branch { name, current });
+                self.update(Message::AskRenameBranch)
+            }
+            Kind::DeleteBranch { name } => {
+                select(self, Selection::Branch { name, current: false });
+                self.update(Message::AskDeleteBranch)
+            }
+            Kind::CherryPick { id } => {
+                select(self, Selection::Commit { id });
+                self.update(Message::AskCherryPick)
+            }
+            Kind::ResetTo { id } => {
+                select(self, Selection::Commit { id });
+                self.update(Message::AskReset)
+            }
+            Kind::CopyText { text } => iced::clipboard::write(text),
+            Kind::OpenWorktreeTab { path } => self.update(Message::OpenWorktree(path)),
+            Kind::NewWorktree => self.update(Message::AskCreateWorktree),
+            Kind::RemoveWorktree { path } => self.update(Message::AskRemoveWorktree { path }),
+            Kind::OpenFolder { path } => {
+                open_in_file_manager(std::path::Path::new(&path));
+                Task::none()
+            }
+            Kind::StashApply { index, message } => {
+                select(self, Selection::Stash { index, message });
+                self.update(Message::StashApply(index))
+            }
+            Kind::StashPop { index, message } => {
+                select(self, Selection::Stash { index, message });
+                self.update(Message::StashPop(index))
+            }
+            Kind::StashDrop { index, message } => {
+                select(self, Selection::Stash { index, message });
+                self.update(Message::AskDropStash)
+            }
+            // Handled by the caller.
+            Kind::OpenAsWorktree { .. }
+            | Kind::DetachHead { .. }
+            | Kind::StageChange { .. }
+            | Kind::DiscardChange { .. }
+            | Kind::IgnoreChange { .. }
+            | Kind::StashChange { .. }
+            | Kind::OpenInOs { .. } => Task::none(),
+        }
+    }
+
     fn open_change_in_os(&self, rel_path: &str, is_dir: bool) {
         let Some(session) = self.active_session() else {
             return;
@@ -2700,24 +2891,7 @@ impl GitApp {
                 .unwrap_or(root)
                 .to_path_buf()
         };
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("explorer")
-                .arg(open_path.as_os_str())
-                .spawn();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open")
-                .arg(open_path.as_os_str())
-                .spawn();
-        }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            let _ = std::process::Command::new("xdg-open")
-                .arg(open_path.as_os_str())
-                .spawn();
-        }
+        open_in_file_manager(&open_path);
     }
 
     fn run_stash(&mut self, action: StashAction) -> Task<Message> {
@@ -2792,9 +2966,6 @@ impl GitApp {
                     y: position.y,
                 })
             }
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                iced::mouse::Button::Left,
-            )) => Some(Message::ExplorerResizeEnd),
             _ => None,
         });
         let waiting_tip = self.tip_hover.is_some()
@@ -2913,6 +3084,45 @@ fn shortcut_message(
             Some(Message::StageMarked)
         }
         _ => None,
+    }
+}
+
+/// Two clicks on the same branch within this window are a double-click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Reveal `path` in the platform file manager. Fire and forget: a missing tool is not an error.
+fn open_in_file_manager(path: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("explorer")
+                .arg(path.as_os_str())
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg(path.as_os_str())
+                .spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(path.as_os_str())
+                .spawn();
+        }
+}
+
+/// The selection a merge/rebase dialog reads for `name`: a local branch, else a remote one.
+fn branch_or_remote(name: &str, is_local: bool) -> Selection {
+    if is_local {
+        Selection::Branch {
+            name: name.to_string(),
+            current: false,
+        }
+    } else {
+        Selection::Remote {
+            name: name.to_string(),
+        }
     }
 }
 
@@ -3192,6 +3402,11 @@ mod tests {
         out
     }
 
+    /// Same panes regardless of tree order (Log puts the Inspector before the Diff).
+    fn same_panes(found: &[WorkspacePane], wanted: &[WorkspacePane]) -> bool {
+        found.len() == wanted.len() && wanted.iter().all(|pane| found.contains(pane))
+    }
+
     fn split_between(
         state: &pane_grid::State<WorkspacePane>,
         left: &[WorkspacePane],
@@ -3199,7 +3414,7 @@ mod tests {
     ) -> (pane_grid::Axis, f32, pane_grid::Split) {
         let found: Vec<_> = splits_of(state)
             .into_iter()
-            .filter(|split| split.left.as_slice() == left && split.right.as_slice() == right)
+            .filter(|split| same_panes(&split.left, left) && same_panes(&split.right, right))
             .collect();
         assert_eq!(found.len(), 1, "expected one split {left:?} | {right:?}");
         (found[0].axis, found[0].ratio, found[0].id)
@@ -3208,12 +3423,12 @@ mod tests {
     fn assert_open_preset(app: &GitApp, preset: LayoutPreset) {
         let ratios = app.ratios[preset.index()];
         let outer = match preset {
-            LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => pane_grid::Axis::Vertical,
+            LayoutPreset::Log | LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => pane_grid::Axis::Vertical,
             LayoutPreset::Stacked => pane_grid::Axis::Horizontal,
         };
         let middle = match preset {
             LayoutPreset::Columns => pane_grid::Axis::Vertical,
-            LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => pane_grid::Axis::Horizontal,
+            LayoutPreset::Log | LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => pane_grid::Axis::Horizontal,
         };
         let (files_axis, files_ratio, _) = split_between(
             &app.panes,
@@ -3225,6 +3440,16 @@ mod tests {
             ],
         );
         let (graph_axis, graph_ratio, middle_axis, middle_ratio) = match preset {
+            LayoutPreset::Log => {
+                let (graph_axis, graph_ratio, _) =
+                    split_between(&app.panes, &[WorkspacePane::Graph], &[WorkspacePane::Inspector]);
+                let (middle_axis, middle_ratio, _) = split_between(
+                    &app.panes,
+                    &[WorkspacePane::Graph, WorkspacePane::Inspector],
+                    &[WorkspacePane::Diff],
+                );
+                (graph_axis, graph_ratio, middle_axis, middle_ratio)
+            }
             LayoutPreset::Columns => {
                 let (graph_axis, graph_ratio, _) = split_between(
                     &app.panes,
@@ -3262,15 +3487,36 @@ mod tests {
     }
 
     #[test]
-    fn inspector_over_diff_is_the_default_layout() {
+    fn the_jetbrains_log_is_the_default_layout() {
         let app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        assert_eq!(app.layout, LayoutPreset::InspectorOverDiff);
+        assert_eq!(app.layout, LayoutPreset::Log);
+        assert!(!app.terminal_open, "the terminal starts collapsed");
         assert!(app.files_rail_open);
         assert_eq!(layout::GRAPH_RATIO, 0.68);
         assert_eq!(layout::COLUMNS_MIDDLE_RATIO, 0.50);
         assert_eq!(layout::STACKED_MIDDLE_RATIO, 0.62);
         assert_eq!(layout::FILES_RATIO, 0.22);
         assert_eq!(layout::MIN_GRAPH_RATIO, 0.50);
+        assert_eq!(layout::LOG_MIDDLE_RATIO, 0.64);
+        assert_open_preset(&app, LayoutPreset::Log);
+    }
+
+    #[test]
+    fn the_log_middle_split_resizes_the_log_ratio_only() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let middle = mapped_slot(&app, RatioSlot::Middle);
+        let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent { split: middle, ratio: 0.55 }));
+        assert_eq!(app.ratios[LayoutPreset::Log.index()].middle, 0.55);
+        assert_eq!(
+            app.ratios[LayoutPreset::InspectorOverDiff.index()].middle,
+            layout::STACKED_MIDDLE_RATIO
+        );
+    }
+
+    #[test]
+    fn inspector_over_diff_is_still_available() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::SetLayout(LayoutPreset::InspectorOverDiff));
         assert_open_preset(&app, LayoutPreset::InspectorOverDiff);
     }
 
@@ -3291,15 +3537,18 @@ mod tests {
     }
 
     #[test]
-    fn cycle_layout_walks_the_three_presets() {
+    fn cycle_layout_walks_the_four_presets() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        assert_eq!(app.layout, LayoutPreset::InspectorOverDiff);
-        let _ = app.update(Message::CycleLayout);
-        assert_eq!(app.layout, LayoutPreset::Stacked);
-        let _ = app.update(Message::CycleLayout);
-        assert_eq!(app.layout, LayoutPreset::Columns);
-        let _ = app.update(Message::CycleLayout);
-        assert_eq!(app.layout, LayoutPreset::InspectorOverDiff);
+        assert_eq!(app.layout, LayoutPreset::Log);
+        for expected in [
+            LayoutPreset::Columns,
+            LayoutPreset::InspectorOverDiff,
+            LayoutPreset::Stacked,
+            LayoutPreset::Log,
+        ] {
+            let _ = app.update(Message::CycleLayout);
+            assert_eq!(app.layout, expected);
+        }
     }
 
     #[test]
@@ -3317,6 +3566,8 @@ mod tests {
     #[test]
     fn resizing_the_middle_split_changes_only_that_presets_ratio() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        // Written against the InspectorOverDiff topology; Log has its own coverage.
+        let _ = app.update(Message::SetLayout(LayoutPreset::InspectorOverDiff));
         let middle = app
             .split_slots
             .iter()
@@ -3376,6 +3627,8 @@ mod tests {
     #[test]
     fn resizing_the_graph_split_respects_the_minimum_width() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        // Written against the InspectorOverDiff topology; Log has its own coverage.
+        let _ = app.update(Message::SetLayout(LayoutPreset::InspectorOverDiff));
         let graph = mapped_slot(&app, RatioSlot::Graph);
 
         let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent {
@@ -3437,6 +3690,8 @@ mod tests {
     #[test]
     fn wide_mode_expands_the_diff_split() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        // Written against the InspectorOverDiff topology; Log has its own coverage.
+        let _ = app.update(Message::SetLayout(LayoutPreset::InspectorOverDiff));
         let (_, beside_middle, _) = split_between(
             &app.panes,
             &[WorkspacePane::Graph],
@@ -3457,6 +3712,8 @@ mod tests {
     #[test]
     fn toggling_the_files_rail_hides_and_restores_it() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        // Written against the InspectorOverDiff topology; Log has its own coverage.
+        let _ = app.update(Message::SetLayout(LayoutPreset::InspectorOverDiff));
         app.ratios[LayoutPreset::InspectorOverDiff.index()].files = 0.30;
         assert!(app.files_rail_open);
 
@@ -3520,49 +3777,12 @@ mod tests {
     }
 
     #[test]
-    fn choosing_another_branch_checks_it_out() {
-        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.session_mut().state.branches = vec![branch("dev", true), branch("feature", false)];
-        app.branch_list_open = true;
-
-        let _ = app.update(Message::ChooseBranch("feature".to_string()));
-
-        assert!(!app.branch_list_open);
-        assert!(app.session_mut().state.loading);
-        assert_eq!(
-            app.session_mut().selection,
-            Some(Selection::Branch {
-                name: "feature".to_string(),
-                current: false,
-            })
-        );
-    }
-
-    #[test]
-    fn choosing_the_current_branch_only_closes_the_list() {
-        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.session_mut().state.branches = vec![branch("dev", true), branch("feature", false)];
-        app.branch_list_open = true;
-
-        let _ = app.update(Message::ChooseBranch("dev".to_string()));
-
-        assert!(!app.branch_list_open);
-        assert!(!app.session_mut().state.loading);
-        assert_eq!(
-            app.session_mut().selection,
-            Some(Selection::Branch {
-                name: "dev".to_string(),
-                current: true,
-            })
-        );
-    }
-
-    #[test]
     fn creating_a_branch_then_switches_to_it() {
         let mut app = on_branch("main", true);
         app.branch_prompt = Some(BranchPrompt::Create {
             start: "main".to_string(),
             name: "topic".to_string(),
+            checkout: true,
         });
 
         let _ = app.update(Message::ConfirmBranch);
@@ -3606,6 +3826,7 @@ mod tests {
             Some(BranchPrompt::Create {
                 start: "origin/main".to_string(),
                 name: String::new(),
+                checkout: true,
             })
         );
     }
@@ -4237,6 +4458,7 @@ mod tests {
             Some(BranchPrompt::Create {
                 start: "main".to_string(),
                 name: String::new(),
+                checkout: true,
             })
         );
         assert!(!app.session_mut().state.loading);
@@ -4319,6 +4541,7 @@ mod tests {
         app.branch_prompt = Some(BranchPrompt::Create {
             start: "feature".to_string(),
             name: "topic".to_string(),
+            checkout: true,
         });
         let _ = app.update(Message::ConfirmBranch);
         assert!(!app.session_mut().state.loading);
@@ -5374,5 +5597,123 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::HistoryQueryChanged("fork ".to_string()));
         assert_eq!(app.history_query, "fork ");
+    }
+
+    #[test]
+    fn one_click_on_a_branch_filters_the_log_and_never_checks_out() {
+        let mut app = on_branch("main", true);
+        app.session_mut().state.branches.push(branch("feature", false));
+        let _ = app.update(Message::RefClicked {
+            name: "feature".to_string(),
+            remote: false,
+        });
+        assert_eq!(app.session().branch_filter.as_deref(), Some("feature"));
+        assert!(!app.session().state.loading, "a single click must not start a checkout");
+        assert_eq!(
+            app.session().selection,
+            Some(Selection::Branch {
+                name: "feature".to_string(),
+                current: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_double_click_on_a_local_branch_checks_it_out() {
+        let mut app = on_branch("main", true);
+        app.session_mut().state.branches.push(branch("feature", false));
+        for _ in 0..2 {
+            let _ = app.update(Message::RefClicked {
+                name: "feature".to_string(),
+                remote: false,
+            });
+        }
+        assert!(app.session().state.loading, "the second click checks out");
+    }
+
+    #[test]
+    fn a_double_click_on_a_remote_only_filters() {
+        let mut app = on_branch("main", true);
+        for _ in 0..2 {
+            let _ = app.update(Message::RefClicked {
+                name: "origin/feature".to_string(),
+                remote: true,
+            });
+        }
+        assert!(!app.session().state.loading);
+        assert_eq!(app.session().branch_filter.as_deref(), Some("origin/feature"));
+    }
+
+    #[test]
+    fn the_branch_picker_sets_focus_or_a_branch_filter() {
+        use crate::log_filter::LogChoice;
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::BranchChoicePicked(LogChoice::Named("dev".into())));
+        assert_eq!(app.session().branch_filter.as_deref(), Some("dev"));
+        assert!(!app.session().focus_current_branch);
+        let _ = app.update(Message::BranchChoicePicked(LogChoice::Head));
+        assert!(app.session().focus_current_branch);
+        assert!(app.session().branch_filter.is_none());
+        let _ = app.update(Message::BranchChoicePicked(LogChoice::All));
+        assert!(!app.session().focus_current_branch);
+    }
+
+    #[test]
+    fn the_user_picker_sets_and_clears_the_author_filter() {
+        use crate::log_filter::LogChoice;
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::AuthorChoicePicked(LogChoice::Named("Ada".into())));
+        assert_eq!(app.session().author_filter.as_deref(), Some("Ada"));
+        let _ = app.update(Message::AuthorChoicePicked(LogChoice::All));
+        assert!(app.session().author_filter.is_none());
+    }
+
+    #[test]
+    fn focus_and_show_all_clear_the_branch_filter() {
+        let mut app = on_branch("main", true);
+        app.session_mut().branch_filter = Some("feature".to_string());
+        let _ = app.update(Message::ToggleFocusCurrentBranch);
+        assert!(app.session().branch_filter.is_none());
+        app.session_mut().branch_filter = Some("feature".to_string());
+        let _ = app.update(Message::ClearBranchFilter);
+        assert!(app.session().branch_filter.is_none());
+        assert!(!app.session().focus_current_branch);
+    }
+
+    #[test]
+    fn a_new_branch_can_start_from_a_remote_and_skip_checkout() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.branches = vec![
+            branch("main", true),
+            Branch {
+                name: "origin/feature".to_string(),
+                is_remote: true,
+                is_head: false,
+                tip: "abc".to_string(),
+                ahead: 0,
+                behind: 0,
+            },
+        ];
+        let _ = app.update(Message::AskCreateBranchFrom("origin/feature".to_string()));
+        let _ = app.update(Message::BranchNameChanged("feature".to_string()));
+        let _ = app.update(Message::BranchCheckoutToggled(false));
+        let _ = app.update(Message::ConfirmBranch);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(app.session().state.loading, "the create started");
+        assert!(app.session().pending_checkout.is_none(), "checkout was unticked");
+    }
+
+    #[test]
+    fn checking_out_a_remote_creates_the_tracking_branch_first() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.branches = vec![branch("main", true)];
+        let _ = app.update(Message::ContextMenuAction(
+            crate::context_menu::ContextActionKind::CheckoutRemote {
+                remote: "origin/feature/x".to_string(),
+                local: "feature/x".to_string(),
+            },
+        ));
+        assert!(app.session().state.loading);
+        assert_eq!(app.session().pending_checkout.as_deref(), Some("feature/x"));
     }
 }

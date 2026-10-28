@@ -6,8 +6,9 @@ use iced::widget::pane_grid::{self, Content};
 use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
-use super::chrome::{command_button, hairline, icon_button, pane_title, symbol_reading, Reading};
-use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
+use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+use super::commands::{can_commit, can_stash, labelled_command_buttons, placed_commands, CommandPlace};
+use super::filter_bar::filter_bar;
 use super::explorer::explorer_pane;
 use super::files_nav::files_navigator;
 use super::history::history_pane;
@@ -20,8 +21,9 @@ const HEAD_PADDING_X: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 const FILES_RAIL_WIDTH: f32 = 36.0;
 const FILES_TITLE: &str = "Explorer";
-const GRAPH_TITLE: &str = "History";
 const DIFF_TITLE: &str = "Diff";
+const PREVIOUS_FILE: &str = "‹";
+const NEXT_FILE: &str = "›";
 const COLLAPSE_FILES: &str = "⟨";
 const EXPAND_FILES: &str = "⟩";
 
@@ -56,7 +58,7 @@ pub(super) fn workspace<'a>(
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
-        LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => row![rail, grid]
+        LayoutPreset::Log | LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => row![rail, grid]
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
@@ -94,35 +96,12 @@ fn graph<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let _ = layout;
-    let commands = placed_commands(
-        selection,
-        can_commit(app),
-        can_stash(app),
-        CommandPlace::Graph,
-    );
-    let focus = app.session().focus_current_branch;
-    let focus_toggle = icon_button(
-        "◎",
-        if focus {
-            "Show all branches"
-        } else {
-            "Focus current branch"
-        },
-        "graph-focus",
-        app.tip_ready("graph-focus"),
-        Message::ToggleFocusCurrentBranch,
-        true,
-        focus,
-        tokens,
-        reading,
-    );
-    column![
-        titled_command_head_with(GRAPH_TITLE, &commands, Some(focus_toggle), selection, app, tokens, reading),
-        history_pane(app, selection, tokens, reading),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    // JetBrains keeps the log head for filters; the selection's commands sit on the
+    // Inspector head and on each row's right-click menu.
+    column![filter_bar(app, tokens, reading), history_pane(app, selection, tokens, reading)]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn inspector<'a>(
@@ -155,9 +134,38 @@ fn diff<'a>(
     } else {
         format!("{DIFF_TITLE} · {}", app.session().patches.len())
     };
+    let session = app.session();
+    let mut head = row![pane_title(&title, tokens, reading), iced::widget::horizontal_space()]
+        .spacing(COMMAND_SPACING)
+        .align_y(Alignment::Center);
+    if session.patches.len() > 1 {
+        let position = session
+            .focused_diff_path
+            .as_deref()
+            .and_then(|focused| session.patches.iter().position(|patch| patch.path == focused))
+            .map_or_else(
+                || format!("All {} files", session.patches.len()),
+                |index| format!("{}/{} files", index + 1, session.patches.len()),
+            );
+        let step = |forward: bool| session.diff_step(forward).map(Message::FocusDiffPath);
+        head = head
+            .push(step_button(PREVIOUS_FILE, step(false), tokens, reading))
+            .push(
+                text(position)
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_secondary),
+                    }),
+            )
+            .push(step_button(NEXT_FILE, step(true), tokens, reading));
+        if session.focused_diff_path.is_some() {
+            head = head.push(command_button("All files", Message::ClearDiffFocus, true, tokens, reading));
+        }
+    }
     column![
         column![
-            container(pane_title(&title, tokens, reading))
+            container(head)
                 .padding([HEAD_PADDING_Y, HEAD_PADDING_X])
                 .width(Length::Fill),
             hairline(tokens),
@@ -175,12 +183,11 @@ fn inspector_head<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let items = placed_commands(
-        selection,
-        can_commit(app),
-        can_stash(app),
-        CommandPlace::Inspector,
-    );
+    // The log head holds filters only, so the selection's branch commands join its file commands.
+    let items: Vec<_> = [CommandPlace::Graph, CommandPlace::Inspector]
+        .into_iter()
+        .flat_map(|place| placed_commands(selection, can_commit(app), can_stash(app), place))
+        .collect();
     let mut commands = row![text(context_label(selection))
         .font(reading.font)
         .size(reading.size)
@@ -189,37 +196,8 @@ fn inspector_head<'a>(
         })]
     .spacing(COMMAND_SPACING)
     .align_y(Alignment::Center);
-    for button in command_buttons(&items, selection, app, tokens, reading) {
+    for button in labelled_command_buttons(&items, selection, app, tokens, reading) {
         commands = commands.push(button);
-    }
-    column![
-        container(commands.wrap())
-            .padding([HEAD_PADDING_Y, HEAD_PADDING_X])
-            .width(Length::Fill),
-        hairline(tokens),
-    ]
-    .into()
-}
-
-/// Pane title, then the selection's commands, then `trailing` pinned at the right end.
-fn titled_command_head_with<'a>(
-    title: &'a str,
-    items: &[crate::selection::RibbonItem],
-    trailing: Option<Element<'a, Message>>,
-    selection: &Selection,
-    app: &'a GitApp,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mut commands = row![pane_title(title, tokens, reading)]
-        .spacing(COMMAND_SPACING)
-        .align_y(Alignment::Center);
-    commands = commands.push(iced::widget::horizontal_space());
-    for button in command_buttons(items, selection, app, tokens, reading) {
-        commands = commands.push(button);
-    }
-    if let Some(trailing) = trailing {
-        commands = commands.push(trailing);
     }
     column![
         container(commands.wrap())
@@ -288,7 +266,7 @@ fn collapsed_files_rail<'a>(
         .width(Length::Fill)
         .style(move |_theme: &Theme| rail_container_style(tokens))
         .into(),
-        LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => container(
+        LayoutPreset::Log | LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => container(
             column![rail_toggle(tokens, reading)]
                 .align_x(Alignment::Center)
                 .padding(2)
@@ -348,4 +326,22 @@ fn rail_button_style(
         },
         shadow: Shadow::default(),
     }
+}
+
+/// "‹" or "›" in the Diff head; disabled at either end of the file list.
+fn step_button<'a>(mark: &'static str, message: Option<Message>, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let enabled = message.is_some();
+    button(text(mark).font(reading.font).size(reading.size + 2.0))
+        .padding([0, 6])
+        .on_press_maybe(message)
+        .style(move |_theme, status| {
+            let hot = enabled && matches!(status, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed);
+            iced::widget::button::Style {
+                background: Some(Background::Color(if hot { tokens.border } else { iced::Color::TRANSPARENT })),
+                text_color: if enabled { tokens.text_primary } else { tokens.text_muted },
+                border: Border { radius: 3.0.into(), ..Border::default() },
+                shadow: Shadow::default(),
+            }
+        })
+        .into()
 }

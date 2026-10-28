@@ -12,6 +12,9 @@ pub(crate) const GRAPH_RATIO: f32 = 0.68;
 /// Graph's share of the Graph/Diff split when that split is a height. History is what you
 /// read first; the diff below it is often empty until something is selected.
 pub(crate) const STACKED_MIDDLE_RATIO: f32 = 0.62;
+/// Top (History | Inspector) share of the window height in the Log preset; the diff spans
+/// the full width underneath, as in the JetBrains Git log.
+pub(crate) const LOG_MIDDLE_RATIO: f32 = 0.64;
 /// Diff's share of Diff|Inspector when Columns places them side by side.
 pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.50;
 
@@ -56,6 +59,8 @@ pub(crate) enum WorkspacePane {
 /// Which arrangement the top bar is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutPreset {
+    /// JetBrains Git log: Files | (Graph | Inspector) over a full-width Diff.
+    Log,
     /// Files | Graph | Diff | Inspector
     Columns,
     /// Files | (Graph / Diff) | Inspector
@@ -65,22 +70,25 @@ pub(crate) enum LayoutPreset {
 }
 
 impl LayoutPreset {
-    pub(crate) const DEFAULT: Self = Self::InspectorOverDiff;
+    pub(crate) const DEFAULT: Self = Self::Log;
+    pub(crate) const COUNT: usize = 4;
 
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Columns => 0,
             Self::InspectorOverDiff => 1,
             Self::Stacked => 2,
+            Self::Log => 3,
         }
     }
 
     /// Next preset in the top-bar cycle (Ctrl+Shift+L).
     pub(crate) fn next(self) -> Self {
         match self {
+            Self::Log => Self::Columns,
             Self::Columns => Self::InspectorOverDiff,
             Self::InspectorOverDiff => Self::Stacked,
-            Self::Stacked => Self::Columns,
+            Self::Stacked => Self::Log,
         }
     }
 }
@@ -103,6 +111,7 @@ impl LayoutRatios {
             files: FILES_RATIO,
             graph: GRAPH_RATIO,
             middle: match preset {
+                LayoutPreset::Log => LOG_MIDDLE_RATIO,
                 LayoutPreset::Columns => COLUMNS_MIDDLE_RATIO,
                 LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => STACKED_MIDDLE_RATIO,
             },
@@ -135,11 +144,12 @@ impl LayoutRatios {
     }
 }
 
-pub(crate) fn default_ratios() -> [LayoutRatios; 3] {
+pub(crate) fn default_ratios() -> [LayoutRatios; LayoutPreset::COUNT] {
     [
         LayoutRatios::for_preset(LayoutPreset::Columns),
         LayoutRatios::for_preset(LayoutPreset::InspectorOverDiff),
         LayoutRatios::for_preset(LayoutPreset::Stacked),
+        LayoutRatios::for_preset(LayoutPreset::Log),
     ]
 }
 
@@ -178,6 +188,24 @@ fn configuration(
     show_files: bool,
     show_inspector: bool,
 ) -> Configuration<WorkspacePane> {
+    if preset == LayoutPreset::Log {
+        let top = if show_inspector {
+            split(
+                Axis::Vertical,
+                ratios.graph,
+                Configuration::Pane(WorkspacePane::Graph),
+                Configuration::Pane(WorkspacePane::Inspector),
+            )
+        } else {
+            Configuration::Pane(WorkspacePane::Graph)
+        };
+        let centre = split(Axis::Horizontal, ratios.middle, top, Configuration::Pane(WorkspacePane::Diff));
+        return if show_files {
+            split(Axis::Vertical, ratios.files, Configuration::Pane(WorkspacePane::Files), centre)
+        } else {
+            centre
+        };
+    }
     let history = match preset {
         LayoutPreset::Columns => {
             if show_inspector {
@@ -191,7 +219,7 @@ fn configuration(
                 Configuration::Pane(WorkspacePane::Diff)
             }
         }
-        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
+        LayoutPreset::Log | LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => split(
             middle_axis(preset),
             ratios.middle,
             Configuration::Pane(WorkspacePane::Graph),
@@ -206,7 +234,7 @@ fn configuration(
             Configuration::Pane(WorkspacePane::Graph),
             history,
         ),
-        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => {
+        LayoutPreset::Log | LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => {
             if show_inspector {
                 split(
                     outer_axis(preset),
@@ -234,7 +262,7 @@ fn configuration(
 
 fn outer_axis(preset: LayoutPreset) -> Axis {
     match preset {
-        LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => Axis::Vertical,
+        LayoutPreset::Log | LayoutPreset::Columns | LayoutPreset::InspectorOverDiff => Axis::Vertical,
         LayoutPreset::Stacked => Axis::Horizontal,
     }
 }
@@ -242,7 +270,7 @@ fn outer_axis(preset: LayoutPreset) -> Axis {
 fn middle_axis(preset: LayoutPreset) -> Axis {
     match preset {
         LayoutPreset::Columns => Axis::Vertical,
-        LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => Axis::Horizontal,
+        LayoutPreset::Log | LayoutPreset::InspectorOverDiff | LayoutPreset::Stacked => Axis::Horizontal,
     }
 }
 
@@ -276,6 +304,10 @@ fn slot_for(left: &[WorkspacePane], right: &[WorkspacePane]) -> Option<RatioSlot
         return Some(RatioSlot::Files);
     }
     if left == [WorkspacePane::Graph] && right == [WorkspacePane::Diff] {
+        return Some(RatioSlot::Middle);
+    }
+    // Log preset: the (History | Inspector) row against the full-width Diff.
+    if left == [WorkspacePane::Graph, WorkspacePane::Inspector] && right == [WorkspacePane::Diff] {
         return Some(RatioSlot::Middle);
     }
     if left == [WorkspacePane::Diff] && right == [WorkspacePane::Inspector] {

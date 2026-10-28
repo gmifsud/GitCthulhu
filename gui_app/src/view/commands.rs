@@ -1,7 +1,8 @@
 //! Turns a [`RibbonCommand`] into the [`Message`] the window already handles.
 //!
 //! [`crate::selection::ribbon_commands`] decides which commands a selection
-//! allows. This module only places them — as compact icon buttons.
+//! allows. This module only places them: icon buttons in the top bar, labelled ones on the
+//! Inspector head.
 
 use crate::app::{GitApp, Message};
 use crate::changes::marked_paths;
@@ -11,7 +12,7 @@ use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::Element;
 
-use super::chrome::{icon_button, Reading};
+use super::chrome::{icon_button, labelled_button, Reading};
 
 /// Where a command is drawn. The rules stay in `ribbon_commands`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +122,31 @@ pub(super) fn command_buttons(
                 tip_key,
                 tip_ready,
                 message,
+                enabled,
+                item.primary,
+                tokens,
+                reading,
+            )
+        })
+        .collect()
+}
+
+/// The same commands as text buttons, "mark Label", for the Inspector head: a word says
+/// more than a glyph, and that head has the width.
+pub(super) fn labelled_command_buttons(
+    items: &[RibbonItem],
+    selection: &Selection,
+    app: &GitApp,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Vec<Element<'static, Message>> {
+    items
+        .iter()
+        .map(|item| {
+            let enabled = item.enabled && !app.session().state.loading;
+            labelled_button(
+                format!("{} {}", command_mark(item.command), item.label),
+                command_message(item.command, selection, app),
                 enabled,
                 item.primary,
                 tokens,

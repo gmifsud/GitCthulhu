@@ -1,35 +1,41 @@
-//! Right inspector: working-tree staging stacked above commit file list.
+//! Right inspector, after the JetBrains Git log.
+//!
+//! A commit, tag or stash shows its changed files as a folder tree on top and its details
+//! below. Anything else (the current branch, a working-tree file) shows the working tree.
 
 use crate::app::{GitApp, Message};
 use crate::changes::change_sections;
+use crate::dates::full_date;
+use crate::ref_pills::refs_at;
+use crate::ref_tree::{ref_rows, RefRow};
 use crate::selection::{short_hash, Selection};
 use crate::theme::DesignTokens;
-use core_domain::RepoStatus;
-use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
-use std::time::{SystemTime, UNIX_EPOCH};
+use core_domain::{Commit, RepoStatus};
+use iced::widget::{column, container, row, scrollable, text, Space};
+use iced::{Alignment, Element, Length};
 
 use super::changes::wip_working_tree_block;
-use super::chrome::{command_button, Reading};
-use super::history::relative_age;
+use super::chrome::{glyph, hairline, symbol_reading, Reading, FOLD_CLOSED, FOLD_OPEN};
+use super::explorer::{label_text, tree_row};
 use super::patch::patch_stats;
-use iced::widget::button::Status;
+
+/// Collapse-state scope of the changed-files tree, shared with the branch tree's store.
+const FILES_SCOPE: &str = "files";
+/// Changed files take three parts of the height, details two.
+const FILES_PORTION: u16 = 3;
+const DETAILS_PORTION: u16 = 2;
+const FOLDER_MARK: &str = "▭";
 
 pub(crate) fn show_wip_block(status: Option<&RepoStatus>) -> bool {
     status.is_some_and(|status| !change_sections(status).is_empty())
 }
 
-pub(crate) fn show_commit_block(selection: &Selection) -> bool {
-    matches!(selection, Selection::Commit { .. })
-}
-
-fn show_tag_block(selection: &Selection) -> bool {
-    matches!(selection, Selection::Tag { .. })
-}
-
-fn show_stash_block(selection: &Selection) -> bool {
-    matches!(selection, Selection::Stash { .. })
+/// A selection that names one object in history: its files and details replace the working tree.
+fn shows_object(selection: &Selection) -> bool {
+    matches!(
+        selection,
+        Selection::Commit { .. } | Selection::Tag { .. } | Selection::Stash { .. }
+    )
 }
 
 pub(crate) fn files_navigator<'a>(
@@ -38,278 +44,193 @@ pub(crate) fn files_navigator<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    if shows_object(selection) {
+        return column![
+            container(scrollable(changed_files_tree(app, tokens, reading)))
+                .width(Length::Fill)
+                .height(Length::FillPortion(FILES_PORTION)),
+            hairline(tokens),
+            container(scrollable(details(app, selection, tokens, reading)))
+                .width(Length::Fill)
+                .height(Length::FillPortion(DETAILS_PORTION)),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    }
     let status = app.session().state.current_status.as_ref();
-    let wip = show_wip_block(status);
-    let commit = show_commit_block(selection);
-    let tag = show_tag_block(selection);
-    let stash = show_stash_block(selection);
-
-    if !wip && !commit && !tag && !stash {
-        return empty_navigator_hint(tokens, reading);
+    if !show_wip_block(status) {
+        return muted_note("Working tree clean. Select a commit to see its files.", tokens, reading);
     }
-
-    let mut body = column![].spacing(8).width(Length::Fill);
-
-    // The stash's own files come first: it is what the user picked. The working tree follows.
-    if stash {
-        if let Some(meta) = stash_meta(selection, tokens, reading) {
-            body = body.push(meta);
-        }
-        body = body.push(commit_files_block(app, tokens, reading));
-    }
-
-    if wip {
-        body = body.push(wip_working_tree_block(app, selection, tokens, reading));
-    }
-
-    if commit {
-        if let Some(meta) = commit_meta(app, selection, tokens, reading) {
-            body = body.push(meta);
-        }
-        body = body.push(commit_files_block(app, tokens, reading));
-    } else if tag {
-        if let Some(meta) = tag_meta(selection, tokens, reading) {
-            body = body.push(meta);
-        }
-        body = body.push(commit_files_block(app, tokens, reading));
-    }
-
-    container(scrollable(body))
+    container(scrollable(wip_working_tree_block(app, selection, tokens, reading)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
 
-fn stash_meta<'a>(
-    selection: &Selection,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Option<Element<'a, Message>> {
-    let Selection::Stash { index, message } = selection else {
-        return None;
-    };
-    Some(
-        container(
-            column![
-                text(message.clone())
-                    .font(reading.font)
-                    .size(reading.size)
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_primary),
-                    }),
-                text(format!("stash@{{{index}}} · tracked changes against the commit it was taken on"))
-                    .font(reading.font)
-                    .size((reading.size - 2.0).max(11.0))
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_muted),
-                    }),
-            ]
-            .spacing(4),
-        )
-        .padding([0, 12])
-        .into(),
-    )
+fn muted_note<'a>(note: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    container(label_text(note, tokens.text_muted, reading))
+        .padding([8, 12])
+        .width(Length::Fill)
+        .into()
 }
 
-fn empty_navigator_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    container(
-        text("Select a commit or make a change.")
-            .font(reading.font)
-            .size(reading.size)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_muted),
-            }),
-    )
-    .padding([12, 12])
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
-}
-
-fn commit_meta<'a>(
-    app: &'a GitApp,
-    selection: &Selection,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Option<Element<'a, Message>> {
-    let Selection::Commit { id } = selection else {
-        return None;
-    };
-    let commit = app.session().state.commits.iter().find(|commit| &commit.id == id)?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(commit.timestamp);
-    let meta = format!(
-        "{} · {} · {}",
-        short_hash(&commit.id),
-        commit.author,
-        relative_age(now, commit.timestamp)
-    );
-    Some(
-        container(
-            column![
-                text(commit.message.clone())
-                    .font(reading.font)
-                    .size(reading.size)
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_primary),
-                    }),
-                text(meta)
-                    .font(reading.font)
-                    .size((reading.size - 2.0).max(11.0))
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_muted),
-                    }),
-            ]
-            .spacing(4),
-        )
-        .padding([0, 12])
-        .into(),
-    )
-}
-
-fn tag_meta<'a>(
-    selection: &Selection,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Option<Element<'a, Message>> {
-    let Selection::Tag { name, .. } = selection else {
-        return None;
-    };
-    Some(
-        container(
-            text(name.clone())
-                .font(reading.font)
-                .size(reading.size)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_primary),
-                }),
-        )
-        .padding([0, 12])
-        .into(),
-    )
-}
-
-pub(crate) fn commit_files_block<'a>(
-    app: &'a GitApp,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mut block = column![].spacing(2).padding([4, 12]);
-    if app.session().patch_pending {
-        return block
-            .push(
-                text("Loading files…")
-                    .font(reading.font)
-                    .size(reading.size)
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_muted),
-                    }),
-            )
+/// "N files  +a −r", then the files folded into folders, each with its line counts.
+fn changed_files_tree<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let session = app.session();
+    if session.patch_pending {
+        return muted_note("Loading files…", tokens, reading);
+    }
+    if let Some(error) = &session.patch_error {
+        return container(label_text(error, tokens.accent_primary, reading))
+            .padding([8, 12])
             .into();
     }
-    if let Some(error) = &app.session().patch_error {
-        return block
-            .push(
-                text(error.clone())
-                    .font(reading.font)
-                    .size(reading.size)
-                    .style(move |_| text::Style {
-                        color: Some(tokens.accent_primary),
-                    }),
-            )
-            .into();
-    }
-    if app.session().patches.is_empty() {
-        return block
-            .push(
-                text("No files in this commit")
-                    .font(reading.font)
-                    .size(reading.size)
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_muted),
-                    }),
-            )
-            .into();
+    if session.patches.is_empty() {
+        return muted_note("No files in this commit", tokens, reading);
     }
 
-    let (total_added, total_removed) = app.session().patches.iter().fold((0, 0), |(a, r), patch| {
+    let (total_added, total_removed) = session.patches.iter().fold((0, 0), |(a, r), patch| {
         let (added, removed) = patch_stats(patch);
         (a + added, r + removed)
     });
-    let title = format!(
-        "Files changed ({})  +{total_added} −{total_removed}",
-        app.session().patches.len()
-    );
-    let mut heading = row![text(title)
-        .font(reading.font)
-        .size((reading.size - 2.0).max(11.0))
-        .style(move |_| text::Style {
-            color: Some(tokens.text_muted),
-        })]
-    .spacing(8)
+    let count = session.patches.len();
+    let heading = row![
+        label_text(
+            &format!("{count} {}", if count == 1 { "file" } else { "files" }),
+            tokens.text_secondary,
+            reading
+        ),
+        label_text(&format!("+{total_added}"), tokens.added, reading),
+        label_text(&format!("−{total_removed}"), tokens.removed, reading),
+    ]
+    .spacing(6)
     .align_y(Alignment::Center);
-    if app.session().focused_diff_path.is_some() {
-        heading = heading.push(iced::widget::horizontal_space()).push(
-            command_button("All files", Message::ClearDiffFocus, true, tokens, reading),
-        );
-    }
-    block = block.push(heading);
 
-    for patch in &app.session().patches {
-        let (added, removed) = patch_stats(patch);
-        let focused = app.session().focused_diff_path.as_deref() == Some(patch.path.as_str());
-        let stats = if patch.binary {
-            "binary".to_string()
-        } else {
-            format!("+{added} −{removed}")
-        };
-        let path = patch.path.clone();
-        block = block.push(
-            button(
+    let mut tree = column![container(heading).padding([4, 8])].spacing(0).padding([2, 4]);
+    let paths = session.patches.iter().map(|patch| patch.path.as_str());
+    let sym = symbol_reading(&reading);
+    for data in ref_rows(FILES_SCOPE, paths, "", |key| session.ref_folder_open(key)) {
+        tree = tree.push(match data {
+            RefRow::Folder { key, label, depth, open, leaves } => tree_row(
+                depth,
+                Some(text(if open { FOLD_OPEN } else { FOLD_CLOSED }).font(sym.font).size(reading.size).into()),
+                Some(glyph(FOLDER_MARK, reading.size, tokens.text_muted, &reading)),
                 row![
-                    text(patch.path.clone())
-                        .font(reading.mono)
-                        .size((reading.size - 2.0).max(11.0))
-                        .wrapping(Wrapping::None)
-                        .width(Length::Fill),
-                    text(stats)
-                        .font(reading.mono)
-                        .size((reading.size - 2.0).max(11.0))
-                        .style(move |_| text::Style {
-                            color: Some(if added > 0 && removed == 0 {
-                                tokens.added
-                            } else if removed > 0 && added == 0 {
-                                tokens.removed
-                            } else {
-                                tokens.text_muted
-                            }),
-                        }),
+                    label_text(&label, tokens.text_secondary, reading),
+                    label_text(&leaves.to_string(), tokens.text_muted, reading),
                 ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            )
-            .padding([2, 4])
-            .width(Length::Fill)
-            .on_press(Message::FocusDiffPath(path))
-            .style(move |_theme, status| {
-                let hot = matches!(status, Status::Hovered | Status::Pressed);
-                iced::widget::button::Style {
-                    background: Some(Background::Color(if focused || hot {
-                        tokens.border
-                    } else {
-                        Color::TRANSPARENT
-                    })),
-                    text_color: tokens.text_secondary,
-                    border: Border::default(),
-                    shadow: Shadow::default(),
+                .spacing(6)
+                .into(),
+                false,
+                Message::ToggleRefFolder(key),
+                None,
+                tokens,
+            ),
+            RefRow::Leaf { name, label, depth } => {
+                let patch = session.patches.iter().find(|patch| patch.path == name);
+                let (added, removed) = patch.map(patch_stats).unwrap_or((0, 0));
+                let binary = patch.is_some_and(|patch| patch.binary);
+                let focused = session.focused_diff_path.as_deref() == Some(name.as_str());
+                let mut line = row![label_text(&label, tokens.text_primary, reading), Space::with_width(Length::Fill)]
+                    .spacing(6)
+                    .align_y(Alignment::Center);
+                if binary {
+                    line = line.push(label_text("binary", tokens.text_muted, reading));
+                } else {
+                    if added > 0 {
+                        line = line.push(label_text(&format!("+{added}"), tokens.added, reading));
+                    }
+                    if removed > 0 {
+                        line = line.push(label_text(&format!("−{removed}"), tokens.removed, reading));
+                    }
                 }
-            }),
-        );
+                tree_row(depth, None, None, line.into(), focused, Message::FocusDiffPath(name), None, tokens)
+            }
+        });
     }
+    tree.into()
+}
 
-    block.into()
+/// Subject, hash, author, date, parents and refs, as the JetBrains details pane lists them.
+fn details<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let session = app.session();
+    let commit_id = match selection {
+        Selection::Commit { id } => Some(id.as_str()),
+        Selection::Tag { commit_id, .. } => Some(commit_id.as_str()),
+        _ => None,
+    };
+    let commit = commit_id.and_then(|id| session.state.commits.iter().find(|commit| commit.id == id));
+    let mut body = column![].spacing(4).padding([8, 12]).width(Length::Fill);
+
+    match selection {
+        Selection::Stash { index, message } => {
+            body = body
+                .push(subject(message, tokens, reading))
+                .push(field("Stash", format!("stash@{{{index}}}"), tokens, reading))
+                .push(label_text("Tracked changes against the commit it was taken on.", tokens.text_muted, reading));
+            return body.into();
+        }
+        Selection::Tag { name, .. } => {
+            body = body.push(field("Tag", name.clone(), tokens, reading));
+        }
+        _ => {}
+    }
+    let Some(commit) = commit else {
+        let id = commit_id.unwrap_or_default();
+        return body
+            .push(field("Commit", id.to_string(), tokens, reading))
+            .push(label_text("Not in the loaded history.", tokens.text_muted, reading))
+            .into();
+    };
+    body = body.push(subject(&commit.message, tokens, reading));
+    for (label, value) in commit_fields(commit) {
+        body = body.push(field(label, value, tokens, reading));
+    }
+    let refs: Vec<String> = refs_at(&commit.id, &session.state.branches, &session.state.tags, &app.worktree_catalogue)
+        .into_iter()
+        .map(|pill| pill.label)
+        .collect();
+    if !refs.is_empty() {
+        body = body.push(field("Refs", refs.join(", "), tokens, reading));
+    }
+    body.into()
+}
+
+/// The labelled lines of the details pane, in display order. Pure, for the tests.
+fn commit_fields(commit: &Commit) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("Commit", commit.id.clone()),
+        ("Author", commit.author.clone()),
+        ("Date", full_date(commit.timestamp)),
+    ];
+    if !commit.parent_ids.is_empty() {
+        let label = if commit.parent_ids.len() > 1 { "Parents" } else { "Parent" };
+        let parents: Vec<&str> = commit.parent_ids.iter().map(|id| short_hash(id)).collect();
+        fields.push((label, parents.join(", ")));
+    }
+    fields
+}
+
+fn subject<'a>(message: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    text(message.to_string())
+        .font(reading.font)
+        .size(reading.size + 1.0)
+        .style(move |_| text::Style {
+            color: Some(tokens.text_primary),
+        })
+        .into()
+}
+
+/// "Label  value" on one line; long values clip. Copy hash lives on the commit's right-click menu.
+fn field<'a>(label: &'static str, value: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    row![
+        container(label_text(label, tokens.text_muted, reading)).width(Length::Fixed(56.0)),
+        container(label_text(&value, tokens.text_secondary, reading)).width(Length::Fill).clip(true),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 #[cfg(test)]
@@ -349,13 +270,30 @@ mod tests {
     }
 
     #[test]
-    fn commit_block_for_commit_selection_only() {
-        assert!(show_commit_block(&Selection::Commit {
-            id: "abc".into()
-        }));
-        assert!(!show_commit_block(&Selection::Branch {
-            name: "main".into(),
-            current: true,
-        }));
+    fn only_history_objects_replace_the_working_tree() {
+        assert!(shows_object(&Selection::Commit { id: "abc".into() }));
+        assert!(shows_object(&Selection::Tag { name: "v1".into(), commit_id: "abc".into() }));
+        assert!(shows_object(&Selection::Stash { index: 0, message: "wip".into() }));
+        assert!(!shows_object(&Selection::Branch { name: "main".into(), current: false }));
+    }
+
+    #[test]
+    fn details_list_hash_author_date_and_parents() {
+        let commit = Commit {
+            id: "0123456789abcdef".into(),
+            parent_ids: vec!["aaaaaaaaaa".into(), "bbbbbbbbbb".into()],
+            author: "Ada".into(),
+            message: "Merge".into(),
+            timestamp: 1_793_200_680,
+        };
+        assert_eq!(
+            commit_fields(&commit),
+            vec![
+                ("Commit", "0123456789abcdef".to_string()),
+                ("Author", "Ada".to_string()),
+                ("Date", "28 Oct 2026 15:18 UTC".to_string()),
+                ("Parents", "aaaaaaa, bbbbbbb".to_string()),
+            ]
+        );
     }
 }
