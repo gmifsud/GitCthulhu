@@ -63,56 +63,6 @@ pub(crate) struct ExplorerCollapsed {
     pub tags: bool,
 }
 
-/// Relative height shares for open Explorer sections (`FillPortion` weights).
-///
-/// Dragging the grip under a section raises or lowers that section's weight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ExplorerWeights {
-    pub local: u16,
-    pub remote: u16,
-    pub worktrees: u16,
-    pub stashes: u16,
-    pub tags: u16,
-}
-
-impl Default for ExplorerWeights {
-    fn default() -> Self {
-        Self {
-            local: 2,
-            remote: 2,
-            worktrees: 2,
-            stashes: 1,
-            tags: 1,
-        }
-    }
-}
-
-impl ExplorerWeights {
-    const MIN: u16 = 1;
-    const MAX: u16 = 12;
-
-    pub(crate) fn get(self, section: ExplorerSection) -> u16 {
-        match section {
-            ExplorerSection::Local => self.local,
-            ExplorerSection::Remote => self.remote,
-            ExplorerSection::Worktrees => self.worktrees,
-            ExplorerSection::Stashes => self.stashes,
-            ExplorerSection::Tags => self.tags,
-        }
-        .clamp(Self::MIN, Self::MAX)
-    }
-
-    pub(crate) fn set(&mut self, section: ExplorerSection, weight: u16) {
-        let weight = weight.clamp(Self::MIN, Self::MAX);
-        match section {
-            ExplorerSection::Local => self.local = weight,
-            ExplorerSection::Remote => self.remote = weight,
-            ExplorerSection::Worktrees => self.worktrees = weight,
-            ExplorerSection::Stashes => self.stashes = weight,
-            ExplorerSection::Tags => self.tags = weight,
-        }
-    }
-}
 
 /// Everything bound to one open worktree path.
 pub(crate) struct WorktreeSession {
@@ -141,8 +91,14 @@ pub(crate) struct WorktreeSession {
     pub(crate) focus_current_branch: bool,
     /// Which Explorer accordion sections are currently collapsed.
     pub(crate) explorer_collapsed: ExplorerCollapsed,
-    /// Height shares for open Explorer sections (user-adjustable).
-    pub(crate) explorer_weights: ExplorerWeights,
+    /// Branch-tree folders the user opened or closed, relative to their default
+    /// (local folders and each remote start open; folders inside a remote start closed).
+    pub(crate) ref_folders_toggled: HashSet<String>,
+    /// Log filtered to this branch (local or remote name) after a click in the branch tree.
+    /// `focus_current_branch` takes precedence.
+    pub(crate) branch_filter: Option<String>,
+    /// Log narrowed to commits by this author (the filter bar's User ▾).
+    pub(crate) author_filter: Option<String>,
 }
 
 impl WorktreeSession {
@@ -168,7 +124,9 @@ impl WorktreeSession {
             pending_checkout: None,
             focus_current_branch: false,
             explorer_collapsed: ExplorerCollapsed::default(),
-            explorer_weights: ExplorerWeights::default(),
+            ref_folders_toggled: HashSet::new(),
+            branch_filter: None,
+            author_filter: None,
         }
     }
 
@@ -269,6 +227,36 @@ impl WorktreeSession {
             &self.state.tags,
             self.state.current_status.as_ref(),
         )
+    }
+
+    /// Whether a branch-tree folder is open: its default, flipped when the user toggled it.
+    pub(crate) fn ref_folder_open(&self, key: &str) -> bool {
+        // "remote/<name>" is one segment deep; anything deeper inside a remote starts closed.
+        let default_open = !key.starts_with("remote/") || key.matches('/').count() <= 1;
+        default_open != self.ref_folders_toggled.contains(key)
+    }
+
+    /// The diff file one step after (or before) the focused one, in patch order. With no file
+    /// focused, forward is the first and back the last. `None` at either end.
+    pub(crate) fn diff_step(&self, forward: bool) -> Option<String> {
+        let paths: Vec<&str> = self.patches.iter().map(|patch| patch.path.as_str()).collect();
+        let at = self
+            .focused_diff_path
+            .as_deref()
+            .and_then(|focused| paths.iter().position(|path| *path == focused));
+        let next = match (at, forward) {
+            (None, true) => Some(0),
+            (None, false) => paths.len().checked_sub(1),
+            (Some(index), true) => Some(index + 1),
+            (Some(index), false) => index.checked_sub(1),
+        };
+        next.and_then(|index| paths.get(index)).map(|path| (*path).to_string())
+    }
+
+    pub(crate) fn toggle_ref_folder(&mut self, key: &str) {
+        if !self.ref_folders_toggled.remove(key) {
+            self.ref_folders_toggled.insert(key.to_string());
+        }
     }
 
     pub(crate) fn local_branch(&self, name: &str) -> Option<&Branch> {
@@ -382,12 +370,31 @@ mod tests {
     }
 
     #[test]
-    fn explorer_weights_clamp_when_set() {
-        let mut weights = ExplorerWeights::default();
-        weights.set(ExplorerSection::Local, 0);
-        assert_eq!(weights.get(ExplorerSection::Local), 1);
-        weights.set(ExplorerSection::Worktrees, 99);
-        assert_eq!(weights.get(ExplorerSection::Worktrees), 12);
+    fn ref_folders_default_open_locally_and_closed_inside_a_remote() {
+        let mut session = WorktreeSession::test_stub();
+        assert!(session.ref_folder_open("local/feature"));
+        assert!(session.ref_folder_open("remote/origin"));
+        assert!(!session.ref_folder_open("remote/origin/EYC"));
+        session.toggle_ref_folder("remote/origin/EYC");
+        assert!(session.ref_folder_open("remote/origin/EYC"));
+        session.toggle_ref_folder("local/feature");
+        assert!(!session.ref_folder_open("local/feature"));
+    }
+
+    #[test]
+    fn diff_step_walks_the_files_and_stops_at_the_ends() {
+        let mut session = WorktreeSession::test_stub();
+        session.patches = ["a", "b", "c"]
+            .into_iter()
+            .map(|path| core_domain::Patch { path: path.into(), hunks: vec![], binary: false })
+            .collect();
+        assert_eq!(session.diff_step(true).as_deref(), Some("a"));
+        assert_eq!(session.diff_step(false).as_deref(), Some("c"));
+        session.focused_diff_path = Some("b".into());
+        assert_eq!(session.diff_step(true).as_deref(), Some("c"));
+        assert_eq!(session.diff_step(false).as_deref(), Some("a"));
+        session.focused_diff_path = Some("c".into());
+        assert_eq!(session.diff_step(true), None);
     }
 
     fn dirty_session() -> WorktreeSession {

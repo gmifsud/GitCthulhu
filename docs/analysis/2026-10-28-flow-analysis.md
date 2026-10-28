@@ -163,3 +163,25 @@ Principles:
 | #2 Search | Not merged to `main` (fixed on the branch yesterday) | See D1 |
 | #3/#4 Graph space | 260 px gutter + unbounded lanes + iced wrap defect | Gutter removed, lanes capped at 10, header clamped, one pill + "+N", History 62 % of the split |
 | #5 Focus toggle | Last header cell, clipped by overflow | Moved to the History toolbar |
+
+## 9. JetBrains Log pass
+
+Request: replicate the JetBrains Git log, use the space better, make the buttons useful, and allow branching from a remote and managing worktrees from the right-click menu.
+
+![JetBrains-style log](img/2026-10-28-jetbrains-log.png)
+
+| Report | Root cause | Fix |
+|---|---|---|
+| Cannot branch from a remote | `confirm_branch` accepted only local branch names as a start point, so a remote start failed with "That branch is no longer there" | `start_point_exists` accepts HEAD, local and remote branches, tags, stashes and loaded commits. The dialog has a Checkout branch box |
+| No right-click menu for remotes or worktrees | `ContextTarget` covered commits and local branches only | Targets for remote branches, tags, stashes and worktrees, each with its own menu (§ CONTEXT "Branch tree") |
+| A click in the Explorer checked a branch out | The row sent `ChooseBranch` | Click filters the log to that branch; a double-click (400 ms, decided in the reducer) checks out a local branch |
+| Space not used well | A three-column preset with a stacked Inspector over the Diff; terminal open by default; relative "5w" dates | `LayoutPreset::Log` is the default: tree, History and Inspector on top, and a full-width Diff below. Terminal collapsed. Full dates |
+| Unhelpful buttons | Glyph-only buttons on the History head | The History head is a filter bar (text, Branch ▾, User ▾, current-branch toggle). Selection commands moved to the Inspector head as labelled buttons, and they are on every right-click menu too |
+| Inspector showed the working tree for a commit | The working tree block was drawn whenever the tree was dirty | Commit, tag and stash show a changed-files tree and details. The working tree only appears for working-tree selections |
+
+Backlog effect: item 6 is done, item 4 is done for commits, tags and stashes (a branch tip with its ahead/behind lists is still open), and item 7 is done for the Inspector head (palette actions are still open).
+
+Assumptions:
+- **Dates are shown in UTC.** `gui_app` has no time-zone source, and adding `chrono` for local time is left as its own decision.
+- **The User ▾ list only covers loaded commits.** It inherits the loaded-history limit (R4).
+

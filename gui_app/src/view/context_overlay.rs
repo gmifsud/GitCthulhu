@@ -27,6 +27,7 @@ pub(super) fn context_menu_overlay<'a>(
     let actions = context_actions(
         &menu.target,
         &app.worktree_catalogue,
+        &session.state.branches,
         head.as_deref(),
         session.state.loading,
     );

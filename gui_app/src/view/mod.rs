@@ -6,6 +6,7 @@ mod commands;
 mod confirm;
 mod context_overlay;
 mod explorer;
+mod filter_bar;
 mod history;
 mod palette;
 mod patch;

@@ -413,6 +413,22 @@ pub(super) fn accent_button<'a>(
         .into()
 }
 
+/// Bordered text button with an owned label; `accent` fills it for the primary command.
+pub(super) fn labelled_button<'a>(
+    label: String,
+    message: Message,
+    enabled: bool,
+    accent: bool,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    button(text(label).font(reading.font).size(reading.size))
+        .padding([2, 6])
+        .on_press_maybe(enabled.then_some(message))
+        .style(move |_theme, status| bordered_button(tokens, status, enabled, accent))
+        .into()
+}
+
 fn bordered_button(
     tokens: DesignTokens,
     status: Status,
