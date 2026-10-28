@@ -9,8 +9,9 @@ use iced::widget::pane_grid::{Axis, Configuration, Node, Split, State};
 pub(crate) const FILES_RATIO: f32 = 0.22;
 /// Of the remainder, share given to Graph (+ Diff) versus the Inspector.
 pub(crate) const GRAPH_RATIO: f32 = 0.68;
-/// Graph's share of the Graph/Diff split when that split is a height.
-pub(crate) const STACKED_MIDDLE_RATIO: f32 = 0.48;
+/// Graph's share of the Graph/Diff split when that split is a height. History is what you
+/// read first; the diff below it is often empty until something is selected.
+pub(crate) const STACKED_MIDDLE_RATIO: f32 = 0.62;
 /// Diff's share of Diff|Inspector when Columns places them side by side.
 pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.50;
 

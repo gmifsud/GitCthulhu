@@ -1566,8 +1566,14 @@ impl GitApp {
                     return Task::none();
                 }
                 if let Selection::Stash { index, message } = session.shown_selection() {
+                    let listed = session
+                        .state
+                        .stashes
+                        .iter()
+                        .find(|stash| stash.index == index && stash.message == message)
+                        .cloned();
                     self.confirm_discard = None;
-                    self.confirm_drop = Some(Stash { index, message });
+                    self.confirm_drop = listed;
                 }
                 Task::none()
             }
@@ -2742,16 +2748,17 @@ impl GitApp {
         let Some(hunk) = session.hunk_at(&path, index) else {
             return Task::none();
         };
+        // Hunk edits act on the working tree and index. A commit's or stash's hunks must never
+        // reach them: reverse-applying HEAD's own hunk would silently undo that commit on disk.
+        let place = match session.selection.as_ref() {
+            Some(Selection::File { place, .. }) => *place,
+            _ => return Task::none(),
+        };
+        if stage && place == FileDisposition::Staged {
+            return Task::none();
+        }
         let repo = session.adapter.clone();
         let session_path = session.path.clone();
-        let place = session
-            .selection
-            .as_ref()
-            .and_then(|selection| match selection {
-                Selection::File { place, .. } => Some(*place),
-                _ => None,
-            })
-            .unwrap_or(FileDisposition::Unstaged);
         self.session_mut().state.loading = true;
         self.error = None;
         if stage {
@@ -3261,7 +3268,7 @@ mod tests {
         assert!(app.files_rail_open);
         assert_eq!(layout::GRAPH_RATIO, 0.68);
         assert_eq!(layout::COLUMNS_MIDDLE_RATIO, 0.50);
-        assert_eq!(layout::STACKED_MIDDLE_RATIO, 0.48);
+        assert_eq!(layout::STACKED_MIDDLE_RATIO, 0.62);
         assert_eq!(layout::FILES_RATIO, 0.22);
         assert_eq!(layout::MIN_GRAPH_RATIO, 0.50);
         assert_open_preset(&app, LayoutPreset::InspectorOverDiff);
@@ -4121,6 +4128,7 @@ mod tests {
         app.session_mut().state.stashes = vec![Stash {
             index: 0,
             message: "WIP on dev".to_string(),
+            commit_id: "5ta5h0".to_string(),
         }];
         app.session_mut().selection = Some(Selection::Stash {
             index: 0,
@@ -4137,15 +4145,71 @@ mod tests {
     }
 
     #[test]
+    fn hunk_edits_refuse_anything_but_a_working_tree_file() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().patches = vec![core_domain::Patch {
+            path: "a.txt".to_string(),
+            hunks: vec![core_domain::Hunk {
+                header: "@@ -1 +1 @@".to_string(),
+                lines: Vec::new(),
+            }],
+            binary: false,
+        }];
+        app.session_mut().selection = Some(Selection::Commit {
+            id: "aaaaaaa1".to_string(),
+        });
+        let _ = app.update(Message::DiscardHunk {
+            path: "a.txt".to_string(),
+            index: 0,
+        });
+        assert!(!app.session().state.loading, "a commit's hunk reached the working tree");
+        let _ = app.update(Message::StageHunk {
+            path: "a.txt".to_string(),
+            index: 0,
+        });
+        assert!(!app.session().state.loading, "a commit's hunk reached the index");
+
+        app.session_mut().selection = Some(Selection::File {
+            path: "a.txt".to_string(),
+            place: FileDisposition::Unstaged,
+        });
+        let _ = app.update(Message::DiscardHunk {
+            path: "a.txt".to_string(),
+            index: 0,
+        });
+        assert!(app.session().state.loading, "a working-tree hunk is still discardable");
+    }
+
+    #[test]
+    fn selecting_a_stash_loads_its_commit_patch() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.stashes = vec![Stash {
+            index: 0,
+            message: "On dev: wip".to_string(),
+            commit_id: "abc123".to_string(),
+        }];
+        app.session_mut().selection = Some(Selection::Stash {
+            index: 0,
+            message: "On dev: wip".to_string(),
+        });
+        assert!(matches!(
+            app.session().patch_query(),
+            Some(crate::jobs::PatchQuery::Commit(id)) if id == "abc123"
+        ));
+    }
+
+    #[test]
     fn drop_refuses_a_stash_whose_slot_moved() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.confirm_drop = Some(Stash {
             index: 0,
             message: "WIP on dev".to_string(),
+            commit_id: "5ta5h0".to_string(),
         });
         app.session_mut().state.stashes = vec![Stash {
             index: 0,
             message: "On main: other".to_string(),
+            commit_id: "5ta5h0".to_string(),
         }];
 
         let _ = app.update(Message::ConfirmDropStash);

@@ -28,6 +28,10 @@ fn show_tag_block(selection: &Selection) -> bool {
     matches!(selection, Selection::Tag { .. })
 }
 
+fn show_stash_block(selection: &Selection) -> bool {
+    matches!(selection, Selection::Stash { .. })
+}
+
 pub(crate) fn files_navigator<'a>(
     app: &'a GitApp,
     selection: &Selection,
@@ -38,12 +42,21 @@ pub(crate) fn files_navigator<'a>(
     let wip = show_wip_block(status);
     let commit = show_commit_block(selection);
     let tag = show_tag_block(selection);
+    let stash = show_stash_block(selection);
 
-    if !wip && !commit && !tag {
+    if !wip && !commit && !tag && !stash {
         return empty_navigator_hint(tokens, reading);
     }
 
     let mut body = column![].spacing(8).width(Length::Fill);
+
+    // The stash's own files come first: it is what the user picked. The working tree follows.
+    if stash {
+        if let Some(meta) = stash_meta(selection, tokens, reading) {
+            body = body.push(meta);
+        }
+        body = body.push(commit_files_block(app, tokens, reading));
+    }
 
     if wip {
         body = body.push(wip_working_tree_block(app, selection, tokens, reading));
@@ -65,6 +78,37 @@ pub(crate) fn files_navigator<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+fn stash_meta<'a>(
+    selection: &Selection,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Option<Element<'a, Message>> {
+    let Selection::Stash { index, message } = selection else {
+        return None;
+    };
+    Some(
+        container(
+            column![
+                text(message.clone())
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_primary),
+                    }),
+                text(format!("stash@{{{index}}} · tracked changes against the commit it was taken on"))
+                    .font(reading.font)
+                    .size((reading.size - 2.0).max(11.0))
+                    .style(move |_| text::Style {
+                        color: Some(tokens.text_muted),
+                    }),
+            ]
+            .spacing(4),
+        )
+        .padding([0, 12])
+        .into(),
+    )
 }
 
 fn empty_navigator_hint<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {

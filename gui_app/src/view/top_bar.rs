@@ -6,7 +6,7 @@ use iced::widget::text::Wrapping;
 use iced::widget::{container, horizontal_space, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{
+use super::chrome::{one_line, 
     branch_chip, embedded_field_style, glyph, quiet_button, Reading, SEARCH_MARK,
 };
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
@@ -123,7 +123,7 @@ fn mark<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
 }
 
 fn repository_path<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    container(
+    one_line(
         text(path.to_string())
             .font(reading.mono)
             .size(reading.size)
@@ -131,10 +131,9 @@ fn repository_path<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> El
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
+        reading.size,
+        Length::Fill,
     )
-    .width(Length::Fill)
-    .clip(true)
-    .into()
 }
 
 fn tracking<'a>(summary: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {

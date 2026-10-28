@@ -21,7 +21,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme}
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::chrome::{glyph, icon_button, panel_style, Reading};
+use super::chrome::{glyph, panel_style, Reading};
 
 const COL_GAP: f32 = 10.0;
 /// Space between the subject and the first ref pill.
@@ -30,16 +30,21 @@ const HASH_WIDTH: f32 = 64.0;
 const WHEN_WIDTH: f32 = 44.0;
 const AUTHOR_WIDTH: f32 = 120.0;
 const MIN_GRAPH_COL_WIDTH: f32 = 24.0;
-/// The header's focus toggle; data rows reserve the same width so columns line up.
-const FOCUS_SLOT: f32 = 28.0;
+/// Ten lanes. Wider histories clip at the right edge of the graph instead of taking the
+/// Description column: the subject is what is read, lanes beyond ten rarely are.
+const MAX_GRAPH_COL_WIDTH: f32 = 160.0;
 const HEADER_SIZE: f32 = 11.0;
+/// iced 0.13 still wraps `Wrapping::None` text once a cell is squeezed, which grew the
+/// header row until it pushed every commit below the fold. Header cells are clamped.
+const HEADER_HEIGHT: f32 = 20.0;
 const PILL_PAD_Y: f32 = 0.0;
 const PILL_PAD_X: f32 = 5.0;
 const PILL_RADIUS: f32 = 3.0;
 const PILL_GAP: f32 = 3.0;
-const MAX_PILLS_SHOWN: usize = 2;
+/// One pill (the most important ref: HEAD, worktree, local, remote, tag) and a "+N" count.
+const MAX_PILLS_SHOWN: usize = 1;
 /// Widest the pill strip may grow; the subject keeps the rest of the cell.
-const PILL_STRIP_MAX: f32 = 240.0;
+const PILL_STRIP_MAX: f32 = 180.0;
 /// One text line inside a pill. iced 0.13 can still wrap `Wrapping::None` text when
 /// squeezed, so pills are clamped to this height and clipped.
 const PILL_HEIGHT: f32 = 16.0;
@@ -87,7 +92,7 @@ pub(super) fn history_pane<'a>(
     let query = app.history_query.trim();
     let searching = !query.is_empty();
     let rows = graph_rows(shown_nodes);
-    let graph_w = graph_width(&rows).max(MIN_GRAPH_COL_WIDTH);
+    let graph_w = graph_width(&rows).clamp(MIN_GRAPH_COL_WIDTH, MAX_GRAPH_COL_WIDTH);
     let commits_by_id: HashMap<&str, &Commit> = session
         .state
         .commits
@@ -133,12 +138,13 @@ pub(super) fn history_pane<'a>(
             .iter()
             .map(|(_, row)| graph_width(std::slice::from_ref(row)))
             .fold(MIN_GRAPH_COL_WIDTH, f32::max)
+            .min(MAX_GRAPH_COL_WIDTH)
     } else {
         graph_w
     };
 
     let mut commit_rows =
-        column![column_headers(app, graph_w, focus, tokens, reading)].width(Length::Fill);
+        column![column_headers(graph_w, tokens, reading)].width(Length::Fill);
     if searching {
         commit_rows = commit_rows.push(search_summary(
             table.len(),
@@ -273,7 +279,6 @@ fn history_row<'a>(
         single_line(author, Length::Fixed(AUTHOR_WIDTH), reading, tokens, false),
         single_line(when, Length::Fixed(WHEN_WIDTH), reading, tokens, false),
         single_line(hash, Length::Fixed(HASH_WIDTH), reading, tokens, true),
-        container(text("")).width(Length::Fixed(FOCUS_SLOT)),
     ]
     .spacing(COL_GAP)
     .height(Length::Fixed(ROW_HEIGHT))
@@ -282,13 +287,9 @@ fn history_row<'a>(
     .into()
 }
 
-fn column_headers<'a>(
-    app: &'a GitApp,
-    graph_w: f32,
-    focus: bool,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
+/// Mirrors [`history_row`] cell for cell, so every header sits over its column. The focus
+/// toggle lives in the History toolbar, not here: an extra header cell shifted the columns.
+fn column_headers<'a>(graph_w: f32, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     row![
         // The graph column has no title: "Description" lines up with the subjects.
         container(text("")).width(Length::Fixed(graph_w)),
@@ -296,26 +297,10 @@ fn column_headers<'a>(
         header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
         header_cell("When", Length::Fixed(WHEN_WIDTH), tokens, reading),
         header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
-        container(icon_button(
-            "◎",
-            if focus {
-                "Show all branches"
-            } else {
-                "Focus current branch"
-            },
-            "graph-focus",
-            app.tip_ready("graph-focus"),
-            Message::ToggleFocusCurrentBranch,
-            true,
-            focus,
-            tokens,
-            reading,
-        ))
-        .width(Length::Fixed(FOCUS_SLOT))
-        .align_x(Alignment::Center),
     ]
     .spacing(COL_GAP)
     .padding([2, 0])
+    .height(Length::Fixed(HEADER_HEIGHT))
     .align_y(Alignment::Center)
     .width(Length::Fill)
     .into()
@@ -337,6 +322,8 @@ fn header_cell<'a>(
             }),
     )
     .width(width)
+    .height(Length::Fixed(HEADER_HEIGHT))
+    .clip(true)
     .into()
 }
 

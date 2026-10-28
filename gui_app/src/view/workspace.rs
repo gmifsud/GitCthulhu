@@ -6,7 +6,7 @@ use iced::widget::pane_grid::{self, Content};
 use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
-use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+use super::chrome::{command_button, hairline, icon_button, pane_title, symbol_reading, Reading};
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
 use super::explorer::explorer_pane;
 use super::files_nav::files_navigator;
@@ -100,8 +100,24 @@ fn graph<'a>(
         can_stash(app),
         CommandPlace::Graph,
     );
+    let focus = app.session().focus_current_branch;
+    let focus_toggle = icon_button(
+        "◎",
+        if focus {
+            "Show all branches"
+        } else {
+            "Focus current branch"
+        },
+        "graph-focus",
+        app.tip_ready("graph-focus"),
+        Message::ToggleFocusCurrentBranch,
+        true,
+        focus,
+        tokens,
+        reading,
+    );
     column![
-        titled_command_head(GRAPH_TITLE, &commands, selection, app, tokens, reading),
+        titled_command_head_with(GRAPH_TITLE, &commands, Some(focus_toggle), selection, app, tokens, reading),
         history_pane(app, selection, tokens, reading),
     ]
     .width(Length::Fill)
@@ -185,9 +201,11 @@ fn inspector_head<'a>(
     .into()
 }
 
-fn titled_command_head<'a>(
+/// Pane title, then the selection's commands, then `trailing` pinned at the right end.
+fn titled_command_head_with<'a>(
     title: &'a str,
     items: &[crate::selection::RibbonItem],
+    trailing: Option<Element<'a, Message>>,
     selection: &Selection,
     app: &'a GitApp,
     tokens: DesignTokens,
@@ -199,6 +217,9 @@ fn titled_command_head<'a>(
     commands = commands.push(iced::widget::horizontal_space());
     for button in command_buttons(items, selection, app, tokens, reading) {
         commands = commands.push(button);
+    }
+    if let Some(trailing) = trailing {
+        commands = commands.push(trailing);
     }
     column![
         container(commands.wrap())
