@@ -1,6 +1,8 @@
-//! Right-click actions for graph commits, local branches, and WIP change rows.
+//! Right-click actions for every object the window lists: commits, local and remote branches,
+//! tags, stashes, worktrees, and working-tree change rows. Pure: `context_actions` decides the
+//! rows and their enabled state; the window maps each kind onto an existing message.
 
-use core_domain::{FileDisposition, Worktree};
+use core_domain::{Branch, FileDisposition, Worktree};
 
 use crate::selection::short_hash;
 use crate::session::same_path;
@@ -10,6 +12,11 @@ use crate::session::same_path;
 pub(crate) enum ContextTarget {
     Commit { id: String },
     LocalBranch { name: String, tip: String },
+    /// A remote-tracking branch such as `origin/feature/x`.
+    RemoteBranch { name: String, tip: String },
+    Tag { name: String, commit_id: String },
+    Stash { index: usize, message: String },
+    Worktree { path: String, branch: String, is_main: bool },
     /// A file or folder row in the working-tree changes list.
     ChangePath {
         path: String,
@@ -54,6 +61,39 @@ pub(crate) enum ContextActionKind {
     StashChange { path: String },
     /// Reveal the path (or its parent for a file) in the OS file manager.
     OpenInOs { path: String, is_dir: bool },
+    CheckoutBranch { name: String },
+    /// Check out the local branch for a remote one, creating it (tracking) when missing.
+    CheckoutRemote { remote: String, local: String },
+    /// Open the New Branch dialog starting from any ref or commit.
+    NewBranchFrom { start: String },
+    MergeIntoCurrent { name: String },
+    RebaseCurrentOnto { name: String },
+    RenameBranch { name: String },
+    DeleteBranch { name: String },
+    CherryPick { id: String },
+    ResetTo { id: String },
+    CopyText { text: String },
+    OpenWorktreeTab { path: String },
+    NewWorktree,
+    RemoveWorktree { path: String },
+    /// Reveal an absolute folder (a worktree) in the OS file manager.
+    OpenFolder { path: String },
+    StashApply { index: usize, message: String },
+    StashPop { index: usize, message: String },
+    StashDrop { index: usize, message: String },
+}
+
+/// The local name a remote branch checks out as: `origin/feature/x` → `feature/x`.
+pub(crate) fn local_name_for_remote(remote: &str) -> &str {
+    remote.split_once('/').map_or(remote, |(_, rest)| rest)
+}
+
+fn action(label: impl Into<String>, enabled: bool, kind: ContextActionKind) -> ContextAction {
+    ContextAction {
+        label: label.into(),
+        enabled,
+        kind,
+    }
 }
 
 /// Open-menu state: target plus approximate pointer position for the overlay.
@@ -83,55 +123,155 @@ pub(crate) fn gitignore_pattern(path: &str, is_dir: bool) -> String {
 pub(crate) fn context_actions(
     target: &ContextTarget,
     catalogue: &[Worktree],
+    branches: &[Branch],
     active_head: Option<&str>,
     loading: bool,
 ) -> Vec<ContextAction> {
+    let idle = !loading;
     match target {
         ContextTarget::Commit { id } => {
             let short = short_hash(id);
-            let open_enabled = !loading;
-            let detach_enabled = !loading && active_head != Some(id.as_str());
+            let on_head = active_head == Some(id.as_str());
             vec![
-                ContextAction {
-                    label: "Open as worktree…".into(),
-                    enabled: open_enabled,
-                    kind: ContextActionKind::OpenAsWorktree {
+                action("New branch from here…", idle, ContextActionKind::NewBranchFrom { start: id.clone() }),
+                action(
+                    "Open as worktree…",
+                    idle,
+                    ContextActionKind::OpenAsWorktree {
                         branch: format!("wip/{short}"),
                         create_branch: true,
                         start_point: Some(id.clone()),
                     },
-                },
-                ContextAction {
-                    label: "Detach HEAD here".into(),
-                    enabled: detach_enabled,
-                    kind: ContextActionKind::DetachHead {
-                        commit_id: id.clone(),
-                    },
-                },
+                ),
+                action("Detach HEAD here", idle && !on_head, ContextActionKind::DetachHead { commit_id: id.clone() }),
+                action("Cherry-pick onto current…", idle && !on_head, ContextActionKind::CherryPick { id: id.clone() }),
+                action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
+                action("Copy hash", true, ContextActionKind::CopyText { text: id.clone() }),
             ]
         }
         ContextTarget::LocalBranch { name, tip } => {
-            let open_enabled = !loading && !branch_checked_out_elsewhere(catalogue, name);
-            let detach_enabled = !loading && active_head != Some(tip.as_str());
+            let current = branches
+                .iter()
+                .any(|branch| !branch.is_remote && branch.is_head && branch.name == *name);
+            let elsewhere = branch_checked_out_elsewhere(catalogue, name);
             vec![
-                ContextAction {
-                    label: "Open as worktree…".into(),
-                    enabled: open_enabled,
-                    kind: ContextActionKind::OpenAsWorktree {
+                action(
+                    format!("Checkout '{name}'"),
+                    idle && !current && !elsewhere,
+                    ContextActionKind::CheckoutBranch { name: name.clone() },
+                ),
+                action(
+                    format!("New branch from '{name}'…"),
+                    idle,
+                    ContextActionKind::NewBranchFrom { start: name.clone() },
+                ),
+                action(
+                    "Open as worktree…",
+                    idle && !current && !elsewhere,
+                    ContextActionKind::OpenAsWorktree {
                         branch: name.clone(),
                         create_branch: false,
                         start_point: None,
                     },
-                },
-                ContextAction {
-                    label: "Detach at tip".into(),
-                    enabled: detach_enabled,
-                    kind: ContextActionKind::DetachHead {
-                        commit_id: tip.clone(),
-                    },
-                },
+                ),
+                action(
+                    format!("Merge '{name}' into current…"),
+                    idle && !current,
+                    ContextActionKind::MergeIntoCurrent { name: name.clone() },
+                ),
+                action(
+                    format!("Rebase current onto '{name}'…"),
+                    idle && !current,
+                    ContextActionKind::RebaseCurrentOnto { name: name.clone() },
+                ),
+                action(
+                    "Detach at tip",
+                    idle && active_head != Some(tip.as_str()),
+                    ContextActionKind::DetachHead { commit_id: tip.clone() },
+                ),
+                action("Rename…", idle, ContextActionKind::RenameBranch { name: name.clone() }),
+                action("Delete…", idle && !current, ContextActionKind::DeleteBranch { name: name.clone() }),
+                action("Copy name", true, ContextActionKind::CopyText { text: name.clone() }),
             ]
         }
+        ContextTarget::RemoteBranch { name, tip } => {
+            let local = local_name_for_remote(name).to_string();
+            let local_exists = branches.iter().any(|branch| !branch.is_remote && branch.name == local);
+            let local_current = branches
+                .iter()
+                .any(|branch| !branch.is_remote && branch.is_head && branch.name == local);
+            let checkout_label = if local_exists {
+                format!("Checkout '{local}'")
+            } else {
+                format!("Checkout as new local branch '{local}'")
+            };
+            vec![
+                action(
+                    checkout_label,
+                    idle && !local_current && !branch_checked_out_elsewhere(catalogue, &local),
+                    ContextActionKind::CheckoutRemote {
+                        remote: name.clone(),
+                        local: local.clone(),
+                    },
+                ),
+                action(
+                    format!("New branch from '{name}'…"),
+                    idle,
+                    ContextActionKind::NewBranchFrom { start: name.clone() },
+                ),
+                action(
+                    "Open as worktree…",
+                    idle && !local_exists,
+                    ContextActionKind::OpenAsWorktree {
+                        branch: local,
+                        create_branch: true,
+                        start_point: Some(name.clone()),
+                    },
+                ),
+                action(
+                    format!("Merge '{name}' into current…"),
+                    idle,
+                    ContextActionKind::MergeIntoCurrent { name: name.clone() },
+                ),
+                action(
+                    format!("Rebase current onto '{name}'…"),
+                    idle,
+                    ContextActionKind::RebaseCurrentOnto { name: name.clone() },
+                ),
+                action(
+                    "Detach at tip",
+                    idle && active_head != Some(tip.as_str()),
+                    ContextActionKind::DetachHead { commit_id: tip.clone() },
+                ),
+                action("Copy name", true, ContextActionKind::CopyText { text: name.clone() }),
+            ]
+        }
+        ContextTarget::Tag { name, commit_id } => vec![
+            action(format!("New branch from '{name}'…"), idle, ContextActionKind::NewBranchFrom { start: name.clone() }),
+            action(
+                "Detach HEAD here",
+                idle && active_head != Some(commit_id.as_str()),
+                ContextActionKind::DetachHead { commit_id: commit_id.clone() },
+            ),
+            action("Copy name", true, ContextActionKind::CopyText { text: name.clone() }),
+        ],
+        ContextTarget::Stash { index, message } => vec![
+            action("Apply", idle, ContextActionKind::StashApply { index: *index, message: message.clone() }),
+            action("Pop", idle, ContextActionKind::StashPop { index: *index, message: message.clone() }),
+            action("Drop…", idle, ContextActionKind::StashDrop { index: *index, message: message.clone() }),
+        ],
+        ContextTarget::Worktree { path, branch, is_main } => vec![
+            action("Open in tab", idle, ContextActionKind::OpenWorktreeTab { path: path.clone() }),
+            action("New worktree…", idle, ContextActionKind::NewWorktree),
+            action("Open folder", true, ContextActionKind::OpenFolder { path: path.clone() }),
+            action("Copy path", true, ContextActionKind::CopyText { text: path.clone() }),
+            action(
+                if branch.is_empty() { "Copy branch".to_string() } else { format!("Copy branch '{branch}'") },
+                !branch.is_empty(),
+                ContextActionKind::CopyText { text: branch.clone() },
+            ),
+            action("Remove worktree…", idle && !is_main, ContextActionKind::RemoveWorktree { path: path.clone() }),
+        ],
         ContextTarget::ChangePath {
             path,
             place,
@@ -243,30 +383,52 @@ mod tests {
         }
     }
 
+    fn branch(name: &str, remote: bool, head: bool) -> Branch {
+        Branch {
+            name: name.into(),
+            is_remote: remote,
+            is_head: head,
+            tip: "tip1".into(),
+            ahead: 0,
+            behind: 0,
+        }
+    }
+
+    fn find<'a>(actions: &'a [ContextAction], label: &str) -> &'a ContextAction {
+        actions
+            .iter()
+            .find(|action| action.label.starts_with(label))
+            .unwrap_or_else(|| panic!("no '{label}' in {actions:?}"))
+    }
+
     #[test]
-    fn commit_open_always_enabled_when_idle() {
+    fn commit_menu_branches_opens_and_detaches() {
         let target = ContextTarget::Commit {
             id: "abcdef0123456789".into(),
         };
-        let actions = context_actions(&target, &[], Some("other"), false);
-        assert!(actions[0].enabled);
+        let actions = context_actions(&target, &[], &[], Some("other"), false);
         assert!(matches!(
-            &actions[0].kind,
+            &find(&actions, "New branch from here").kind,
+            ContextActionKind::NewBranchFrom { start } if start == "abcdef0123456789"
+        ));
+        assert!(matches!(
+            &find(&actions, "Open as worktree").kind,
             ContextActionKind::OpenAsWorktree {
                 create_branch: true,
                 start_point: Some(id),
                 ..
             } if id == "abcdef0123456789"
         ));
-        assert!(actions[1].enabled);
+        assert!(find(&actions, "Detach HEAD here").enabled);
     }
 
     #[test]
     fn detach_disabled_when_already_on_commit() {
         let id = "abcdef0123456789";
         let target = ContextTarget::Commit { id: id.into() };
-        let actions = context_actions(&target, &[], Some(id), false);
-        assert!(!actions[1].enabled);
+        let actions = context_actions(&target, &[], &[], Some(id), false);
+        assert!(!find(&actions, "Detach HEAD here").enabled);
+        assert!(!find(&actions, "Cherry-pick").enabled);
     }
 
     #[test]
@@ -276,19 +438,95 @@ mod tests {
             tip: "tip1".into(),
         };
         let catalogue = vec![wt(r"D:\repo-feature", "feature")];
-        let actions = context_actions(&target, &catalogue, Some("main-tip"), false);
-        assert!(!actions[0].enabled);
-        assert!(actions[1].enabled);
+        let actions = context_actions(&target, &catalogue, &[], Some("main-tip"), false);
+        assert!(!find(&actions, "Open as worktree").enabled);
+        assert!(!find(&actions, "Checkout").enabled);
+        assert!(find(&actions, "New branch from").enabled);
     }
 
     #[test]
-    fn loading_disables_everything() {
+    fn the_current_branch_cannot_be_checked_out_merged_or_deleted() {
+        let target = ContextTarget::LocalBranch {
+            name: "main".into(),
+            tip: "tip1".into(),
+        };
+        let branches = [branch("main", false, true)];
+        let actions = context_actions(&target, &[], &branches, Some("tip1"), false);
+        assert!(!find(&actions, "Checkout").enabled);
+        assert!(!find(&actions, "Merge").enabled);
+        assert!(!find(&actions, "Delete").enabled);
+        assert!(find(&actions, "Rename").enabled);
+    }
+
+    #[test]
+    fn a_remote_branch_checks_out_as_a_new_tracking_branch() {
+        let target = ContextTarget::RemoteBranch {
+            name: "origin/feature/x".into(),
+            tip: "tip9".into(),
+        };
+        let actions = context_actions(&target, &[], &[branch("main", false, true)], Some("tip1"), false);
+        let checkout = find(&actions, "Checkout as new local branch 'feature/x'");
+        assert!(checkout.enabled);
+        assert!(matches!(
+            &checkout.kind,
+            ContextActionKind::CheckoutRemote { remote, local } if remote == "origin/feature/x" && local == "feature/x"
+        ));
+        assert!(matches!(
+            &find(&actions, "New branch from 'origin/feature/x'").kind,
+            ContextActionKind::NewBranchFrom { start } if start == "origin/feature/x"
+        ));
+        assert!(matches!(
+            &find(&actions, "Open as worktree").kind,
+            ContextActionKind::OpenAsWorktree { branch, create_branch: true, start_point: Some(start) }
+                if branch == "feature/x" && start == "origin/feature/x"
+        ));
+    }
+
+    #[test]
+    fn a_remote_with_a_local_branch_checks_out_the_local_one() {
+        let target = ContextTarget::RemoteBranch {
+            name: "origin/dev".into(),
+            tip: "tip9".into(),
+        };
+        let branches = [branch("main", false, true), branch("dev", false, false)];
+        let actions = context_actions(&target, &[], &branches, Some("tip1"), false);
+        assert!(find(&actions, "Checkout 'dev'").enabled);
+        assert!(!find(&actions, "Open as worktree").enabled, "the local branch already exists");
+    }
+
+    #[test]
+    fn the_main_worktree_cannot_be_removed() {
+        let main = ContextTarget::Worktree {
+            path: "/r/main".into(),
+            branch: "main".into(),
+            is_main: true,
+        };
+        let linked = ContextTarget::Worktree {
+            path: "/r/wt".into(),
+            branch: "feature".into(),
+            is_main: false,
+        };
+        assert!(!find(&context_actions(&main, &[], &[], None, false), "Remove worktree").enabled);
+        assert!(find(&context_actions(&linked, &[], &[], None, false), "Remove worktree").enabled);
+        assert!(find(&context_actions(&linked, &[], &[], None, false), "Open in tab").enabled);
+    }
+
+    #[test]
+    fn remote_names_drop_only_the_remote() {
+        assert_eq!(local_name_for_remote("origin/feature/x"), "feature/x");
+        assert_eq!(local_name_for_remote("upstream/main"), "main");
+    }
+
+    #[test]
+    fn loading_disables_everything_but_copying() {
         let target = ContextTarget::LocalBranch {
             name: "feature".into(),
             tip: "tip1".into(),
         };
-        let actions = context_actions(&target, &[], Some("other"), true);
-        assert!(actions.iter().all(|a| !a.enabled));
+        let actions = context_actions(&target, &[], &[], Some("other"), true);
+        assert!(actions
+            .iter()
+            .all(|a| !a.enabled || matches!(a.kind, ContextActionKind::CopyText { .. })));
     }
 
     #[test]
@@ -298,7 +536,7 @@ mod tests {
             place: FileDisposition::Unstaged,
             is_dir: true,
         };
-        let actions = context_actions(&target, &[], None, false);
+        let actions = context_actions(&target, &[], &[], None, false);
         assert_eq!(actions.len(), 5);
         assert_eq!(actions[0].label, "Stage folder");
         assert!(actions[2].label.contains("scripts/"));
@@ -315,7 +553,7 @@ mod tests {
             place: FileDisposition::Staged,
             is_dir: false,
         };
-        let actions = context_actions(&target, &[], None, false);
+        let actions = context_actions(&target, &[], &[], None, false);
         assert_eq!(actions[0].label, "Unstage file");
         assert!(matches!(
             &actions[0].kind,

@@ -1,6 +1,6 @@
 use crate::app::{BranchPrompt, Message};
 use crate::theme::DesignTokens;
-use iced::widget::{column, container, row, text, text_input};
+use iced::widget::{checkbox, column, container, row, text, text_input};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
 use super::chrome::{accent_button, command_button, field_style, Reading};
@@ -11,9 +11,9 @@ pub(super) fn branch_prompt<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let (title, body, confirm_label, confirm_enabled, detail, field) = match prompt {
-        BranchPrompt::Create { start, name } => (
+        BranchPrompt::Create { start, name, .. } => (
             "New branch",
-            "Created at this tip, then checked out.",
+            "Created at this start point.",
             "Create",
             !name.trim().is_empty(),
             start.as_str(),
@@ -65,9 +65,19 @@ pub(super) fn branch_prompt<'a>(
         card = card.push(
             text_input("Branch name", field)
                 .on_input(Message::BranchNameChanged)
+                .on_submit(Message::ConfirmBranch)
                 .padding(6)
                 .width(Length::Fill)
                 .style(field_style(tokens)),
+        );
+    }
+    if let BranchPrompt::Create { checkout, .. } = prompt {
+        card = card.push(
+            checkbox("Checkout branch", *checkout)
+                .on_toggle(Message::BranchCheckoutToggled)
+                .size(reading.size)
+                .text_size(reading.size)
+                .font(reading.font),
         );
     }
     card = card.push(

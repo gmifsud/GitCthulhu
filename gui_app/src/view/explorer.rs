@@ -1,430 +1,406 @@
-//! Left-rail Explorer accordion: LOCAL / REMOTE / WORKTREES / STASHES / TAGS.
-//!
-//! Each section has a clickable header that collapses its body. The collapsed state
-//! lives on `WorktreeSession::explorer_collapsed` (pure, reducer-safe).
+//! Left branch tree, after the JetBrains Git log: one filter box, one scroll, groups for
+//! HEAD, Local, Remote, Worktrees, Stashes and Tags, branch names folded into folders at
+//! each `/`. A click filters the log to a branch; a double-click checks a local branch out;
+//! everything else is on the right-click menu of each row.
 
 use crate::app::{GitApp, Message};
 use crate::context_menu::ContextTarget;
+use crate::ref_tree::{ref_rows, RefRow};
+use crate::selection::Selection;
 use crate::session::{basename, same_path, ExplorerSection};
 use crate::theme::DesignTokens;
-use core_domain::{Branch, Stash, Tag, Worktree};
+use core_domain::{Branch, Worktree};
 use iced::widget::button::Status;
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
-use iced::{
-    mouse, Alignment, Background, Border, Color, Element, Length, Padding, Shadow,
-};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
+use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Shadow};
 
 use super::chrome::{
-    glyph, hairline, icon_button, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED, FOLD_OPEN,
-    REMOTE_MARK, STASH_MARK, TAG_MARK, WORKTREE_MARK,
+    field_style, glyph, icon_button, one_line, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED,
+    FOLD_OPEN, REMOTE_MARK, STASH_MARK, TAG_MARK, WORKTREE_MARK,
 };
 
-const HEAD_PADDING_Y: f32 = 4.0;
-const HEAD_PADDING_X: f32 = 8.0;
+/// Text-input id of the branch-tree filter.
+pub(crate) const REF_FILTER_ID: &str = "ref-filter";
+const INDENT: f32 = 14.0;
+const ROW_PAD_X: f32 = 6.0;
 const OPEN_MARK: &str = "●";
 const DETACHED: &str = "(detached)";
+const FILTER_PLACEHOLDER: &str = "Branch or tag";
 
-/// The full Explorer accordion pane for the left files rail.
-pub(super) fn explorer_pane<'a>(
-    app: &'a GitApp,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
+pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let session = app.session();
     let collapsed = session.explorer_collapsed;
-    let weights = session.explorer_weights;
-
+    let filter = app.ref_filter.trim();
     let branches = &session.state.branches;
-    let stashes = &session.state.stashes;
-    let tags = &session.state.tags;
+    let head = branches.iter().find(|branch| branch.is_head && !branch.is_remote);
+    let locals: Vec<&Branch> = branches.iter().filter(|branch| !branch.is_remote).collect();
+    let remotes: Vec<&Branch> = branches.iter().filter(|branch| branch.is_remote).collect();
+    let selected = session.selection.as_ref();
 
-    let locals: Vec<&Branch> = branches.iter().filter(|b| !b.is_remote).collect();
-    let remotes: Vec<&Branch> = branches.iter().filter(|b| b.is_remote).collect();
+    let mut tree = column![].spacing(0).width(Length::Fill);
+
+    // HEAD (current branch): a click shows only what HEAD reaches.
+    let head_label = head.map_or_else(|| DETACHED.to_string(), |branch| branch.name.clone());
+    tree = tree.push(tree_row(
+        0,
+        None,
+        Some(glyph(BRANCH_MARK, reading.size, tokens.accent_primary, &reading)),
+        row![
+            label_text("HEAD", tokens.text_primary, reading),
+            label_text(&format!("({head_label})"), tokens.text_muted, reading),
+        ]
+        .spacing(6)
+        .into(),
+        session.focus_current_branch,
+        Message::ToggleFocusCurrentBranch,
+        None,
+        tokens,
+    ));
+
+    // Local
+    tree = tree.push(group_header("Local", locals.len(), ExplorerSection::Local, collapsed.local, None, tokens, reading));
+    if !collapsed.local {
+        let rows = ref_rows("local", locals.iter().map(|branch| branch.name.as_str()), filter, |key| session.ref_folder_open(key));
+        for row_data in rows {
+            tree = tree.push(branch_tree_row(app, &row_data, false, selected, tokens, reading));
+        }
+        if locals.is_empty() {
+            tree = tree.push(hint_row("No local branches", tokens, reading));
+        }
+    }
+
+    // Remote: one folder per remote, then the branch's own folders (closed by default).
+    tree = tree.push(group_header("Remote", remotes.len(), ExplorerSection::Remote, collapsed.remote, None, tokens, reading));
+    if !collapsed.remote {
+        let rows = ref_rows("remote", remotes.iter().map(|branch| branch.name.as_str()), filter, |key| session.ref_folder_open(key));
+        for row_data in rows {
+            tree = tree.push(branch_tree_row(app, &row_data, true, selected, tokens, reading));
+        }
+        if remotes.is_empty() {
+            tree = tree.push(hint_row("No remote branches", tokens, reading));
+        }
+    }
+
+    // Worktrees
     let worktrees = &app.worktree_catalogue;
+    let new_worktree = icon_button(
+        "+",
+        "New worktree…",
+        "worktree-new",
+        app.tip_ready("worktree-new"),
+        Message::AskCreateWorktree,
+        !app.worktree_busy,
+        false,
+        tokens,
+        reading,
+    );
+    tree = tree.push(group_header("Worktrees", worktrees.len(), ExplorerSection::Worktrees, collapsed.worktrees, Some(new_worktree), tokens, reading));
+    if !collapsed.worktrees {
+        for entry in worktrees.iter().filter(|entry| matches_filter(filter, &[&entry.path, &entry.branch])) {
+            tree = tree.push(worktree_row(app, entry, tokens, reading));
+        }
+        if worktrees.is_empty() {
+            tree = tree.push(hint_row("No worktrees loaded", tokens, reading));
+        }
+    }
+
+    // Stashes
+    let stashes = &session.state.stashes;
+    tree = tree.push(group_header("Stashes", stashes.len(), ExplorerSection::Stashes, collapsed.stashes, None, tokens, reading));
+    if !collapsed.stashes {
+        for stash in stashes.iter().filter(|stash| matches_filter(filter, &[&stash.message])) {
+            let is_selected = matches!(selected, Some(Selection::Stash { index, message }) if *index == stash.index && *message == stash.message);
+            tree = tree.push(tree_row(
+                1,
+                None,
+                Some(glyph(STASH_MARK, reading.size, tokens.text_muted, &reading)),
+                row![
+                    label_text(&stash.message, tokens.text_secondary, reading),
+                    label_text(&format!("stash@{{{}}}", stash.index), tokens.text_muted, reading),
+                ]
+                .spacing(6)
+                .into(),
+                is_selected,
+                Message::Select(Selection::Stash {
+                    index: stash.index,
+                    message: stash.message.clone(),
+                }),
+                Some(ContextTarget::Stash {
+                    index: stash.index,
+                    message: stash.message.clone(),
+                }),
+                tokens,
+            ));
+        }
+        if stashes.is_empty() {
+            tree = tree.push(hint_row("No stashes", tokens, reading));
+        }
+    }
+
+    // Tags
+    let tags = &session.state.tags;
+    tree = tree.push(group_header("Tags", tags.len(), ExplorerSection::Tags, collapsed.tags, None, tokens, reading));
+    if !collapsed.tags {
+        for tag in tags.iter().filter(|tag| matches_filter(filter, &[&tag.name])) {
+            let is_selected = matches!(selected, Some(Selection::Tag { name, .. }) if *name == tag.name);
+            tree = tree.push(tree_row(
+                1,
+                None,
+                Some(glyph(TAG_MARK, reading.size, tokens.added, &reading)),
+                label_text(&tag.name, tokens.text_secondary, reading),
+                is_selected,
+                Message::Select(Selection::Tag {
+                    name: tag.name.clone(),
+                    commit_id: tag.commit_id.clone(),
+                }),
+                Some(ContextTarget::Tag {
+                    name: tag.name.clone(),
+                    commit_id: tag.commit_id.clone(),
+                }),
+                tokens,
+            ));
+        }
+        if tags.is_empty() {
+            tree = tree.push(hint_row("No tags", tokens, reading));
+        }
+    }
+
+    let filter_box = container(
+        text_input(FILTER_PLACEHOLDER, &app.ref_filter)
+            .id(REF_FILTER_ID)
+            .on_input(Message::RefFilterChanged)
+            .font(reading.font)
+            .size(reading.size)
+            .padding([4, 8])
+            .style(field_style(tokens)),
+    )
+    .padding([4, 6]);
 
     column![
-        section_block(
-            "LOCAL",
-            locals.len(),
-            ExplorerSection::Local,
-            collapsed.local,
-            weights.get(ExplorerSection::Local),
-            (!collapsed.local).then(|| local_rows(&locals, tokens, reading)),
-            None,
-            tokens,
-            reading,
-        ),
-        hairline(tokens),
-        section_block(
-            "REMOTE",
-            remotes.len(),
-            ExplorerSection::Remote,
-            collapsed.remote,
-            weights.get(ExplorerSection::Remote),
-            (!collapsed.remote).then(|| remote_rows(&remotes, tokens, reading)),
-            None,
-            tokens,
-            reading,
-        ),
-        hairline(tokens),
-        section_block(
-            "WORKTREES",
-            worktrees.len(),
-            ExplorerSection::Worktrees,
-            collapsed.worktrees,
-            weights.get(ExplorerSection::Worktrees),
-            (!collapsed.worktrees).then(|| worktrees_rows(app, worktrees, tokens, reading)),
-            Some(icon_button(
-                "+",
-                "New worktree",
-                "worktree-new",
-                app.tip_ready("worktree-new"),
-                Message::AskCreateWorktree,
-                !app.worktree_busy,
-                false,
-                tokens,
-                reading,
-            )),
-            tokens,
-            reading,
-        ),
-        hairline(tokens),
-        section_block(
-            "STASHES",
-            stashes.len(),
-            ExplorerSection::Stashes,
-            collapsed.stashes,
-            weights.get(ExplorerSection::Stashes),
-            (!collapsed.stashes).then(|| stash_rows(stashes, tokens, reading)),
-            None,
-            tokens,
-            reading,
-        ),
-        hairline(tokens),
-        section_block(
-            "TAGS",
-            tags.len(),
-            ExplorerSection::Tags,
-            collapsed.tags,
-            weights.get(ExplorerSection::Tags),
-            (!collapsed.tags).then(|| tag_rows(tags, tokens, reading)),
-            None,
-            tokens,
-            reading,
-        ),
+        filter_box,
+        scrollable(tree.padding(Padding { top: 0.0, right: 8.0, bottom: 8.0, left: 0.0 }))
+            .direction(Direction::Vertical(Scrollbar::new().width(6).scroller_width(6)))
+            .height(Length::Fill),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-/// One collapsible accordion block: header + optional weighted body + resize grip.
-fn section_block<'a>(
+/// Every whitespace-separated term appears (case-insensitive) in one of `fields`.
+fn matches_filter(filter: &str, fields: &[&str]) -> bool {
+    let haystack = fields.join("\n").to_lowercase();
+    filter.split_whitespace().all(|term| haystack.contains(&term.to_lowercase()))
+}
+
+fn group_header<'a>(
     title: &'static str,
     count: usize,
     section: ExplorerSection,
     collapsed: bool,
-    weight: u16,
-    body: Option<Element<'a, Message>>,
     trailing: Option<Element<'a, Message>>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let chevron = if collapsed { FOLD_CLOSED } else { FOLD_OPEN };
-    let header_label = format!("{title} · {count}");
     let sym = symbol_reading(&reading);
     let toggle = button(
         row![
-            text(chevron).font(sym.font).size(reading.size),
-            text(header_label)
-                .font(reading.font)
-                .size((reading.size - 1.0).max(11.0))
-                .style(move |_| iced::widget::text::Style {
-                    color: Some(tokens.text_muted),
-                }),
+            text(if collapsed { FOLD_CLOSED } else { FOLD_OPEN }).font(sym.font).size(reading.size),
+            label_text(title, tokens.text_primary, reading),
+            label_text(&count.to_string(), tokens.text_muted, reading),
         ]
-        .spacing(4)
+        .spacing(6)
         .align_y(Alignment::Center),
     )
-    .padding([HEAD_PADDING_Y, HEAD_PADDING_X])
+    .padding([3.0, ROW_PAD_X])
     .width(Length::Fill)
     .on_press(Message::ToggleExplorerSection(section))
-    .style(move |_theme, status| {
-        let hot = matches!(status, Status::Hovered | Status::Pressed);
-        iced::widget::button::Style {
-            background: Some(Background::Color(if hot {
-                tokens.border
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: tokens.text_muted,
-            border: Border::default(),
-            shadow: Shadow::default(),
+    .style(move |_theme, status| row_style(tokens, status, false));
+    let mut header = row![toggle].align_y(Alignment::Center);
+    if let Some(trailing) = trailing {
+        header = header.push(trailing);
+    }
+    container(header).padding(Padding { top: 6.0, ..Padding::ZERO }).into()
+}
+
+/// A branch-tree row: a folder (toggles) or a branch leaf (click filters the log).
+fn branch_tree_row<'a>(
+    app: &'a GitApp,
+    data: &RefRow,
+    remote: bool,
+    selected: Option<&Selection>,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let session = app.session();
+    match data {
+        RefRow::Folder { key, label, depth, open, leaves } => {
+            let sym = symbol_reading(&reading);
+            tree_row(
+                depth + 1,
+                Some(text(if *open { FOLD_OPEN } else { FOLD_CLOSED }).font(sym.font).size(reading.size).into()),
+                Some(glyph("▭", reading.size, tokens.text_muted, &reading)),
+                row![
+                    label_text(label, tokens.text_secondary, reading),
+                    label_text(&leaves.to_string(), tokens.text_muted, reading),
+                ]
+                .spacing(6)
+                .into(),
+                false,
+                Message::ToggleRefFolder(key.clone()),
+                None,
+                tokens,
+            )
         }
-    });
-    let mut header_row = row![toggle].align_y(Alignment::Center);
-    if let Some(action) = trailing {
-        header_row = header_row.push(action);
+        RefRow::Leaf { name, label, depth } => {
+            let branch = session
+                .state
+                .branches
+                .iter()
+                .find(|branch| branch.is_remote == remote && branch.name == *name);
+            let current = branch.is_some_and(|branch| branch.is_head && !branch.is_remote);
+            let in_worktree = !remote
+                && app
+                    .worktree_catalogue
+                    .iter()
+                    .any(|entry| entry.branch == *name && !same_path(&entry.path, &session.path));
+            let is_selected = match selected {
+                Some(Selection::Branch { name: chosen, .. }) => !remote && chosen == name,
+                Some(Selection::Remote { name: chosen }) => remote && chosen == name,
+                _ => false,
+            } || session.branch_filter.as_deref() == Some(name.as_str());
+            let ink = if current { tokens.accent_primary } else { tokens.text_secondary };
+            let mark = if remote { REMOTE_MARK } else if in_worktree { WORKTREE_MARK } else { BRANCH_MARK };
+            let mut content = row![label_text(label, ink, reading)].spacing(6).align_y(Alignment::Center);
+            if let Some(branch) = branch {
+                content = content.push(tracking_badges(branch.ahead, branch.behind, tokens, reading));
+            }
+            let tip = branch.map(|branch| branch.tip.clone()).unwrap_or_default();
+            let target = if remote {
+                ContextTarget::RemoteBranch { name: name.clone(), tip }
+            } else {
+                ContextTarget::LocalBranch { name: name.clone(), tip }
+            };
+            tree_row(
+                depth + 1,
+                None,
+                Some(glyph(mark, reading.size, ink, &reading)),
+                content.into(),
+                is_selected,
+                Message::RefClicked { name: name.clone(), remote },
+                Some(target),
+                tokens,
+            )
+        }
     }
-    let header = container(header_row).width(Length::Fill).padding(Padding {
-        top: 0.0,
-        right: 4.0,
-        bottom: 0.0,
-        left: 0.0,
-    });
+}
 
-    let mut block = column![header].width(Length::Fill);
-    if let Some(body) = body {
-        debug_assert!(!collapsed);
-        let pane = container(scrollable(body).direction(Direction::Vertical(
-            Scrollbar::new().width(6).scroller_width(6).spacing(4),
-        )))
+/// The one row shape of the tree: indent, optional chevron, mark, one-line content.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn tree_row<'a>(
+    depth: usize,
+    chevron: Option<Element<'a, Message>>,
+    mark: Option<Element<'a, Message>>,
+    content: Element<'a, Message>,
+    selected: bool,
+    on_press: Message,
+    context: Option<ContextTarget>,
+    tokens: DesignTokens,
+) -> Element<'a, Message> {
+    let mut line = row![Space::with_width(Length::Fixed(depth as f32 * INDENT))]
+        .spacing(4)
+        .align_y(Alignment::Center);
+    line = line.push(container(chevron.unwrap_or_else(|| Space::with_width(0).into())).width(Length::Fixed(10.0)));
+    if let Some(mark) = mark {
+        line = line.push(mark);
+    }
+    line = line.push(container(content).width(Length::Fill).clip(true));
+    let body = button(line)
+        .padding([2.0, ROW_PAD_X])
         .width(Length::Fill)
-        .height(Length::FillPortion(weight.max(1)));
-        block = block
-            .push(pane)
-            .push(resize_grip(section, tokens))
-            .height(Length::FillPortion(weight.max(1)));
+        .on_press(on_press)
+        .style(move |_theme, status| row_style(tokens, status, selected));
+    match context {
+        Some(target) => mouse_area(body).on_right_press(Message::OpenContextMenu { target }).into(),
+        None => body.into(),
     }
-    block.into()
 }
 
-/// Thin drag handle under an open section — drag vertically to grow/shrink it.
-fn resize_grip<'a>(section: ExplorerSection, tokens: DesignTokens) -> Element<'a, Message> {
-    mouse_area(
-        container(Space::new(Length::Fill, Length::Fixed(5.0))).style(
-            move |_theme: &iced::Theme| container::Style {
-                background: Some(Background::Color(tokens.border)),
-                text_color: None,
-                border: Border::default(),
-                shadow: Shadow::default(),
-            },
-        ),
-    )
-    .interaction(mouse::Interaction::ResizingVertically)
-    .on_press(Message::ExplorerResizeStart(section))
-    .into()
+fn row_style(tokens: DesignTokens, status: Status, selected: bool) -> iced::widget::button::Style {
+    let hot = matches!(status, Status::Hovered | Status::Pressed);
+    iced::widget::button::Style {
+        background: Some(Background::Color(if selected {
+            tokens.border
+        } else if hot {
+            tokens.bg_raised
+        } else {
+            Color::TRANSPARENT
+        })),
+        text_color: tokens.text_secondary,
+        border: Border { radius: 3.0.into(), ..Border::default() },
+        shadow: Shadow::default(),
+    }
 }
 
-// ── LOCAL ────────────────────────────────────────────────────────────────────
-
-fn local_rows<'a>(
-    locals: &[&Branch],
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mut rows = column![].spacing(2).padding([4, 8]);
-    for branch in locals {
-        let selected = branch.is_head;
-        rows = rows.push(branch_row(
-            BRANCH_MARK,
-            branch.name.clone(),
-            Message::ChooseBranch(branch.name.clone()),
-            selected,
-            branch.is_head,
-            Some(ContextTarget::LocalBranch {
-                name: branch.name.clone(),
-                tip: branch.tip.clone(),
-            }),
-            branch.ahead,
-            branch.behind,
-            tokens,
-            reading,
-        ));
-    }
-    if locals.is_empty() {
-        rows = rows.push(empty_hint("No local branches", tokens, reading));
-    }
-    rows.into()
-}
-
-// ── REMOTE ───────────────────────────────────────────────────────────────────
-
-fn remote_rows<'a>(
-    remotes: &[&Branch],
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mut rows = column![].spacing(2).padding([4, 8]);
-    for branch in remotes {
-        let selected = false;
-        rows = rows.push(branch_row(
-            REMOTE_MARK,
-            branch.name.clone(),
-            Message::Select(crate::selection::Selection::Remote {
-                name: branch.name.clone(),
-            }),
-            selected,
-            false,
-            None,
-            0,
-            0,
-            tokens,
-            reading,
-        ));
-    }
-    if remotes.is_empty() {
-        rows = rows.push(empty_hint("No remote branches", tokens, reading));
-    }
-    rows.into()
-}
-
-// ── WORKTREES ────────────────────────────────────────────────────────────────
-
-fn worktrees_rows<'a>(
-    app: &'a GitApp,
-    worktrees: &'a [Worktree],
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mut rows = column![].spacing(2);
-    if worktrees.is_empty() {
-        rows = rows.push(
-            container(empty_hint("No worktrees loaded.", tokens, reading)).padding([4, 8]),
-        );
-    }
-    for entry in worktrees {
-        rows = rows.push(worktree_row(app, entry, tokens, reading));
-    }
-    // Height comes from the section's FillPortion + parent scrollable.
-    rows.width(Length::Fill).into()
-}
-
-fn worktree_row<'a>(
-    app: &'a GitApp,
-    entry: &'a Worktree,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let open = app
-        .sessions
-        .iter()
-        .any(|session| same_path(&session.path, &entry.path));
-    let active = app
-        .sessions
-        .get(app.active)
-        .is_some_and(|session| same_path(&session.path, &entry.path));
-    let branch = if entry.branch.is_empty() {
-        DETACHED.to_string()
-    } else {
-        entry.branch.clone()
-    };
-
-    let (ahead, behind) = tracking_for_worktree(app, entry);
-
-    let mut name_row = row![
-        text(basename(&entry.path).to_string())
+pub(super) fn label_text<'a>(value: &str, color: Color, reading: Reading) -> Element<'a, Message> {
+    one_line(
+        text(value.to_string())
             .font(reading.font)
             .size(reading.size)
             .wrapping(Wrapping::None)
-            .style(move |_| iced::widget::text::Style {
-                color: Some(if open {
-                    tokens.text_primary
-                } else {
-                    tokens.text_secondary
-                }),
-            })
+            .style(move |_| iced::widget::text::Style { color: Some(color) }),
+        reading.size,
+        Length::Shrink,
+    )
+}
+
+fn hint_row<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    container(label_text(label, tokens.text_muted, reading))
+        .padding(Padding { left: INDENT + 16.0, top: 2.0, bottom: 2.0, right: 0.0 })
+        .into()
+}
+
+/// One line per worktree: folder name, its branch, main/locked tags. Click opens its tab;
+/// right-click offers open, new, folder, copy and remove.
+fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let open = app.sessions.iter().any(|session| same_path(&session.path, &entry.path));
+    let active = app.sessions.get(app.active).is_some_and(|session| same_path(&session.path, &entry.path));
+    let branch = if entry.branch.is_empty() { DETACHED.to_string() } else { entry.branch.clone() };
+    let (ahead, behind) = tracking_for_worktree(app, entry);
+    let mut content = row![
+        label_text(basename(&entry.path), if open { tokens.text_primary } else { tokens.text_secondary }, reading),
+        label_text(&branch, tokens.accent_primary, reading),
     ]
     .spacing(6)
-    .align_y(Alignment::Center)
-    .width(Length::Fill);
-
+    .align_y(Alignment::Center);
     if entry.is_main {
-        name_row = name_row.push(wt_tag("main", tokens, reading));
+        content = content.push(wt_tag("main", tokens, reading));
     }
     if entry.locked {
-        name_row = name_row.push(wt_tag("locked", tokens, reading));
+        content = content.push(wt_tag("locked", tokens, reading));
     }
-
-    let marker: Element<'a, Message> = glyph(
-        if open { WORKTREE_MARK } else { OPEN_MARK },
-        (reading.size - 2.0).max(9.0),
-        if open {
-            tokens.accent_primary
-        } else {
-            tokens.text_muted
-        },
-        &reading,
-    );
-
-    let mut branch_line = row![
-        text(branch)
-            .font(reading.font)
-            .size((reading.size - 2.0).max(11.0))
-            .wrapping(Wrapping::None)
-            .style(move |_| iced::widget::text::Style {
-                color: Some(tokens.accent_primary),
-            })
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center)
-    .width(Length::Fill);
-    branch_line = branch_line.push(tracking_badges(ahead, behind, tokens, reading));
-
-    let body = button(
-        row![
-            marker,
-            column![
-                container(name_row).width(Length::Fill).clip(true),
-                container(branch_line).width(Length::Fill).clip(true),
-            ]
-            .spacing(1)
-            .width(Length::Fill),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+    content = content.push(tracking_badges(ahead, behind, tokens, reading));
+    tree_row(
+        1,
+        None,
+        Some(glyph(
+            if open { WORKTREE_MARK } else { OPEN_MARK },
+            (reading.size - 2.0).max(9.0),
+            if open { tokens.accent_primary } else { tokens.text_muted },
+            &reading,
+        )),
+        content.into(),
+        active,
+        Message::OpenWorktree(entry.path.clone()),
+        Some(ContextTarget::Worktree {
+            path: entry.path.clone(),
+            branch: entry.branch.clone(),
+            is_main: entry.is_main,
+        }),
+        tokens,
     )
-    .padding([3, 6])
-    .width(Length::Fill)
-    .on_press(Message::OpenWorktree(entry.path.clone()))
-    .style(move |_theme, status| {
-        let hot = matches!(status, Status::Hovered | Status::Pressed);
-        iced::widget::button::Style {
-            background: Some(Background::Color(if active {
-                tokens.bg_raised
-            } else if hot {
-                tokens.border
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: tokens.text_secondary,
-            border: Border {
-                color: if active {
-                    tokens.accent_primary
-                } else {
-                    Color::TRANSPARENT
-                },
-                width: if active { 1.0 } else { 0.0 },
-                radius: 4.0.into(),
-            },
-            shadow: Shadow::default(),
-        }
-    });
-
-    let remove_key = format!("worktree-remove:{}", entry.path);
-    let tip_ready = app.tip_ready(&remove_key);
-    row![
-        container(body).width(Length::Fill).clip(true),
-        icon_button(
-            "×",
-            "Remove worktree",
-            remove_key,
-            tip_ready,
-            Message::AskRemoveWorktree {
-                path: entry.path.clone(),
-            },
-            !entry.is_main && !app.worktree_busy,
-            false,
-            tokens,
-            reading,
-        ),
-    ]
-    .spacing(4)
-    .align_y(Alignment::Center)
-    .width(Length::Fill)
-    .into()
 }
 
 fn wt_tag<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -451,140 +427,6 @@ fn wt_tag<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> El
     .into()
 }
 
-// ── STASHES ──────────────────────────────────────────────────────────────────
-
-fn stash_rows<'a>(stashes: &'a [Stash], tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    let mut rows = column![].spacing(2).padding([4, 8]);
-    for stash in stashes {
-        let msg = Message::Select(crate::selection::Selection::Stash {
-            index: stash.index,
-            message: stash.message.clone(),
-        });
-        rows = rows.push(branch_row(
-            STASH_MARK,
-            stash.message.clone(),
-            msg,
-            false,
-            false,
-            None,
-            0,
-            0,
-            tokens,
-            reading,
-        ));
-    }
-    if stashes.is_empty() {
-        rows = rows.push(empty_hint("No stashes", tokens, reading));
-    }
-    rows.into()
-}
-
-// ── TAGS ─────────────────────────────────────────────────────────────────────
-
-fn tag_rows<'a>(tags: &'a [Tag], tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    let mut rows = column![].spacing(2).padding([4, 8]);
-    for tag in tags {
-        let msg = Message::Select(crate::selection::Selection::Tag {
-            name: tag.name.clone(),
-            commit_id: tag.commit_id.clone(),
-        });
-        rows = rows.push(branch_row(
-            TAG_MARK,
-            tag.name.clone(),
-            msg,
-            false,
-            false,
-            None,
-            0,
-            0,
-            tokens,
-            reading,
-        ));
-    }
-    if tags.is_empty() {
-        rows = rows.push(empty_hint("No tags", tokens, reading));
-    }
-    rows.into()
-}
-
-// ── Shared helpers ────────────────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-fn branch_row<'a>(
-    mark: &'static str,
-    label: String,
-    message: Message,
-    selected: bool,
-    accent: bool,
-    context: Option<ContextTarget>,
-    ahead: usize,
-    behind: usize,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let mark_color = if accent {
-        tokens.accent_primary
-    } else if selected {
-        tokens.text_primary
-    } else {
-        tokens.text_muted
-    };
-    let label_color = if accent {
-        tokens.accent_primary
-    } else if selected {
-        tokens.text_primary
-    } else {
-        tokens.text_secondary
-    };
-    let row = button(
-        row![
-            glyph(mark, reading.size, mark_color, &reading),
-            container(
-                text(label)
-                    .font(reading.font)
-                    .size(reading.size)
-                    .wrapping(Wrapping::None)
-                    .style(move |_| iced::widget::text::Style {
-                        color: Some(label_color),
-                    }),
-            )
-            .width(Length::Fill)
-            .clip(true),
-            tracking_badges(ahead, behind, tokens, reading),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding([4, 8])
-    .on_press(message)
-    .style(move |_theme, status| {
-        let hot = matches!(status, Status::Hovered | Status::Pressed);
-        iced::widget::button::Style {
-            background: Some(Background::Color(if selected || hot {
-                tokens.border
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: label_color,
-            border: Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: 4.0.into(),
-            },
-            shadow: Shadow::default(),
-        }
-    });
-    if let Some(target) = context {
-        mouse_area(row)
-            .on_right_press(Message::OpenContextMenu { target })
-            .into()
-    } else {
-        row.into()
-    }
-}
-
-/// Ahead/behind for a worktree: its own open session first, else the branch tip in any session.
 fn tracking_for_worktree(app: &GitApp, entry: &Worktree) -> (usize, usize) {
     if let Some(session) = app
         .sessions
@@ -650,14 +492,4 @@ fn tracking_badges<'a>(
         );
     }
     badges.into()
-}
-
-fn empty_hint<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    text(label)
-        .font(reading.font)
-        .size(reading.size)
-        .style(move |_| iced::widget::text::Style {
-            color: Some(tokens.text_muted),
-        })
-        .into()
 }

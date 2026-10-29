@@ -32,6 +32,32 @@ pub(super) struct Reading {
     pub size: f32,
 }
 
+/// iced's default line height is 1.3 × the font size.
+const LINE_HEIGHT_FACTOR: f32 = 1.3;
+
+/// Height of one text line at `size`, for cells that must stay on one line.
+pub(super) fn one_line_height(size: f32) -> f32 {
+    (size * LINE_HEIGHT_FACTOR).ceil() + 1.0
+}
+
+/// A text cell that never shows a second line.
+///
+/// iced_graphics 0.13.0 ignores `Wrapping::None`: `Paragraph::with_text` stores the wrapping but
+/// never calls `buffer.set_wrap`, so cosmic-text word-wraps anyway. Clamping the height and
+/// clipping hides the wrapped remainder, which reads as truncation. Remove once on iced 0.14.
+pub(super) fn one_line<'a>(
+    content: impl Into<Element<'a, Message>>,
+    size: f32,
+    width: Length,
+) -> Element<'a, Message> {
+    container(content)
+        .width(width)
+        .height(Length::Fixed(one_line_height(size)))
+        .align_y(iced::Alignment::Center)
+        .clip(true)
+        .into()
+}
+
 pub(super) fn reading(settings: &AppSettings) -> Reading {
     let family = font_family(&settings.ui_font);
     let font = Font {
@@ -384,6 +410,22 @@ pub(super) fn accent_button<'a>(
         .padding([2, 8])
         .on_press_maybe(enabled.then_some(message))
         .style(move |_theme, status| bordered_button(tokens, status, enabled, true))
+        .into()
+}
+
+/// Bordered text button with an owned label; `accent` fills it for the primary command.
+pub(super) fn labelled_button<'a>(
+    label: String,
+    message: Message,
+    enabled: bool,
+    accent: bool,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    button(text(label).font(reading.font).size(reading.size))
+        .padding([2, 6])
+        .on_press_maybe(enabled.then_some(message))
+        .style(move |_theme, status| bordered_button(tokens, status, enabled, accent))
         .into()
 }
 
