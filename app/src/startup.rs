@@ -20,13 +20,15 @@ pub fn launch_path(
     }
 }
 
-/// Store `path` as the last repository. A failed load or save leaves the file unchanged
-/// apart from what the store itself already wrote, and never blocks opening.
+/// Store `path` as the last repository and move it to the front of the recent list.
+/// A failed load or save leaves the file unchanged apart from what the store itself
+/// already wrote, and never blocks opening. Nothing is written when neither changed.
 pub fn remember(store: &impl ConfigStore, path: &str) {
     let Ok(mut settings) = store.load_settings() else {
         return;
     };
-    if settings.last_repo_path.as_deref() == Some(path) {
+    let recent_changed = settings.remember_recent(path);
+    if settings.last_repo_path.as_deref() == Some(path) && !recent_changed {
         return;
     }
     settings.last_repo_path = Some(path.to_string());
@@ -92,6 +94,7 @@ mod tests {
             agent_token: String::new(),
             agent_model: AppSettings::DEFAULT_AGENT_MODEL.to_string(),
             worktree_tab_retention: Default::default(),
+            recent_repositories: path.map(str::to_string).into_iter().collect(),
         }
     }
 
@@ -150,6 +153,22 @@ mod tests {
         let store = MemoryStore::holding(settings_with(Some(r"D:\repo")));
         remember(&store, r"D:\repo");
         assert_eq!(*store.saves.lock().expect("save count"), 0);
+    }
+
+    #[test]
+    fn remember_moves_the_path_to_the_front_of_the_recent_list() {
+        let store = MemoryStore::holding(settings_with(Some(r"D:\old")));
+        remember(&store, r"D:\repo");
+        let saved = store
+            .saved
+            .lock()
+            .expect("saved settings")
+            .clone()
+            .expect("one save");
+        assert_eq!(
+            saved.recent_repositories,
+            vec![r"D:\repo".to_string(), r"D:\old".to_string()]
+        );
     }
 
     #[test]

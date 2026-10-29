@@ -42,6 +42,7 @@ impl AppState {
         match event {
             ViewEvent::StatusUpdated(status) => {
                 self.current_status = Some(status);
+                sync_head_tracking_from_status(self);
                 self.loading = false;
             }
             ViewEvent::LogUpdated(commits) => {
@@ -51,6 +52,7 @@ impl AppState {
             }
             ViewEvent::BranchesUpdated(branches) => {
                 self.branches = branches;
+                sync_head_tracking_from_status(self);
                 self.loading = false;
             }
             ViewEvent::StashesUpdated(stashes) => {
@@ -67,6 +69,29 @@ impl AppState {
             ViewEvent::ErrorOccurred(_) => {
                 self.loading = false;
             }
+        }
+    }
+}
+
+/// Prefer `git status` ahead/behind on HEAD when the branch list left it at zero.
+fn sync_head_tracking_from_status(state: &mut AppState) {
+    let Some(tracking) = state
+        .current_status
+        .as_ref()
+        .and_then(|status| status.tracking.as_ref())
+    else {
+        return;
+    };
+    let ahead = tracking.ahead;
+    let behind = tracking.behind;
+    if let Some(branch) = state
+        .branches
+        .iter_mut()
+        .find(|branch| branch.is_head && !branch.is_remote)
+    {
+        if branch.ahead == 0 && branch.behind == 0 {
+            branch.ahead = ahead;
+            branch.behind = behind;
         }
     }
 }

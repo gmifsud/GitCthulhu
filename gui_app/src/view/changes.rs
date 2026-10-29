@@ -16,6 +16,24 @@ use super::chrome::{field_style, fold_mark, glyph, icon_button, Reading};
 /// "Select all" still covers every file; only the drawing is bounded.
 const FILE_ROWS_SHOWN: usize = 500;
 
+fn selection_has_suggestable_files(app: &GitApp, selection: &Selection) -> bool {
+    if !app.session().marked_files.is_empty() {
+        return true;
+    }
+    if matches!(selection, Selection::File { .. }) {
+        return true;
+    }
+    app.session()
+        .state
+        .current_status
+        .as_ref()
+        .is_some_and(|status| {
+            !status.staged_files.is_empty()
+                || !status.unstaged_files.is_empty()
+                || !status.untracked_files.is_empty()
+        })
+}
+
 /// Working-tree staging for the right files navigator (no left-rail chrome).
 pub(crate) fn wip_working_tree_block<'a>(
     app: &'a GitApp,
@@ -77,8 +95,7 @@ fn wip_toolbar<'a>(
                 Message::SuggestCommit,
                 !app.agent_busy
                     && !app.session().state.loading
-                    && (!app.session().marked_files.is_empty()
-                        || matches!(selection, Selection::File { .. })),
+                    && (selection_has_suggestable_files(app, selection)),
                 false,
                 tokens,
                 reading,

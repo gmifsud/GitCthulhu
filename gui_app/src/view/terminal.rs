@@ -1,11 +1,11 @@
 use crate::app::{GitApp, Message};
 use crate::theme::DesignTokens;
-use iced::widget::{column, container, row, text, text_editor};
+use iced::widget::{column, container, row, text, text_editor, text_input};
 use iced::{Background, Border, Color, Element, Font, Length, Shadow, Theme};
 
-use super::chrome::{command_button, Reading};
+use super::chrome::{command_button, field_style, Reading};
 
-const PANE_HEIGHT: f32 = 132.0;
+const PANE_HEIGHT: f32 = 160.0;
 const PROMPT_MARK: &str = "PS ";
 
 pub(super) fn terminal_pane<'a>(
@@ -39,17 +39,46 @@ pub(super) fn terminal_pane<'a>(
             error: tokens.removed,
             output: tokens.text_primary,
         };
-        pane = pane.push(
-            text_editor(&app.terminal_log)
-                .font(reading.mono)
-                .size(reading.size)
-                .padding(8)
-                .placeholder("No provider output yet.")
-                .on_action(Message::TerminalEdited)
-                .highlight_with::<ShellHighlighter>(colours, shell_format)
-                .style(move |_theme, _status| shell_style(tokens))
-                .height(Length::Fill),
-        );
+        let placeholder = if app.shell_busy {
+            "Running…"
+        } else {
+            "Type a command and press Enter"
+        };
+        let mut input = text_input(placeholder, &app.shell_input)
+            .font(reading.mono)
+            .size(reading.size)
+            .padding([4, 8])
+            .on_input(Message::ShellInputChanged)
+            .style(field_style(tokens));
+        if !app.shell_busy {
+            input = input.on_submit(Message::ShellSubmit);
+        }
+        pane = pane
+            .push(
+                text_editor(&app.terminal_log)
+                    .font(reading.mono)
+                    .size(reading.size)
+                    .padding(8)
+                    .placeholder("Command output appears here.")
+                    .on_action(Message::TerminalEdited)
+                    .highlight_with::<ShellHighlighter>(colours, shell_format)
+                    .style(move |_theme, _status| shell_style(tokens))
+                    .height(Length::Fill),
+            )
+            .push(
+                row![
+                    text(">")
+                        .font(reading.mono)
+                        .size(reading.size)
+                        .style(move |_| text::Style {
+                            color: Some(tokens.accent_primary),
+                        }),
+                    input,
+                ]
+                .spacing(6)
+                .padding([4, 8])
+                .align_y(iced::Alignment::Center),
+            );
     }
 
     container(pane)
@@ -143,6 +172,7 @@ fn shell_error(line: &str) -> bool {
         "not connected",
         "no model",
         "interrupted",
+        "exit ",
     ]
     .iter()
     .any(|needle| lower.contains(needle))

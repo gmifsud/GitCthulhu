@@ -379,6 +379,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
             is_remote: false,
             is_head: true,
             tip: tip_id.clone(),
+        ahead: 0,
+        behind: 0,
         })
     );
     assert_eq!(
@@ -388,6 +390,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
             is_remote: false,
             is_head: false,
             tip: tip_id.clone(),
+        ahead: 0,
+        behind: 0,
         })
     );
     assert_eq!(
@@ -397,6 +401,8 @@ fn branches_lists_local_and_remote_and_marks_head() {
             is_remote: true,
             is_head: false,
             tip: tip_id,
+        ahead: 0,
+        behind: 0,
         })
     );
     assert!(
@@ -1088,6 +1094,49 @@ fn clone_repository_copies_a_local_repository_under_the_parent() {
     assert_eq!(read.replace("\r\n", "\n"), "one\n");
     assert!(GitoxideAdapter::clone_repository("-rf", parent_path).is_err());
     assert!(GitoxideAdapter::clone_repository(source_path, parent_path).is_err());
+}
+
+#[test]
+fn a_stash_lists_its_commit_and_its_patch_is_the_stashed_change() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "one\n")]);
+    fixture.write_file("a.txt", "one\ntwo\n");
+    let adapter = fixture.adapter();
+    adapter.stash_push("wip: colon: in subject").expect("stash");
+
+    let stash = adapter.stashes().expect("list").remove(0);
+    assert_eq!(stash.message, format!("On {}: wip: colon: in subject", fixture.head_branch()));
+    assert_eq!(stash.commit_id.len(), 40);
+
+    // A stash is a merge commit; its first-parent diff is `git stash show -p`.
+    let patches = adapter.commit_patch(&stash.commit_id).expect("stash patch");
+    let patch = patches.iter().find(|patch| patch.path == "a.txt").expect("a.txt in stash");
+    assert!(
+        patch
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| line.kind == core_domain::DiffLineKind::Added && line.text == "two"),
+        "{patches:?}"
+    );
+}
+
+#[test]
+fn a_merge_commit_patch_is_its_first_parent_diff() {
+    let fixture = TestRepo::new();
+    fixture.commit("base", &[("a.txt", "one\n")], 0);
+    let trunk = fixture.head_branch();
+    git_in(fixture.workdir(), &["checkout", "-q", "-b", "side"]);
+    fixture.write_file("b.txt", "side\n");
+    git_in(fixture.workdir(), &["add", "b.txt"]);
+    git_in(fixture.workdir(), &["commit", "-q", "-m", "side"]);
+    git_in(fixture.workdir(), &["checkout", "-q", &trunk]);
+    git_in(fixture.workdir(), &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+    let merge = head_at(fixture.workdir());
+
+    let patches = fixture.adapter().commit_patch(&merge.to_string()).expect("merge patch");
+    assert_eq!(patches.iter().map(|patch| patch.path.as_str()).collect::<Vec<_>>(), ["b.txt"]);
 }
 
 #[test]

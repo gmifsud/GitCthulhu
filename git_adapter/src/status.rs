@@ -171,3 +171,85 @@ fn parse_ahead_behind(text: &str) -> Result<(usize, usize), DomainError> {
         ))),
     }
 }
+
+/// Ahead/behind for every local branch that has an upstream, via `for-each-ref`.
+///
+/// Keys are short branch names (`main`, not `refs/heads/main`). Remotes are omitted.
+/// Uses `|` as separator (more reliable than a literal tab on Windows shells).
+pub(crate) fn local_branch_tracking(
+    repo_path: &str,
+) -> Result<BTreeMap<String, (usize, usize)>, DomainError> {
+    let text = match super::command::run_git_stdout(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)|%(upstream:track)",
+            "refs/heads",
+        ],
+    ) {
+        Ok(text) => text,
+        Err(DomainError::Unknown(_)) => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error),
+    };
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim().trim_end_matches('\r');
+        let Some((name, track)) = line.split_once('|') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some((ahead, behind)) = parse_upstream_track(track) {
+            map.insert(name.to_string(), (ahead, behind));
+        }
+    }
+    Ok(map)
+}
+
+/// Parse `%(upstream:track)` forms like `[ahead 1, behind 2]`, `[ahead 3]`, `[behind 1]`.
+fn parse_upstream_track(track: &str) -> Option<(usize, usize)> {
+    let track = track.trim();
+    if track.is_empty() || track.eq_ignore_ascii_case("[gone]") {
+        return None;
+    }
+    let inner = track
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(track);
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
+    let mut saw = false;
+    for part in inner.split(',') {
+        let part = part.trim();
+        if let Some(n) = part
+            .strip_prefix("ahead ")
+            .and_then(|n| n.trim().parse().ok())
+        {
+            ahead = n;
+            saw = true;
+        } else if let Some(n) = part
+            .strip_prefix("behind ")
+            .and_then(|n| n.trim().parse().ok())
+        {
+            behind = n;
+            saw = true;
+        }
+    }
+    saw.then_some((ahead, behind))
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::parse_upstream_track;
+
+    #[test]
+    fn parse_upstream_track_forms() {
+        assert_eq!(parse_upstream_track("[ahead 1, behind 2]"), Some((1, 2)));
+        assert_eq!(parse_upstream_track("[ahead 3]"), Some((3, 0)));
+        assert_eq!(parse_upstream_track("[behind 4]"), Some((0, 4)));
+        assert_eq!(parse_upstream_track(""), None);
+        assert_eq!(parse_upstream_track("[gone]"), None);
+    }
+}

@@ -73,6 +73,66 @@ fn in_background<T: Send + 'static>(
     async move { receiver.await.unwrap_or_else(|_| interrupted()) }
 }
 
+/// Run a shell command in `cwd` and return the printed transcript body.
+pub(crate) fn shell_in_background(
+    cwd: String,
+    command: String,
+) -> impl Future<Output = (String, String)> {
+    in_background(
+        move || {
+            let output = run_shell_command(&cwd, &command);
+            (command, output)
+        },
+        || {
+            (
+                String::new(),
+                "command was interrupted before it finished.".to_string(),
+            )
+        },
+    )
+}
+
+fn run_shell_command(cwd: &str, command: &str) -> String {
+    #[cfg(windows)]
+    let result = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .current_dir(cwd)
+        .output();
+    #[cfg(not(windows))]
+    let result = std::process::Command::new("sh")
+        .args(["-lc", command])
+        .current_dir(cwd)
+        .output();
+
+    match result {
+        Ok(output) => {
+            let mut text = String::new();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.is_empty() {
+                text.push_str(stdout.trim_end());
+            }
+            if !stderr.is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(stderr.trim_end());
+            }
+            if text.is_empty() {
+                if output.status.success() {
+                    text.push_str("(no output)");
+                } else {
+                    text.push_str(&format!("exit {}", output.status));
+                }
+            } else if !output.status.success() {
+                text.push_str(&format!("\nexit {}", output.status));
+            }
+            text
+        }
+        Err(error) => format!("failed to run command: {error}"),
+    }
+}
+
 pub(crate) fn list_models_in_background(
     list: crate::ModelLister,
     token: String,
@@ -523,7 +583,10 @@ pub(crate) fn error_message(error: &DomainError) -> String {
     match error {
         DomainError::RepositoryNotFound => "Not a Git repository.".to_string(),
         DomainError::AccessDenied => "Access denied.".to_string(),
-        DomainError::AuthenticationFailed => "Authentication failed.".to_string(),
+        DomainError::AuthenticationFailed => {
+            "Kilo authentication failed. Paste a valid API key under Settings → Agents and Models."
+                .to_string()
+        }
         DomainError::Unknown(message) => message.clone(),
     }
 }
@@ -550,6 +613,8 @@ mod tests {
             is_remote: false,
             is_head,
             tip: String::new(),
+        ahead: 0,
+        behind: 0,
         }
     }
 

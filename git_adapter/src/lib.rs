@@ -81,6 +81,36 @@ impl GitoxideAdapter {
     }
 }
 
+fn walk_commits(
+    repo: &gix::Repository,
+    tips: Vec<gix::ObjectId>,
+    limit: usize,
+) -> Result<Vec<Commit>, DomainError> {
+    if tips.is_empty() || limit == 0 {
+        return Ok(vec![]);
+    }
+    let walk = repo
+        .rev_walk(tips)
+        .sorting(gix::traverse::commit::simple::Sorting::ByCommitTimeNewestFirst)
+        .all()
+        .map_err(unknown)?;
+
+    walk.take(limit)
+        .map(|info| {
+            let info = info.map_err(unknown)?;
+            let commit = info.object().map_err(unknown)?;
+            let author = commit.author().map_err(unknown)?;
+            Ok(Commit {
+                id: info.id.to_string(),
+                parent_ids: info.parent_ids.iter().map(|id| id.to_string()).collect(),
+                author: author.name.to_string(),
+                message: commit.message().map_err(unknown)?.summary().to_string(),
+                timestamp: commit.time().map_err(unknown)?.seconds,
+            })
+        })
+        .collect()
+}
+
 /// Tips of every local branch, plus `HEAD` when it points at a commit.
 ///
 /// A detached `HEAD` is not a branch tip, and the commit on screen should still appear.
@@ -156,27 +186,36 @@ impl GitRepository for GitoxideAdapter {
         if tips.is_empty() {
             return Ok(vec![]);
         }
+        let limit = max_count.unwrap_or(usize::MAX);
+        let head_id = repo
+            .head()
+            .ok()
+            .and_then(|head| head.id().map(|id| id.detach()));
 
-        let walk = repo
-            .rev_walk(tips)
-            .sorting(gix::traverse::commit::simple::Sorting::ByCommitTimeNewestFirst)
-            .all()
-            .map_err(unknown)?;
+        let mut commits = walk_commits(&repo, tips, limit)?;
 
-        walk.take(max_count.unwrap_or(usize::MAX))
-            .map(|info| {
-                let info = info.map_err(unknown)?;
-                let commit = info.object().map_err(unknown)?;
-                let author = commit.author().map_err(unknown)?;
-                Ok(Commit {
-                    id: info.id.to_string(),
-                    parent_ids: info.parent_ids.iter().map(|id| id.to_string()).collect(),
-                    author: author.name.to_string(),
-                    message: commit.message().map_err(unknown)?.summary().to_string(),
-                    timestamp: commit.time().map_err(unknown)?.seconds,
-                })
-            })
-            .collect()
+        // Other local branches can fill a multi-commit page with newer tips and
+        // push HEAD off it — then Focus / the current checkout looks empty.
+        // For page-sized loads, keep the checkout tip (and its ancestors) present.
+        if limit > 1 {
+            if let Some(head) = head_id {
+                let head_key = head.to_string();
+                if !commits.iter().any(|commit| commit.id == head_key) {
+                    let mut from_head = walk_commits(&repo, vec![head], limit)?;
+                    let mut seen: std::collections::HashSet<String> =
+                        from_head.iter().map(|c| c.id.clone()).collect();
+                    for commit in commits {
+                        if seen.insert(commit.id.clone()) {
+                            from_head.push(commit);
+                        }
+                    }
+                    from_head.truncate(limit);
+                    commits = from_head;
+                }
+            }
+        }
+
+        Ok(commits)
     }
 
     fn branches(&self) -> Result<Vec<Branch>, DomainError> {
@@ -211,7 +250,20 @@ impl GitRepository for GitoxideAdapter {
                 is_remote,
                 is_head,
                 tip: commit.id().to_string(),
+                ahead: 0,
+                behind: 0,
             });
+        }
+        if let Ok(tracking) = status::local_branch_tracking(&self.repo_path) {
+            for branch in &mut branches {
+                if branch.is_remote {
+                    continue;
+                }
+                if let Some(&(ahead, behind)) = tracking.get(&branch.name) {
+                    branch.ahead = ahead;
+                    branch.behind = behind;
+                }
+            }
         }
         Ok(branches)
     }
@@ -424,7 +476,9 @@ impl GitRepository for GitoxideAdapter {
         }
         let text = run_git_stdout(
             &self.repo_path,
-            &["show", "--format=", "--unified=3", commit_id],
+            // -m --first-parent: a merge (and a stash, which is a merge commit) diffs against
+            // its first parent. Without it `git show` prints a combined diff, usually empty.
+            &["show", "--format=", "--unified=3", "-m", "--first-parent", commit_id],
         )?;
         Ok(parse_patches(&text))
     }
@@ -514,7 +568,7 @@ impl GitRepository for GitoxideAdapter {
 
     fn stashes(&self) -> Result<Vec<Stash>, DomainError> {
         self.open_repo()?;
-        let text = run_git_stdout(&self.repo_path, &["stash", "list"])?;
+        let text = run_git_stdout(&self.repo_path, &stash::LIST_ARGS)?;
         stash::parse_stash_list(&text)
     }
 

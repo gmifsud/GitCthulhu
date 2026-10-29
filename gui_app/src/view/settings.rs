@@ -87,13 +87,19 @@ pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Elem
             .style(move |_| text::Style {
                 color: Some(tokens.accent_primary),
             }),
-        text("Kilo token")
+        text("Kilo API key")
             .font(reading.font)
             .size(reading.size)
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
-        text_input("Paste your Kilo token", &settings.agent_token)
+        text("From kilo.ai → API keys. Used for ✦ commit suggestions.")
+            .font(reading.font)
+            .size((reading.size - 2.0).max(11.0))
+            .style(move |_| text::Style {
+                color: Some(tokens.text_muted),
+            }),
+        text_input("Paste your Kilo API key", &settings.agent_token)
             .secure(true)
             .on_input(Message::AgentTokenChanged)
             .padding(6)

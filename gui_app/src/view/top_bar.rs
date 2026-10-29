@@ -1,26 +1,23 @@
 use crate::app::{GitApp, Message};
+use crate::palette::REPOSITORY_SCOPE;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use iced::widget::text::Wrapping;
-use iced::widget::{container, horizontal_space, row, text, text_input};
+use iced::widget::{container, horizontal_space, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{
-    branch_chip, embedded_field_style, glyph, quiet_button, Reading, SEARCH_MARK,
-};
+use super::chrome::{branch_chip, one_line, quiet_button, Reading};
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
 use super::refs::current_branch_name;
 
 const TOP_BAR_HEIGHT: f32 = 40.0;
 const TOP_BAR_PADDING: f32 = 12.0;
-const SEARCH_WIDTH: f32 = 280.0;
 const CLUSTER_SPACING: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 
 const APP_NAME: &str = "GitCthulhu";
-const SEARCH_PLACEHOLDER: &str = "Search commits, refs, files…";
-const SEARCH_SHORTCUT: &str = "Ctrl K";
 const OPEN_REPOSITORY: &str = "Open…";
+const RECENT_REPOSITORIES: &str = "Recent";
 const SETTINGS: &str = "Settings";
 const MARK_HEIGHT: f32 = 11.0;
 const MARK_THICKNESS: f32 = 2.0;
@@ -70,6 +67,13 @@ pub(super) fn top_bar<'a>(
     right = right.push(hunk_segment(app.hunk_mode, tokens));
     right = right.push(layout_segment(app.layout, tokens));
     right = right.push(quiet_button(
+        RECENT_REPOSITORIES,
+        Message::TogglePalette(format!("{REPOSITORY_SCOPE} ")),
+        !app.session().state.loading && app.settings.recent_repositories.len() > 1,
+        tokens,
+        reading,
+    ));
+    right = right.push(quiet_button(
         OPEN_REPOSITORY,
         Message::ChooseRepositoryFolder,
         !app.session().state.loading,
@@ -84,7 +88,7 @@ pub(super) fn top_bar<'a>(
         reading,
     ));
 
-    let bar = row![left, search_field(tokens, reading), right,]
+    let bar = row![left, right]
         .spacing(CLUSTER_SPACING)
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -114,7 +118,7 @@ fn mark<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
 }
 
 fn repository_path<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    container(
+    one_line(
         text(path.to_string())
             .font(reading.mono)
             .size(reading.size)
@@ -122,10 +126,9 @@ fn repository_path<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> El
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
+        reading.size,
+        Length::Fill,
     )
-    .width(Length::Fill)
-    .clip(true)
-    .into()
 }
 
 fn tracking<'a>(summary: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -137,57 +140,6 @@ fn tracking<'a>(summary: String, tokens: DesignTokens, reading: Reading) -> Elem
             color: Some(tokens.text_secondary),
         })
         .into()
-}
-
-fn search_field<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    container(
-        row![
-            glyph(
-                SEARCH_MARK,
-                reading.size,
-                tokens.text_secondary,
-                &reading,
-            ),
-            text_input(SEARCH_PLACEHOLDER, "")
-                .padding(0)
-                .width(Length::Fill)
-                .style(embedded_field_style(tokens)),
-            container(
-                text(SEARCH_SHORTCUT)
-                    .font(reading.mono)
-                    .size((reading.size - 2.0).max(10.0))
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_muted),
-                    }),
-            )
-            .padding([1, 5])
-            .style(move |_theme: &Theme| container::Style {
-                background: Some(Background::Color(Color::TRANSPARENT)),
-                text_color: Some(tokens.text_muted),
-                border: Border {
-                    color: tokens.chip_border,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                shadow: Shadow::default(),
-            }),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding([4, 10])
-    .width(Length::Fixed(SEARCH_WIDTH))
-    .style(move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(tokens.bg_app)),
-        text_color: Some(tokens.text_secondary),
-        border: Border {
-            color: tokens.chip_border,
-            width: 1.0,
-            radius: SEG_RADIUS.into(),
-        },
-        shadow: Shadow::default(),
-    })
-    .into()
 }
 
 fn hunk_segment<'a>(current: crate::layout::HunkMode, tokens: DesignTokens) -> Element<'a, Message> {
@@ -270,6 +222,7 @@ fn layout_segment<'a>(
 ) -> Element<'a, Message> {
     container(
         row![
+            layout_button(crate::layout::LayoutPreset::Log, current, tokens),
             layout_button(crate::layout::LayoutPreset::Columns, current, tokens),
             layout_button(
                 crate::layout::LayoutPreset::InspectorOverDiff,
@@ -338,6 +291,13 @@ fn layout_button<'a>(
 
 fn layout_mark(preset: crate::layout::LayoutPreset, ink: Color) -> Element<'static, Message> {
     match preset {
+        // History | inspector above a full-width diff.
+        crate::layout::LayoutPreset::Log => iced::widget::column![
+            row![mark_bar(7.0, 5.0, ink), mark_bar(3.0, 5.0, ink)].spacing(MARK_GAP),
+            mark_bar(MARK_HEIGHT, 4.0, ink),
+        ]
+        .spacing(MARK_GAP)
+        .into(),
         crate::layout::LayoutPreset::Columns => row![
             mark_bar(MARK_THICKNESS, MARK_HEIGHT, ink),
             mark_bar(MARK_THICKNESS, MARK_HEIGHT, ink),

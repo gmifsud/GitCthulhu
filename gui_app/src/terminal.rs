@@ -87,6 +87,13 @@ impl Transcript {
         self.entries.clear();
     }
 
+    /// Replace the body of the newest entry (e.g. "Running…" → real output).
+    pub(crate) fn finish_last(&mut self, text: impl Into<String>) {
+        if let Some(entry) = self.entries.last_mut() {
+            entry.text = clip(&text.into(), BODY_LIMIT);
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn entries(&self) -> &[TranscriptEntry] {
         &self.entries

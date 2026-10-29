@@ -113,6 +113,8 @@ mod tests {
             is_remote: false,
             is_head: true,
             tip: "abc".into(),
+        ahead: 0,
+        behind: 0,
         }];
         assert_eq!(
             session_head_tip(&branches, Some("zzz")).as_deref(),
@@ -127,6 +129,8 @@ mod tests {
             is_remote: false,
             is_head: false,
             tip: "abc".into(),
+        ahead: 0,
+        behind: 0,
         }];
         assert_eq!(
             session_head_tip(&branches, Some("det")).as_deref(),

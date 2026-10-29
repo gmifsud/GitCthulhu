@@ -11,12 +11,12 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 
 use crate::theme::hex_color;
 
-/// Height of one commit row. Tall enough for pills above the subject so the
-/// graph column stays first without crushing the message into the same line.
-pub(crate) const ROW_HEIGHT: f32 = 40.0;
+/// Height of one commit row: one line of text, pills inline.
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
 /// Horizontal distance between lane centres.
-const LANE_SPACING: f32 = 14.0;
+const LANE_SPACING: f32 = 16.0;
 const DOT_RADIUS: f32 = 4.0;
+const RING_RADIUS: f32 = 6.5;
 const LINE_WIDTH: f32 = 2.0;
 /// Lane colours, cycled by lane index.
 const LANE_COLOURS: [u32; 6] = [0xF27D26, 0x3B82F6, 0x22C55E, 0xA855F7, 0xEC4899, 0x14B8A6];
@@ -93,7 +93,9 @@ pub(crate) fn graph_width(rows: &[GraphRow]) -> f32 {
     lanes as f32 * LANE_SPACING
 }
 
-fn lane_x(lane: usize) -> f32 {
+/// Lane centres grow right from the left edge so the tip (lane 0) sits
+/// against the left gutter — pills can touch the node.
+fn lane_x(lane: usize, _width: f32) -> f32 {
     LANE_SPACING * (lane as f32 + 0.5)
 }
 
@@ -101,8 +103,26 @@ fn lane_colour(lane: usize) -> Color {
     hex_color(LANE_COLOURS[lane % LANE_COLOURS.len()])
 }
 
+/// How the commit tip is marked on the canvas (local / remote / worktree).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum NodeMark {
+    /// Ordinary commit with no tip refs, or unknown.
+    #[default]
+    Plain,
+    /// Local branch tip (including HEAD).
+    Local,
+    /// Remote-tracking tip only.
+    Remote,
+    /// Local branch checked out in a worktree.
+    Worktree,
+}
+
 /// Canvas program that paints one row's slice of the graph.
-pub(crate) struct GraphCell(pub GraphRow);
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GraphCell {
+    pub row: GraphRow,
+    pub mark: NodeMark,
+}
 
 /// Tessellated geometry kept between frames, with the row it was built from.
 ///
@@ -111,7 +131,7 @@ pub(crate) struct GraphCell(pub GraphRow);
 #[derive(Default)]
 pub(crate) struct GraphCache {
     geometry: canvas::Cache,
-    drawn: RefCell<Option<GraphRow>>,
+    drawn: RefCell<Option<(GraphRow, NodeMark)>>,
 }
 
 impl<Message> canvas::Program<Message> for GraphCell {
@@ -125,20 +145,27 @@ impl<Message> canvas::Program<Message> for GraphCell {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let row = &self.0;
-        if state.drawn.borrow().as_ref() != Some(row) {
+        let key = (self.row.clone(), self.mark);
+        if state.drawn.borrow().as_ref() != Some(&key) {
             state.geometry.clear();
-            *state.drawn.borrow_mut() = Some(row.clone());
+            *state.drawn.borrow_mut() = Some(key);
         }
         let geometry = state.geometry.draw(renderer, bounds.size(), |frame| {
-            paint_row(frame, row, bounds.height);
+            paint_row(frame, &self.row, self.mark, bounds.width, bounds.height);
         });
         vec![geometry]
     }
 }
 
-fn paint_row(frame: &mut canvas::Frame, row: &GraphRow, bottom: f32) {
-    let dot = Point::new(lane_x(row.lane), bottom / 2.0);
+fn paint_row(
+    frame: &mut canvas::Frame,
+    row: &GraphRow,
+    mark: NodeMark,
+    width: f32,
+    bottom: f32,
+) {
+    let colour = lane_colour(row.lane);
+    let dot = Point::new(lane_x(row.lane, width), bottom / 2.0);
     let mut segment = |from: Point, to: Point, lane: usize| {
         frame.stroke(
             &canvas::Path::line(from, to),
@@ -150,21 +177,40 @@ fn paint_row(frame: &mut canvas::Frame, row: &GraphRow, bottom: f32) {
 
     for &lane in &row.passing {
         segment(
-            Point::new(lane_x(lane), 0.0),
-            Point::new(lane_x(lane), bottom),
+            Point::new(lane_x(lane, width), 0.0),
+            Point::new(lane_x(lane, width), bottom),
             lane,
         );
     }
     for &lane in &row.incoming {
-        segment(Point::new(lane_x(lane), 0.0), dot, lane);
+        segment(Point::new(lane_x(lane, width), 0.0), dot, lane);
     }
     for &lane in &row.outgoing {
-        segment(dot, Point::new(lane_x(lane), bottom), lane);
+        segment(dot, Point::new(lane_x(lane, width), bottom), lane);
     }
-    frame.fill(
-        &canvas::Path::circle(dot, DOT_RADIUS),
-        lane_colour(row.lane),
-    );
+
+    match mark {
+        NodeMark::Remote => {
+            frame.stroke(
+                &canvas::Path::circle(dot, DOT_RADIUS + 1.0),
+                canvas::Stroke::default()
+                    .with_color(colour)
+                    .with_width(LINE_WIDTH),
+            );
+        }
+        NodeMark::Worktree => {
+            frame.stroke(
+                &canvas::Path::circle(dot, RING_RADIUS),
+                canvas::Stroke::default()
+                    .with_color(colour)
+                    .with_width(1.5),
+            );
+            frame.fill(&canvas::Path::circle(dot, DOT_RADIUS), colour);
+        }
+        NodeMark::Local | NodeMark::Plain => {
+            frame.fill(&canvas::Path::circle(dot, DOT_RADIUS), colour);
+        }
+    }
 }
 
 #[cfg(test)]

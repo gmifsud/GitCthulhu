@@ -159,8 +159,7 @@ pub(crate) fn visible_selection(
 
 pub(crate) fn context_label(selection: &Selection) -> String {
     match selection {
-        Selection::Branch { .. } => "Branch".to_string(),
-        Selection::Remote { .. } => "Remote".to_string(),
+        Selection::Branch { name, .. } | Selection::Remote { name } => name.clone(),
         Selection::Commit { id } => short_hash(id).to_string(),
         Selection::File { .. } => "Changes".to_string(),
         Selection::Stash { index, .. } => format!("stash@{{{index}}}"),
@@ -279,6 +278,8 @@ mod tests {
             is_remote,
             is_head,
             tip: String::new(),
+        ahead: 0,
+        behind: 0,
         }
     }
 
@@ -332,7 +333,7 @@ mod tests {
         assert_eq!(items[9].command, RibbonCommand::Merge);
         assert!(!items[10].enabled);
         assert_eq!(items[10].command, RibbonCommand::Rebase);
-        assert_eq!(context_label(&selection), "Branch");
+        assert_eq!(context_label(&selection), "dev");
     }
 
     #[test]
@@ -375,7 +376,7 @@ mod tests {
         assert_eq!(labels(&items), ["Checkout", "Create"]);
         assert!(!items[0].enabled);
         assert!(items[1].enabled);
-        assert_eq!(context_label(&selection), "Remote");
+        assert_eq!(context_label(&selection), "origin/dev");
     }
 
     #[test]
@@ -488,6 +489,7 @@ mod tests {
         let stashes = vec![Stash {
             index: 0,
             message: "On main: other".to_string(),
+            commit_id: "5ta5h0".to_string(),
         }];
         let branches = vec![branch("dev", false, true)];
         let visible = visible_selection(Some(&stored), &branches, &[], &stashes, &[], None);
