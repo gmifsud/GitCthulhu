@@ -1,4 +1,5 @@
 mod branch;
+mod branch_popup;
 mod changes;
 mod chrome;
 mod files_nav;
@@ -8,6 +9,7 @@ mod context_overlay;
 mod explorer;
 mod filter_bar;
 mod history;
+mod operation;
 mod palette;
 mod patch;
 mod refs;
@@ -28,7 +30,7 @@ use iced::{Background, Border, Element, Length, Shadow, Theme};
 use branch::branch_prompt;
 use chrome::{compact, hairline, reading, Reading};
 use crate::theme::DesignTokens;
-use confirm::{confirm_detach, confirm_discard, confirm_drop_stash, history_prompt};
+use confirm::{confirm_detach, confirm_discard, confirm_drop_stash, history_prompt, stash_dialog};
 use context_overlay::context_menu_overlay;
 use palette::palette_overlay;
 use settings::settings_dialog;
@@ -61,6 +63,7 @@ impl GitApp {
             top_bar(self, tokens, reading),
             hairline(tokens),
             tab_strip(self, tokens, reading),
+            operation::operation_banner(self, tokens, reading),
             workspace(self, &selection, tokens, reading),
             terminal_pane(self, tokens, reading),
             status_bar(self, tokens, reading),
@@ -80,6 +83,8 @@ impl GitApp {
             // `opaque` keeps clicks and hovers from reaching the screen underneath.
             opaque(dialog)
         } else if let Some(overlay) = palette_overlay(self, tokens, reading) {
+            overlay
+        } else if let Some(overlay) = branch_popup::branch_popup(self, tokens, reading) {
             overlay
         } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
             overlay
@@ -108,8 +113,9 @@ impl GitApp {
                 return Some(confirm_detach(commit_id, tokens, reading));
             }
         }
-        if let Some((paths, _)) = &self.confirm_discard {
-            return Some(confirm_discard(paths, tokens, reading));
+        if let Some(files) = &self.confirm_discard {
+            let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+            return Some(confirm_discard(&paths, tokens, reading));
         }
         if let Some(stash) = &self.confirm_drop {
             return Some(confirm_drop_stash(&stash.message, tokens, reading));
@@ -118,7 +124,17 @@ impl GitApp {
             return Some(branch_prompt(prompt, tokens, reading));
         }
         if let Some(prompt) = &self.history_prompt {
-            return Some(history_prompt(prompt, tokens, reading));
+            let branches = &self.session().state.branches;
+            let current = refs::current_branch_name(branches);
+            let mergeable: Vec<String> = branches
+                .iter()
+                .filter(|branch| !(branch.is_head && !branch.is_remote))
+                .map(|branch| branch.name.clone())
+                .collect();
+            return Some(history_prompt(prompt, &mergeable, &current, tokens, reading));
+        }
+        if let Some(prompt) = &self.stash_prompt {
+            return Some(stash_dialog(prompt, tokens, reading));
         }
         if let Some(prompt) = &self.worktree_prompt {
             return Some(worktree_prompt(

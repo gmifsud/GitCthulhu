@@ -36,6 +36,8 @@ mod tests {
             tracking,
             head_commit_id: None,
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         }
     }
 

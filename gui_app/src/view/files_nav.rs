@@ -27,7 +27,7 @@ const FILES_PORTION: u16 = 3;
 const DETAILS_PORTION: u16 = 2;
 
 pub(crate) fn show_wip_block(status: Option<&RepoStatus>) -> bool {
-    status.is_some_and(|status| !change_sections(status).is_empty())
+    status.is_some_and(|status| !change_sections(status).is_empty() || !status.conflicted_files.is_empty())
 }
 
 /// A selection that names one object in history: its files and details replace the working tree.
@@ -248,6 +248,8 @@ mod tests {
             tracking: None,
             head_commit_id: None,
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         }
     }
 
@@ -259,6 +261,8 @@ mod tests {
             tracking: None,
             head_commit_id: None,
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         }
     }
 

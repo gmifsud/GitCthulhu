@@ -9,7 +9,7 @@ use iced::Task;
 
 use crate::appearance::{font_family, font_size};
 use crate::changes::{marked_paths, matching_change_paths, MarkedFile};
-use crate::context_menu::gitignore_pattern;
+use crate::context_menu::{gitignore_pattern, ContextTarget};
 use crate::jobs::{
     add_worktree_in_background, append_gitignore_in_background, branch_in_background,
     checkout_in_background, choose_repository_folder, clone_in_background,
@@ -54,6 +54,10 @@ impl std::fmt::Debug for OpenedRepository {
 pub(crate) const HISTORY_SEARCH_ID: &str = "history-search";
 /// Scrollable id of the Diff pane, for jumping between differences.
 pub(crate) const DIFF_SCROLL_ID: &str = "diff-scroll";
+/// Text-input id of the stash dialog's message.
+pub(crate) const STASH_MESSAGE_ID: &str = "stash-message";
+/// Text-input id of the branches popup filter.
+pub(crate) const BRANCH_POPUP_ID: &str = "branch-popup-filter";
 /// Text-input id of the quick-open palette field.
 pub(crate) const PALETTE_INPUT_ID: &str = "quick-open";
 
@@ -113,9 +117,12 @@ pub(crate) struct GitApp {
     pub(crate) hunk_mode: HunkMode,
     focus_restore: Option<FocusRestore>,
     pub(crate) branch_list_open: bool,
+    pub(crate) branch_popup_filter: String,
     pub(crate) files_as_tree: bool,
     /// Diff drawn side by side (true) or as one unified column.
     pub(crate) diff_split: bool,
+    /// Keyboard modifiers held now.
+    modifiers: iced::keyboard::Modifiers,
     /// Window width from the last resize event; 0 until the first one.
     window_width: f32,
     /// Explorer width the user chose, kept when the window is resized.
@@ -138,10 +145,11 @@ pub(crate) struct GitApp {
     pub(crate) tokens: DesignTokens,
     pub(crate) settings_open: bool,
     /// Paths to discard after the confirm dialog (one file, or every match under a folder).
-    pub(crate) confirm_discard: Option<(Vec<String>, FileDisposition)>,
+    pub(crate) confirm_discard: Option<Vec<MarkedFile>>,
     pub(crate) confirm_drop: Option<Stash>,
     pub(crate) branch_prompt: Option<BranchPrompt>,
     pub(crate) history_prompt: Option<HistoryPrompt>,
+    pub(crate) stash_prompt: Option<StashPrompt>,
     pub(crate) clone_url: String,
     open_repository: RepositoryOpener,
     /// Opens a linked worktree into a tab without remembering it.
@@ -172,6 +180,13 @@ pub(crate) enum Message {
     /// Show the native folder dialog.
     ChooseRepositoryFolder,
     PaneResized(pane_grid::ResizeEvent),
+    /// Ctrl, Shift… as now held, for Ctrl- and Shift-click in the working tree.
+    ModifiersChanged(iced::keyboard::Modifiers),
+    BranchPopupFilterChanged(String),
+    /// A branch row in the branches popup: its menu opens at the pointer.
+    BranchPopupPick { name: String, remote: bool },
+    /// Right-click on a working-tree file: the menu acts on the selection.
+    ChangeContextMenu { path: String, place: FileDisposition },
     /// The window is this wide now.
     WindowResized(f32),
     SetLayout(LayoutPreset),
@@ -296,6 +311,22 @@ pub(crate) enum Message {
     CloneFolderChosen(String, Option<String>),
     CloneFinished(Result<String, DomainError>),
     StashPush,
+    /// Open the stash dialog for these paths (empty: every tracked change).
+    AskStash(Vec<String>),
+    StashMessageChanged(String),
+    StashUntrackedToggled(bool),
+    ConfirmStash,
+    CancelStash,
+    MergeTargetPicked(String),
+    MergeNoFfToggled(bool),
+    /// Stop the merge, rebase… in progress.
+    AbortOperation,
+    /// Commit the merge, or continue the rebase…, once conflicts are resolved.
+    ContinueOperation,
+    /// Keep one side of a conflicted file and stage it.
+    ResolveConflict { path: String, side: core_domain::ConflictSide },
+    /// `git add` a conflicted file the user fixed by hand.
+    MarkResolved(String),
     StashApply(usize),
     StashPop(usize),
     AskDropStash,
@@ -438,8 +469,17 @@ pub(crate) enum WorktreePrompt {
 pub(crate) enum HistoryPrompt {
     CherryPick { id: String },
     Reset { id: String },
-    Merge { name: String },
+    /// `name` is empty until the user picks a branch; `no_ff` records a merge commit always.
+    Merge { name: String, no_ff: bool },
     Rebase { name: String },
+}
+
+/// A stash waiting for its message. `paths` empty stashes every tracked change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StashPrompt {
+    pub message: String,
+    pub include_untracked: bool,
+    pub paths: Vec<String>,
 }
 
 /// A create, rename, or delete waiting for the user to confirm the name.
@@ -461,6 +501,7 @@ enum BranchAsk {
     Delete,
 }
 
+#[derive(Clone, Copy)]
 enum HistoryAsk {
     CherryPick,
     Reset,
@@ -519,8 +560,10 @@ impl GitApp {
             hunk_mode: HunkMode::Beside,
             focus_restore: None,
             branch_list_open: false,
+            branch_popup_filter: String::new(),
             files_as_tree: true,
             diff_split: true,
+            modifiers: iced::keyboard::Modifiers::default(),
             window_width: 0.0,
             files_px: layout::FILES_PX,
             agent_models: Vec::new(),
@@ -542,6 +585,7 @@ impl GitApp {
             confirm_drop: None,
             branch_prompt: None,
             history_prompt: None,
+            stash_prompt: None,
             clone_url: String::new(),
             history_query: String::new(),
             palette: None,
@@ -602,6 +646,11 @@ impl GitApp {
         self.active_session()
             .map(|session| session.path.clone())
             .unwrap_or_default()
+    }
+
+    /// The merge, rebase, cherry-pick or revert the active tab is in the middle of.
+    pub(crate) fn current_operation(&self) -> Option<core_domain::RepoOperation> {
+        self.active_session()?.state.current_status.as_ref()?.operation
     }
 
     /// In every preset but Stacked the Explorer is a column, so its split is a width.
@@ -945,13 +994,34 @@ impl GitApp {
                 }
             }
             Message::FocusFile { path, place } => {
+                let modifiers = self.modifiers;
+                let as_tree = self.files_as_tree;
                 if let Some(session) = self.active_session_mut() {
-                    session.marked_files = vec![MarkedFile {
-                        path: path.clone(),
-                        place,
-                    }];
+                    let file = MarkedFile { path: path.clone(), place };
+                    session.marked_files = select_files(session, file, modifiers, as_tree);
                 }
                 self.update(Message::Select(Selection::File { path, place }))
+            }
+            Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                Task::none()
+            }
+            Message::ChangeContextMenu { path, place } => {
+                let Some(session) = self.active_session_mut() else {
+                    return Task::none();
+                };
+                let file = MarkedFile { path: path.clone(), place };
+                // Right-clicking outside the selection selects that row first (JetBrains).
+                if !session.marked_files.contains(&file) {
+                    session.marked_files = vec![file.clone()];
+                    session.selection_anchor = Some(file);
+                }
+                let target = if session.marked_files.len() > 1 {
+                    crate::context_menu::ContextTarget::Changes { files: session.marked_files.clone() }
+                } else {
+                    crate::context_menu::ContextTarget::ChangePath { path, place, is_dir: false }
+                };
+                self.update(Message::OpenContextMenu { target })
             }
             Message::ToggleFileMark { path, place } => {
                 if let Some(session) = self.active_session_mut() {
@@ -1314,13 +1384,38 @@ impl GitApp {
                 Task::none()
             }
             Message::ToggleBranchList => {
-                // Legacy dropdown was removed with the left Changes rail; the chip
-                // now reveals LOCAL branches in the Explorer accordion.
-                self.files_rail_open = true;
-                self.branch_list_open = false;
-                self.session_mut().explorer_collapsed.local = false;
-                self.install_layout();
+                // The top-bar branch chip opens the JetBrains-style branches popup.
+                self.branch_list_open = !self.branch_list_open && !self.sessions.is_empty();
+                self.branch_popup_filter.clear();
+                self.context_menu = None;
+                if self.branch_list_open {
+                    iced::widget::text_input::focus(BRANCH_POPUP_ID)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::BranchPopupFilterChanged(filter) => {
+                self.branch_popup_filter = filter;
                 Task::none()
+            }
+            Message::BranchPopupPick { name, remote } => {
+                self.branch_list_open = false;
+                let Some(session) = self.active_session() else {
+                    return Task::none();
+                };
+                let tip = session
+                    .state
+                    .branches
+                    .iter()
+                    .find(|branch| branch.is_remote == remote && branch.name == name)
+                    .map(|branch| branch.tip.clone())
+                    .unwrap_or_default();
+                let target = if remote {
+                    ContextTarget::RemoteBranch { name, tip }
+                } else {
+                    ContextTarget::LocalBranch { name, tip }
+                };
+                self.update(Message::OpenContextMenu { target })
             }
             Message::ShowWorkingTree => {
                 let Some(session) = self.active_session_mut() else {
@@ -1632,8 +1727,11 @@ impl GitApp {
                 let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if let Selection::File { path, place } = session.shown_selection() {
-                    self.confirm_discard = Some((vec![path], place));
+                // The selection when there is one, else the file shown in the diff.
+                if !session.marked_files.is_empty() {
+                    self.confirm_discard = Some(session.marked_files.clone());
+                } else if let Selection::File { path, place } = session.shown_selection() {
+                    self.confirm_discard = Some(vec![MarkedFile { path, place }]);
                 }
                 Task::none()
             }
@@ -1642,13 +1740,13 @@ impl GitApp {
                 Task::none()
             }
             Message::ConfirmDiscard => {
-                let Some((paths, place)) = self.confirm_discard.clone() else {
+                let Some(files) = self.confirm_discard.clone() else {
                     return Task::none();
                 };
                 let Some(session) = self.active_session() else {
                     return Task::none();
                 };
-                if session.state.loading || paths.is_empty() {
+                if session.state.loading || files.is_empty() {
                     return Task::none();
                 }
                 let repo = session.adapter.clone();
@@ -1657,7 +1755,7 @@ impl GitApp {
                 self.session_mut().state.loading = true;
                 self.error = None;
                 Task::perform(
-                    discard_paths_in_background(repo, paths, place),
+                    discard_paths_in_background(repo, files),
                     move |result| Message::DiscardFinished(session_path.clone(), result),
                 )
             }
@@ -1666,7 +1764,60 @@ impl GitApp {
             Message::StageHunk { path, index } => self.edit_hunk(path, index, true),
             Message::DiscardHunk { path, index } => self.edit_hunk(path, index, false),
             Message::HunkFinished(path, result) => self.finish_reload(&path, result),
-            Message::StashPush => self.run_stash(StashAction::Push),
+            Message::StashPush => self.update(Message::AskStash(Vec::new())),
+            Message::AskStash(paths) => {
+                self.stash_prompt = Some(StashPrompt { message: String::new(), include_untracked: false, paths });
+                iced::widget::text_input::focus(STASH_MESSAGE_ID)
+            }
+            Message::StashMessageChanged(message) => {
+                if let Some(prompt) = self.stash_prompt.as_mut() {
+                    prompt.message = message;
+                }
+                Task::none()
+            }
+            Message::StashUntrackedToggled(on) => {
+                if let Some(prompt) = self.stash_prompt.as_mut() {
+                    prompt.include_untracked = on;
+                }
+                Task::none()
+            }
+            Message::CancelStash => {
+                self.stash_prompt = None;
+                Task::none()
+            }
+            Message::ConfirmStash => {
+                let Some(prompt) = self.stash_prompt.take() else {
+                    return Task::none();
+                };
+                let message = prompt.message.trim().to_string();
+                if prompt.paths.is_empty() {
+                    self.run_stash(StashAction::Push { message, include_untracked: prompt.include_untracked })
+                } else {
+                    self.run_stash(StashAction::PushPaths { message, paths: prompt.paths })
+                }
+            }
+            Message::MergeTargetPicked(target) => {
+                if let Some(HistoryPrompt::Merge { name, .. }) = self.history_prompt.as_mut() {
+                    *name = target;
+                }
+                Task::none()
+            }
+            Message::MergeNoFfToggled(on) => {
+                if let Some(HistoryPrompt::Merge { no_ff, .. }) = self.history_prompt.as_mut() {
+                    *no_ff = on;
+                }
+                Task::none()
+            }
+            Message::AbortOperation => match self.current_operation() {
+                Some(operation) => self.run_history(HistoryAction::Abort(operation)),
+                None => Task::none(),
+            },
+            Message::ContinueOperation => match self.current_operation() {
+                Some(operation) => self.run_history(HistoryAction::Continue(operation)),
+                None => Task::none(),
+            },
+            Message::ResolveConflict { path, side } => self.run_history(HistoryAction::Resolve { path, side }),
+            Message::MarkResolved(path) => self.update(Message::EditWorktree(WorktreeEdit::Stage(vec![path]))),
             Message::StashApply(index) => self.run_stash(StashAction::Apply(index)),
             Message::StashPop(index) => self.run_stash(StashAction::Pop(index)),
             Message::AskDropStash => {
@@ -1715,6 +1866,7 @@ impl GitApp {
             Message::AskRenameBranch => self.ask_branch(BranchAsk::Rename),
             Message::AskDeleteBranch => self.ask_branch(BranchAsk::Delete),
             Message::AskCreateBranchFrom(start) => {
+                self.branch_list_open = false;
                 if self.active_session().is_none_or(|session| session.state.loading) {
                     return Task::none();
                 }
@@ -1786,7 +1938,8 @@ impl GitApp {
                 match result {
                     Ok(()) => self.begin_refresh_for(&path, true),
                     Err(error) => {
-                        self.error = Some(error_message(&error));
+                        let message = error_message(&error);
+                        self.error = Some(stopped_on_conflicts(&message).map_or(message, str::to_string));
                         self.begin_refresh_for(&path, false)
                     }
                 }
@@ -1973,7 +2126,7 @@ impl GitApp {
                         self.run_ignore_change(path, is_dir)
                     }
                     crate::context_menu::ContextActionKind::StashChange { path } => {
-                        self.run_stash(StashAction::PushPaths(vec![path]))
+                        self.update(Message::AskStash(vec![path]))
                     }
                     crate::context_menu::ContextActionKind::OpenInOs { path, is_dir } => {
                         self.open_change_in_os(&path, is_dir);
@@ -2672,6 +2825,7 @@ impl GitApp {
     }
 
     fn ask_history(&mut self, ask: HistoryAsk) -> Task<Message> {
+        self.branch_list_open = false;
         let Some(session) = self.active_session() else {
             return Task::none();
         };
@@ -2696,18 +2850,19 @@ impl GitApp {
             HistoryAsk::Merge | HistoryAsk::Rebase => {
                 // A local branch other than the current one, or a remote-tracking branch
                 // (merging origin/development is the everyday case).
-                let name = match visible {
-                    Selection::Branch { name, current } => {
-                        if current || session.local_branch(&name).is_none() {
-                            return Task::none();
-                        }
-                        name
-                    }
-                    Selection::Remote { name } if session.remote_branch(&name).is_some() => name,
-                    _ => return Task::none(),
+                let picked = match visible {
+                    Selection::Branch { name, current } if !current && session.local_branch(&name).is_some() => Some(name),
+                    Selection::Remote { name } if session.remote_branch(&name).is_some() => Some(name),
+                    _ => None,
+                };
+                // Merge opens with no branch chosen and lets the user pick one in the dialog.
+                let name = match (picked, ask) {
+                    (Some(name), _) => name,
+                    (None, HistoryAsk::Merge) => String::new(),
+                    (None, _) => return Task::none(),
                 };
                 if matches!(ask, HistoryAsk::Merge) {
-                    HistoryPrompt::Merge { name }
+                    HistoryPrompt::Merge { name, no_ff: false }
                 } else {
                     HistoryPrompt::Rebase { name }
                 }
@@ -2741,45 +2896,45 @@ impl GitApp {
     }
 
     fn confirm_merge(&mut self) -> Task<Message> {
-        let Some(HistoryPrompt::Merge { name }) = self.history_prompt.clone() else {
+        let Some(HistoryPrompt::Merge { name, no_ff }) = self.history_prompt.clone() else {
             return Task::none();
         };
-        self.confirm_branch_history(name, true)
+        if name.is_empty() {
+            return Task::none();
+        }
+        self.confirm_branch_history(name, Some(no_ff))
     }
 
     fn confirm_rebase(&mut self) -> Task<Message> {
         let Some(HistoryPrompt::Rebase { name }) = self.history_prompt.clone() else {
             return Task::none();
         };
-        self.confirm_branch_history(name, false)
+        self.confirm_branch_history(name, None)
     }
 
-    fn confirm_branch_history(&mut self, name: String, merge: bool) -> Task<Message> {
+    /// `merge` is `Some(no_ff)` for a merge, `None` for a rebase.
+    fn confirm_branch_history(&mut self, name: String, merge: Option<bool>) -> Task<Message> {
         match self.local_branch_is_head(&name) {
             Some(true) => {
                 self.history_prompt = None;
-                self.error = Some(if merge {
+                self.error = Some(if merge.is_some() {
                     "The current branch cannot be merged.".to_string()
                 } else {
                     "The current branch cannot be rebased.".to_string()
                 });
                 Task::none()
             }
-            Some(false) => {
-                if merge {
-                    self.run_history(HistoryAction::Merge { name })
-                } else {
-                    self.run_history(HistoryAction::Rebase { name })
-                }
-            }
+            Some(false) => match merge {
+                Some(no_ff) => self.run_history(HistoryAction::Merge { name, no_ff }),
+                None => self.run_history(HistoryAction::Rebase { name }),
+            },
             None if self
                 .active_session()
                 .is_some_and(|session| session.remote_branch(&name).is_some()) =>
             {
-                if merge {
-                    self.run_history(HistoryAction::Merge { name })
-                } else {
-                    self.run_history(HistoryAction::Rebase { name })
+                match merge {
+                    Some(no_ff) => self.run_history(HistoryAction::Merge { name, no_ff }),
+                    None => self.run_history(HistoryAction::Rebase { name }),
                 }
             }
             None => self.branch_is_gone(),
@@ -2829,8 +2984,26 @@ impl GitApp {
             return Task::none();
         }
         self.confirm_drop = None;
-        self.confirm_discard = Some((paths, place));
+        self.confirm_discard = Some(paths.into_iter().map(|path| MarkedFile { path, place }).collect());
         Task::none()
+    }
+
+    /// Append one `.gitignore` line per unversioned file.
+    fn run_ignore_paths(&mut self, paths: Vec<String>) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading || paths.is_empty() {
+            return Task::none();
+        }
+        let patterns = paths.iter().map(|path| gitignore_pattern(path, false)).collect();
+        let repo = session.adapter.clone();
+        let session_path = session.path.clone();
+        self.session_mut().state.loading = true;
+        self.error = None;
+        Task::perform(append_gitignore_in_background(repo, patterns), move |result| {
+            Message::IgnoreFinished(session_path.clone(), result)
+        })
     }
 
     fn run_ignore_change(&mut self, path: String, is_dir: bool) -> Task<Message> {
@@ -2897,6 +3070,17 @@ impl GitApp {
             }
         };
         match kind {
+            Kind::StageFiles(paths) => self.update(Message::EditWorktree(WorktreeEdit::Stage(paths))),
+            Kind::UnstageFiles(paths) => self.update(Message::EditWorktree(WorktreeEdit::Unstage(paths))),
+            Kind::DiscardFiles(files) => {
+                self.confirm_drop = None;
+                self.confirm_discard = Some(files);
+                Task::none()
+            }
+            Kind::StashFiles(paths) => self.update(Message::AskStash(paths)),
+            Kind::IgnoreFiles(paths) => self.run_ignore_paths(paths),
+            Kind::ResolveConflict { path, side } => self.update(Message::ResolveConflict { path, side }),
+            Kind::MarkResolved(path) => self.update(Message::MarkResolved(path)),
             Kind::CheckoutBranch { name } => self.update(Message::CheckoutBranch(name)),
             Kind::CheckoutRemote { remote, local } => {
                 if self.has_local_branch(&local) {
@@ -3053,6 +3237,9 @@ impl GitApp {
                 })
             }
             iced::Event::Window(iced::window::Event::Resized(size)) => Some(Message::WindowResized(size.width)),
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+                Some(Message::ModifiersChanged(modifiers))
+            }
             _ => None,
         });
         let waiting_tip = self.tip_hover.is_some()
@@ -3105,6 +3292,9 @@ impl GitApp {
         }
         if self.history_prompt.is_some() {
             return self.update(Message::CancelHistory);
+        }
+        if self.stash_prompt.is_some() {
+            return self.update(Message::CancelStash);
         }
         if self.worktree_prompt.is_some() {
             return self.update(Message::CancelWorktree);
@@ -3200,6 +3390,45 @@ fn open_in_file_manager(path: &std::path::Path) {
 }
 
 /// The selection a merge/rebase dialog reads for `name`: a local branch, else a remote one.
+/// Git's output when a merge, rebase, cherry-pick or revert stopped on conflicts starts with
+/// whatever it was doing ("Auto-merging Config.cs"), which reads as the error. Say what happened.
+const STOPPED_ON_CONFLICTS: &str =
+    "Stopped on conflicts. Resolve the files under Merge Conflicts, then use the bar at the top to continue or abort.";
+
+fn stopped_on_conflicts(git_output: &str) -> Option<&'static str> {
+    let markers = ["CONFLICT (", "Automatic merge failed", "could not apply", "after resolving the conflicts"];
+    markers.iter().any(|marker| git_output.contains(marker)).then_some(STOPPED_ON_CONFLICTS)
+}
+
+/// The working-tree selection after a click on `file`: alone, toggled with Ctrl (Cmd), or the
+/// range from the last plain click with Shift.
+fn select_files(
+    session: &mut WorktreeSession,
+    file: MarkedFile,
+    modifiers: iced::keyboard::Modifiers,
+    as_tree: bool,
+) -> Vec<MarkedFile> {
+    let mut marks = session.marked_files.clone();
+    if modifiers.shift() {
+        if let (Some(anchor), Some(status)) = (session.selection_anchor.clone(), session.state.current_status.as_ref()) {
+            let order = crate::changes::visible_files(status, as_tree, &session.collapsed_sections, &session.collapsed_dirs);
+            return crate::changes::selection_range(&order, &anchor, &file);
+        }
+    }
+    session.selection_anchor = Some(file.clone());
+    if modifiers.command() {
+        match marks.iter().position(|mark| *mark == file) {
+            Some(at) => {
+                marks.remove(at);
+            }
+            None => marks.push(file),
+        }
+        marks
+    } else {
+        vec![file]
+    }
+}
+
 fn branch_or_remote(name: &str, is_local: bool) -> Selection {
     if is_local {
         Selection::Branch {
@@ -3948,6 +4177,8 @@ mod tests {
             tracking: None,
             head_commit_id: None,
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         });
 
         let _ = app.update(Message::SelectAllFiles);
@@ -4425,6 +4656,8 @@ mod tests {
     fn stash_push_starts_loading_and_is_ignored_while_busy() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::StashPush);
+        assert!(app.stash_prompt.is_some(), "asks for a message first");
+        let _ = app.update(Message::ConfirmStash);
         assert!(app.session_mut().state.loading);
         app.error = Some("still showing".to_string());
         let _ = app.update(Message::StashApply(0));
@@ -4706,10 +4939,12 @@ mod tests {
 
     #[test]
     fn merge_and_rebase_wait_on_another_branch_and_skip_the_current_one() {
+        // Rebase needs another branch selected. Merge opens and lets the user pick one.
         let mut current = on_branch("main", true);
-        let _ = current.update(Message::AskMerge);
         let _ = current.update(Message::AskRebase);
         assert!(current.history_prompt.is_none());
+        let _ = current.update(Message::AskMerge);
+        assert_eq!(current.history_prompt, Some(HistoryPrompt::Merge { name: String::new(), no_ff: false }));
 
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.branches = vec![branch("main", true), branch("feature", false)];
@@ -4722,6 +4957,7 @@ mod tests {
             app.history_prompt,
             Some(HistoryPrompt::Merge {
                 name: "feature".to_string(),
+                no_ff: false,
             })
         );
         let _ = app.update(Message::ConfirmMerge);
@@ -5577,6 +5813,8 @@ mod tests {
             tracking: None,
             head_commit_id: Some("abc".into()),
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         });
 
         let _ = app.update(Message::AskDetachHead {
@@ -5597,6 +5835,8 @@ mod tests {
             tracking: None,
             head_commit_id: Some("abc".into()),
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         });
 
         let _ = app.update(Message::AskDetachHead {
@@ -5747,6 +5987,107 @@ mod tests {
         let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent { split: files, ratio: 0.30 }));
         let _ = app.update(Message::WindowResized(1000.0));
         assert!((app.ratios[app.layout.index()].files * 1000.0 - 330.0).abs() < 1.0, "keeps the dragged 330 px");
+    }
+
+    fn dirty_app() -> GitApp {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.files_as_tree = false;
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec!["s.rs".into()],
+            unstaged_files: vec!["a.rs".into(), "b.rs".into(), "c.rs".into()],
+            untracked_files: vec!["n.rs".into()],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        });
+        app
+    }
+
+    fn click(app: &mut GitApp, path: &str, modifiers: iced::keyboard::Modifiers) {
+        let _ = app.update(Message::ModifiersChanged(modifiers));
+        let _ = app.update(Message::FocusFile { path: path.into(), place: FileDisposition::Unstaged });
+    }
+
+    fn marked(app: &GitApp) -> Vec<&str> {
+        app.session().marked_files.iter().map(|mark| mark.path.as_str()).collect()
+    }
+
+    #[test]
+    fn click_ctrl_click_and_shift_click_build_the_selection() {
+        use iced::keyboard::Modifiers;
+        let mut app = dirty_app();
+        click(&mut app, "a.rs", Modifiers::default());
+        assert_eq!(marked(&app), ["a.rs"]);
+        click(&mut app, "c.rs", Modifiers::CTRL);
+        assert_eq!(marked(&app), ["a.rs", "c.rs"]);
+        click(&mut app, "a.rs", Modifiers::SHIFT);
+        assert_eq!(marked(&app), ["a.rs", "b.rs", "c.rs"], "range from the Ctrl-click anchor");
+        click(&mut app, "b.rs", Modifiers::default());
+        assert_eq!(marked(&app), ["b.rs"]);
+    }
+
+    #[test]
+    fn right_click_on_a_selection_offers_actions_for_all_of_it() {
+        use iced::keyboard::Modifiers;
+        let mut app = dirty_app();
+        click(&mut app, "a.rs", Modifiers::default());
+        click(&mut app, "b.rs", Modifiers::CTRL);
+        let _ = app.update(Message::ChangeContextMenu { path: "b.rs".into(), place: FileDisposition::Unstaged });
+        assert!(matches!(
+            app.context_menu.as_ref().map(|menu| &menu.target),
+            Some(crate::context_menu::ContextTarget::Changes { files }) if files.len() == 2
+        ));
+        // Outside the selection: that row alone.
+        let _ = app.update(Message::ChangeContextMenu { path: "c.rs".into(), place: FileDisposition::Unstaged });
+        assert_eq!(marked(&app), ["c.rs"]);
+    }
+
+    #[test]
+    fn discarding_a_selection_asks_once_for_every_file() {
+        use iced::keyboard::Modifiers;
+        let mut app = dirty_app();
+        click(&mut app, "a.rs", Modifiers::default());
+        click(&mut app, "c.rs", Modifiers::SHIFT);
+        let _ = app.update(Message::AskDiscard);
+        assert_eq!(app.confirm_discard.as_ref().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn stash_opens_a_dialog_and_keeps_the_options() {
+        let mut app = dirty_app();
+        let _ = app.update(Message::StashPush);
+        let _ = app.update(Message::StashMessageChanged("wip: half done".into()));
+        let _ = app.update(Message::StashUntrackedToggled(true));
+        assert_eq!(
+            app.stash_prompt,
+            Some(StashPrompt { message: "wip: half done".into(), include_untracked: true, paths: vec![] })
+        );
+        let _ = app.update(Message::ConfirmStash);
+        assert!(app.stash_prompt.is_none());
+        assert!(app.session().state.loading);
+    }
+
+    #[test]
+    fn merge_opens_without_a_selection_and_waits_for_a_branch() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.branches = vec![branch("main", true), branch("feature", false)];
+        let _ = app.update(Message::AskMerge);
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::Merge { name: String::new(), no_ff: false }));
+        let _ = app.update(Message::ConfirmMerge);
+        assert!(!app.session().state.loading, "no branch picked yet");
+        let _ = app.update(Message::MergeTargetPicked("feature".into()));
+        let _ = app.update(Message::MergeNoFfToggled(true));
+        let _ = app.update(Message::ConfirmMerge);
+        assert!(app.session().state.loading);
+    }
+
+    #[test]
+    fn a_conflict_reads_as_a_stop_not_as_gits_first_line() {
+        let git = "Auto-merging Config.cs\nCONFLICT (content): Merge conflict in Config.cs\nAutomatic merge failed; fix conflicts and then commit the result.";
+        assert_eq!(stopped_on_conflicts(git), Some(STOPPED_ON_CONFLICTS));
+        assert_eq!(stopped_on_conflicts("fatal: not something we can merge"), None);
     }
 
     #[test]

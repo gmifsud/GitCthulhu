@@ -626,6 +626,7 @@ fn session_dirty(session: &WorktreeSession) -> bool {
         !status.staged_files.is_empty()
             || !status.unstaged_files.is_empty()
             || !status.untracked_files.is_empty()
+            || !status.conflicted_files.is_empty()
     })
 }
 
@@ -704,6 +705,8 @@ mod tests {
             tracking: None,
             head_commit_id: None,
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         });
         session.state.branches = head
             .map(|name| {

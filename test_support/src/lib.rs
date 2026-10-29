@@ -28,6 +28,9 @@ pub struct FakeGitRepository {
     pub cherry_pick_result: Result<(), DomainError>,
     pub reset_result: Result<(), DomainError>,
     pub merge_result: Result<(), DomainError>,
+    pub abort_result: Result<(), DomainError>,
+    pub continue_result: Result<(), DomainError>,
+    pub resolve_result: Result<(), DomainError>,
     pub rebase_result: Result<(), DomainError>,
     pub stage_result: Result<(), DomainError>,
     pub unstage_result: Result<(), DomainError>,
@@ -57,6 +60,8 @@ impl FakeGitRepository {
                 tracking: None,
                 head_commit_id: None,
                 kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
             }),
             log_result: Ok(vec![]),
             branches_result: Ok(vec![]),
@@ -72,6 +77,9 @@ impl FakeGitRepository {
             cherry_pick_result: Ok(()),
             reset_result: Ok(()),
             merge_result: Ok(()),
+            abort_result: Ok(()),
+            continue_result: Ok(()),
+            resolve_result: Ok(()),
             rebase_result: Ok(()),
             stage_result: Ok(()),
             unstage_result: Ok(()),
@@ -163,7 +171,7 @@ impl GitRepository for FakeGitRepository {
         self.reset_result.clone()
     }
 
-    fn merge_branch(&self, _name: &str) -> Result<(), DomainError> {
+    fn merge_branch(&self, _name: &str, _no_ff: bool) -> Result<(), DomainError> {
         self.merge_result.clone()
     }
 
@@ -220,7 +228,7 @@ impl GitRepository for FakeGitRepository {
         self.discard_hunk_result.clone()
     }
 
-    fn stash_push(&self, _message: &str) -> Result<(), DomainError> {
+    fn stash_push(&self, _message: &str, _include_untracked: bool) -> Result<(), DomainError> {
         self.stash_push_result.clone()
     }
 
@@ -242,5 +250,17 @@ impl GitRepository for FakeGitRepository {
 
     fn stash_drop(&self, _index: usize) -> Result<(), DomainError> {
         self.stash_drop_result.clone()
+    }
+
+    fn abort_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {
+        self.abort_result.clone()
+    }
+
+    fn continue_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {
+        self.continue_result.clone()
+    }
+
+    fn resolve_conflict(&self, _path: &str, _side: core_domain::ConflictSide) -> Result<(), DomainError> {
+        self.resolve_result.clone()
     }
 }

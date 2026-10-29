@@ -114,6 +114,42 @@ pub(crate) fn change_rows(
     rows
 }
 
+/// Every file row in the order the working tree draws them: sections in `git status` order,
+/// folded sections and collapsed folders left out. Shift-click ranges walk this order.
+pub(crate) fn visible_files(
+    status: &RepoStatus,
+    as_tree: bool,
+    folded_sections: &HashSet<FileDisposition>,
+    collapsed_dirs: &HashSet<(FileDisposition, String)>,
+) -> Vec<MarkedFile> {
+    let mut order = Vec::new();
+    for section in change_sections(status) {
+        if folded_sections.contains(&section.place) {
+            continue;
+        }
+        let collapsed: HashSet<String> = collapsed_dirs
+            .iter()
+            .filter(|(place, _)| *place == section.place)
+            .map(|(_, prefix)| prefix.clone())
+            .collect();
+        for row in change_rows(section.files, section.place, as_tree, &collapsed) {
+            if let ChangeRow::File { path, place, .. } = row {
+                order.push(MarkedFile { path, place });
+            }
+        }
+    }
+    order
+}
+
+/// The files from `anchor` to `target` inclusive, in `order`. Either end missing from the
+/// order gives just `target`.
+pub(crate) fn selection_range(order: &[MarkedFile], anchor: &MarkedFile, target: &MarkedFile) -> Vec<MarkedFile> {
+    match (order.iter().position(|f| f == anchor), order.iter().position(|f| f == target)) {
+        (Some(a), Some(b)) => order[a.min(b)..=a.max(b)].to_vec(),
+        _ => vec![target.clone()],
+    }
+}
+
 /// Paths in `marks` that a Stage or Unstage command should touch.
 pub(crate) fn marked_paths(marks: &[MarkedFile], stage: bool) -> Vec<String> {
     marks
@@ -249,6 +285,8 @@ mod tests {
             tracking: None,
             head_commit_id: None,
             kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
         }
     }
 
@@ -334,6 +372,20 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shift_ranges_follow_the_drawn_order_across_sections() {
+        let status = repo_status(&["s.rs"], &["a.rs", "b.rs"], &["n.rs"]);
+        let order = visible_files(&status, false, &HashSet::new(), &HashSet::new());
+        let file = |path: &str, place| MarkedFile { path: path.into(), place };
+        let picked = selection_range(&order, &file("n.rs", FileDisposition::Untracked), &file("a.rs", FileDisposition::Unstaged));
+        assert_eq!(
+            picked,
+            [file("a.rs", FileDisposition::Unstaged), file("b.rs", FileDisposition::Unstaged), file("n.rs", FileDisposition::Untracked)]
+        );
+        let folded = HashSet::from([FileDisposition::Unstaged]);
+        assert_eq!(visible_files(&status, false, &folded, &HashSet::new()).len(), 2);
     }
 
     #[test]

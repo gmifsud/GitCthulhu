@@ -206,3 +206,32 @@ Not done:
 - Horizontal scrolling of long diff lines (they clip at the column edge).
 - A conflict view.
 
+## 11. Basic operations round (2026-10-29)
+
+Report: icons still missing in the latest build; branching, selecting files, staging from the right-click menu, discarding, stashing and merging are all hard.
+
+**Why the icons were still missing:** `main` was at the earlier merge (`adbbf97`). The icon-font commit (`09a74fa`) was only on the feature branch. A build from `main` is still the build with system-font icons until the branch is merged again.
+
+![Merge conflicts](img/2026-10-29-merge-conflicts.png)
+
+| Operation | Root cause | Fix |
+|---|---|---|
+| Branching out | The top-bar branch chip only expanded the Explorer. New branch was behind a selection plus a head button or a right-click | Branches popup on the chip: search, New Branch…, Merge into Current…, every branch with its menu ![Branches popup](img/2026-10-29-branches-popup.png) |
+| Selecting files | One focused file. Check boxes were a separate concept. No Ctrl- or Shift-click | One selection: click, Ctrl-click, Shift-click over the drawn order (`changes::visible_files`, `selection_range`). Modifiers come from `ModifiersChanged` |
+| Stage or discard via right-click | The menu acted only on the clicked row; discard took one path and one place | `ContextTarget::Changes` acts on the selection with per-action counts. Discard takes (path, place) pairs, so staged and unstaged files go together ![Multi-select menu](img/2026-10-29-multi-select-menu.png) |
+| Stash | `stash_push("")`: no message, no untracked option | Stash dialog: message, include untracked, or the selected files only. The port's `stash_push` takes `include_untracked` |
+| Merge | `git merge --no-ff` run blind; a conflict was an error string with the repo left mid-merge and nothing in the UI knew | Merge dialog (branch picker, optional `--no-ff`). `RepoStatus.operation` from gix's `repo.state()`. `conflicted_files` from index stages 1–3. Port `abort_operation`, `continue_operation` and `resolve_conflict`. Operation bar with Commit/Continue and Abort. Merge Conflicts section with Yours/Theirs/Resolved. Git's conflict output is replaced by one plain sentence |
+
+**Bug found and fixed:** a conflicted path was reported as a staged deletion. `staged_changes` compared stage-0 entries only, and a conflicted path has none.
+
+**Verified end to end** on a two-branch fixture, using the UI only:
+1. Branches popup, then Merge into Current…, then pick `feature/retry-policy`, then Merge.
+2. The bar reads "2 conflicted files" and Commit merge is disabled.
+3. Theirs on `Config.cs`, Yours on `README.md`.
+4. The bar turns green with "all conflicts resolved".
+5. Commit merge records a two-parent merge, and the file contents match the sides chosen.
+
+**Not done yet:**
+- A three-way merge editor inside the app. Cthulhu Resolve is the planned editor; until then, edit the file and press Resolved.
+- Keyboard shortcuts for stage and discard.
+

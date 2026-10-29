@@ -147,8 +147,11 @@ fn wip_file_sections<'a>(
     match status {
         None => sections_col = sections_col.push(label("Not loaded yet", tokens.text_muted, reading)),
         Some(status) => {
+            if !status.conflicted_files.is_empty() {
+                sections_col = sections_col.push(conflict_section(app, status, tokens, reading));
+            }
             let sections = change_sections(status);
-            if sections.is_empty() {
+            if sections.is_empty() && status.conflicted_files.is_empty() {
                 sections_col = sections_col.push(label("Working tree clean", tokens.text_muted, reading));
             }
             for section in sections {
@@ -183,6 +186,39 @@ fn section_block<'a>(
         }
     }
     files.into()
+}
+
+/// "Merge Conflicts": each file with Yours, Theirs and Resolved, and the same on right-click.
+fn conflict_section<'a>(app: &'a GitApp, status: &core_domain::RepoStatus, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    use core_domain::ConflictSide;
+    let busy = app.session().state.loading;
+    let mut rows = column![row![
+        glyph(Icon::ChevronDown, reading.size, tokens.text_muted, &reading),
+        label("Merge Conflicts", tokens.vcs_conflicted, reading),
+        label(&count_label(status.conflicted_files.len()), tokens.text_muted, reading),
+    ]
+    .spacing(6)
+    .padding([3.0, 2.0])
+    .align_y(Alignment::Center)]
+    .width(Length::Fill);
+    for path in &status.conflicted_files {
+        let side = |side| Message::ResolveConflict { path: path.clone(), side };
+        let line = row![
+            Space::with_width(Length::Fixed(INDENT)),
+            glyph(Icon::File, reading.size, tokens.vcs_conflicted, &reading),
+            container(label(path, tokens.vcs_conflicted, reading)).width(Length::Fill).clip(true),
+            super::chrome::command_button("Yours", side(ConflictSide::Yours), !busy, tokens, reading),
+            super::chrome::command_button("Theirs", side(ConflictSide::Theirs), !busy, tokens, reading),
+            super::chrome::command_button("Resolved", Message::MarkResolved(path.clone()), !busy, tokens, reading),
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center);
+        rows = rows.push(
+            mouse_area(container(line).padding(ROW_PAD).width(Length::Fill))
+                .on_right_press(Message::OpenContextMenu { target: crate::context_menu::ContextTarget::Conflict { path: path.clone() } }),
+        );
+    }
+    rows.into()
 }
 
 fn collapsed_prefixes(app: &GitApp, place: FileDisposition) -> HashSet<String> {
@@ -302,15 +338,16 @@ fn change_line<'a>(
             if !folder.is_empty() {
                 line = line.push(label(folder, tokens.text_muted, reading));
             }
-            let target = crate::context_menu::ContextTarget::ChangePath { path: path.clone(), place: *place, is_dir: false };
+            // Click selects, Ctrl-click toggles, Shift-click selects a range; right-click acts
+            // on the whole selection.
             mouse_area(
                 button(line)
                     .padding(ROW_PAD)
                     .width(Length::Fill)
                     .on_press(Message::FocusFile { path: path.clone(), place: *place })
-                    .style(move |_theme, status| row_style(tokens, status, focused)),
+                    .style(move |_theme, status| row_style(tokens, status, focused || marked)),
             )
-            .on_right_press(Message::OpenContextMenu { target })
+            .on_right_press(Message::ChangeContextMenu { path: path.clone(), place: *place })
             .into()
         }
     }

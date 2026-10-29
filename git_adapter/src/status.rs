@@ -24,10 +24,13 @@ fn entries_by_path(
 
 /// Paths whose index entry differs from `HEAD` — what `git status` calls "Changes to be committed" —
 /// each with how it differs. gix 0.66 has no tree-to-index status, so the two are compared directly.
+///
+/// Also returns the conflicted paths (index entries at stages 1–3). They are left out of the
+/// staged map: their stage-0 entry is missing, which would otherwise read as a deletion.
 pub(crate) fn staged_changes(
     repo: &gix::Repository,
     head_is_unborn: bool,
-) -> Result<BTreeMap<String, ChangeKind>, DomainError> {
+) -> Result<(BTreeMap<String, ChangeKind>, Vec<String>), DomainError> {
     let index = repo.index_or_empty().map_err(unknown)?;
     let head_entries = if head_is_unborn {
         BTreeMap::new()
@@ -37,8 +40,15 @@ pub(crate) fn staged_changes(
         entries_by_path(&head_index)
     };
     let index_entries = entries_by_path(&index);
+    let mut conflicted: Vec<String> = index
+        .entries()
+        .iter()
+        .filter(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+        .map(|entry| entry.path(&index).to_string())
+        .collect();
+    conflicted.dedup();
 
-    Ok(index_entries
+    let staged = index_entries
         .keys()
         .chain(head_entries.keys())
         .filter_map(|path| {
@@ -50,7 +60,9 @@ pub(crate) fn staged_changes(
             };
             Some((path.to_string(), kind))
         })
-        .collect())
+        .filter(|(path, _)| !conflicted.contains(path))
+        .collect();
+    Ok((staged, conflicted))
 }
 
 /// File one index ↔ worktree change under the matching `RepoStatus` list.
@@ -63,7 +75,8 @@ pub(crate) fn record_change(status: &mut RepoStatus, summary: Summary, path: Str
         Summary::Removed => ChangeKind::Deleted,
         Summary::Renamed | Summary::Copied => ChangeKind::Renamed,
         Summary::IntentToAdd => ChangeKind::Added,
-        Summary::Conflict => ChangeKind::Conflicted,
+        // Listed from the index in `staged_changes`, not as an unstaged change.
+        Summary::Conflict => return,
         Summary::Modified | Summary::TypeChange => ChangeKind::Modified,
     };
     status.kinds.unstaged.insert(path.clone(), kind);
