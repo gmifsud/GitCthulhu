@@ -19,6 +19,8 @@ pub(crate) enum ChangeRow {
         depth: usize,
         /// File descendants not drawn because this folder is collapsed.
         hidden: usize,
+        /// Every file under this folder, drawn or not ("3 files").
+        files: usize,
     },
     File {
         name: String,
@@ -54,13 +56,13 @@ pub(crate) fn change_sections(status: &RepoStatus) -> Vec<ChangeSection<'_>> {
             FileDisposition::Staged,
         ),
         (
-            "Unstaged",
+            "Changes",
             &status.unstaged_files,
             FileAction::Stage,
             FileDisposition::Unstaged,
         ),
         (
-            "Untracked",
+            "Unversioned Files",
             &status.untracked_files,
             FileAction::Stage,
             FileDisposition::Untracked,
@@ -198,7 +200,15 @@ fn flatten(
     rows: &mut Vec<ChangeRow>,
 ) {
     for (name, child) in &node.dirs {
-        let child_prefix = join_prefix(prefix, name);
+        // A folder holding only one folder joins it on one row ("src/modules/customer"),
+        // as the JetBrains changes tree does, so deep paths do not walk off the right edge.
+        let (mut name, mut child) = (name.clone(), child);
+        while child.files.is_empty() && child.dirs.len() == 1 {
+            let (inner_name, inner) = child.dirs.iter().next().expect("one folder");
+            name = format!("{name}/{inner_name}");
+            child = inner;
+        }
+        let child_prefix = join_prefix(prefix, &name);
         let is_collapsed = collapsed.contains(&child_prefix);
         let hidden = if is_collapsed {
             file_count(child)
@@ -206,10 +216,11 @@ fn flatten(
             0
         };
         rows.push(ChangeRow::Directory {
-            name: name.clone(),
+            name,
             prefix: child_prefix.clone(),
             depth,
             hidden,
+            files: file_count(child),
         });
         if !is_collapsed {
             flatten(child, depth + 1, &child_prefix, place, collapsed, rows);
@@ -237,6 +248,7 @@ mod tests {
             untracked_files: owned(untracked),
             tracking: None,
             head_commit_id: None,
+            kinds: Default::default(),
         }
     }
 
@@ -252,7 +264,7 @@ mod tests {
             .iter()
             .map(|section| section.title)
             .collect();
-        assert_eq!(titles, vec!["Staged", "Unstaged", "Untracked"]);
+        assert_eq!(titles, vec!["Staged", "Changes", "Unversioned Files"]);
     }
 
     #[test]
@@ -273,27 +285,22 @@ mod tests {
             tree,
             vec![
                 ChangeRow::Directory {
-                    name: "gui_app".into(),
-                    prefix: "gui_app".into(),
+                    name: "gui_app/src".into(),
+                    prefix: "gui_app/src".into(),
                     depth: 0,
                     hidden: 0,
-                },
-                ChangeRow::Directory {
-                    name: "src".into(),
-                    prefix: "gui_app/src".into(),
-                    depth: 1,
-                    hidden: 0,
+                    files: 2,
                 },
                 ChangeRow::File {
                     name: "a.rs".into(),
                     path: "gui_app/src/a.rs".into(),
-                    depth: 2,
+                    depth: 1,
                     place: FileDisposition::Unstaged,
                 },
                 ChangeRow::File {
                     name: "b.rs".into(),
                     path: "gui_app/src/b.rs".into(),
-                    depth: 2,
+                    depth: 1,
                     place: FileDisposition::Unstaged,
                 },
             ]
@@ -307,16 +314,17 @@ mod tests {
             "gui_app/src/b.rs".to_string(),
             "readme.md".to_string(),
         ];
-        let collapsed = HashSet::from(["gui_app".to_string()]);
+        let collapsed = HashSet::from(["gui_app/src".to_string()]);
         let tree = change_rows(&files, FileDisposition::Unstaged, true, &collapsed);
         assert_eq!(
             tree,
             vec![
                 ChangeRow::Directory {
-                    name: "gui_app".into(),
-                    prefix: "gui_app".into(),
+                    name: "gui_app/src".into(),
+                    prefix: "gui_app/src".into(),
                     depth: 0,
                     hidden: 2,
+                    files: 2,
                 },
                 ChangeRow::File {
                     name: "readme.md".into(),
@@ -326,6 +334,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_folder_with_two_children_is_not_joined() {
+        let files = vec!["app/src/a.rs".to_string(), "app/tests/b.rs".to_string()];
+        let tree = change_rows(&files, FileDisposition::Unstaged, true, &HashSet::new());
+        let names: Vec<(usize, &str)> = tree
+            .iter()
+            .map(|row| match row {
+                ChangeRow::Directory { name, depth, .. } | ChangeRow::File { name, depth, .. } => (*depth, name.as_str()),
+            })
+            .collect();
+        assert_eq!(names, [(0, "app"), (1, "src"), (2, "a.rs"), (1, "tests"), (2, "b.rs")]);
     }
 
     #[test]
@@ -365,7 +386,7 @@ mod tests {
                     place: FileDisposition::Staged,
                 },
                 ChangeSection {
-                    title: "Untracked",
+                    title: "Unversioned Files",
                     files: &status.untracked_files,
                     action: FileAction::Stage,
                     place: FileDisposition::Untracked,

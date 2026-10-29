@@ -82,7 +82,26 @@ pub(crate) fn ref_rows<'n>(
     }
     root.sort();
     let mut rows = Vec::new();
-    flatten(&root, scope, 0, !terms.is_empty(), &is_open, &mut rows);
+    flatten(&root, scope, 0, !terms.is_empty(), false, &is_open, &mut rows);
+    rows
+}
+
+/// File paths folded into folders, with a folder that holds only one folder joined to it
+/// ("src/QiSL.App.WRH/src"), as the JetBrains changes tree shows them. Branch names are not
+/// joined: there a folder is a naming prefix worth seeing on its own.
+pub(crate) fn path_rows<'n>(
+    scope: &str,
+    paths: impl IntoIterator<Item = &'n str>,
+    is_open: impl Fn(&str) -> bool,
+) -> Vec<RefRow> {
+    let mut root = Node::default();
+    for path in paths {
+        let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+        root.insert(&segments, path);
+    }
+    root.sort();
+    let mut rows = Vec::new();
+    flatten(&root, scope, 0, false, true, &is_open, &mut rows);
     rows
 }
 
@@ -91,21 +110,28 @@ fn flatten(
     prefix: &str,
     depth: usize,
     filtering: bool,
+    join_single: bool,
     is_open: &impl Fn(&str) -> bool,
     rows: &mut Vec<RefRow>,
 ) {
     for (name, child) in &node.folders {
+        let (mut name, mut child) = (name.clone(), child);
+        while join_single && child.leaves.is_empty() && child.folders.len() == 1 {
+            let (inner_name, inner) = &child.folders[0];
+            name = format!("{name}/{inner_name}");
+            child = inner;
+        }
         let key = format!("{prefix}/{name}");
         let open = filtering || is_open(&key);
         rows.push(RefRow::Folder {
             key: key.clone(),
-            label: name.clone(),
+            label: name,
             depth,
             open,
             leaves: child.leaf_count(),
         });
         if open {
-            flatten(child, &key, depth + 1, filtering, is_open, rows);
+            flatten(child, &key, depth + 1, filtering, join_single, is_open, rows);
         }
     }
     for (label, full) in &node.leaves {
@@ -162,6 +188,13 @@ mod tests {
     fn filtering_keeps_matches_and_opens_their_folders() {
         let rows = ref_rows("local", ["feature/ExternalServices", "feature/other", "main"], "external", |_| false);
         assert_eq!(labels(&rows), ["▾feature/ (1)", "  ExternalServices"]);
+    }
+
+    #[test]
+    fn paths_join_folders_that_hold_one_folder() {
+        let rows = path_rows("files", ["a/b/c/x.rs", "a/b/c/y.rs", "a/d.rs"], |_| true);
+        assert_eq!(labels(&rows), ["▾a/ (3)", "  ▾b/c/ (2)", "    x.rs", "    y.rs", "  d.rs"]);
+        assert!(matches!(&rows[1], RefRow::Folder { key, .. } if key == "files/a/b/c"));
     }
 
     #[test]

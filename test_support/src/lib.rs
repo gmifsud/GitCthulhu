@@ -56,6 +56,7 @@ impl FakeGitRepository {
                 untracked_files: vec![],
                 tracking: None,
                 head_commit_id: None,
+                kinds: Default::default(),
             }),
             log_result: Ok(vec![]),
             branches_result: Ok(vec![]),

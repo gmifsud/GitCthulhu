@@ -22,11 +22,12 @@ mod worktrees;
 
 use crate::app::{GitApp, Message};
 use crate::selection::visible_selection;
-use iced::widget::{column, container, stack};
+use iced::widget::{column, container, opaque, stack, Space};
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use branch::branch_prompt;
-use chrome::{compact, hairline, reading};
+use chrome::{compact, hairline, reading, Reading};
+use crate::theme::DesignTokens;
 use confirm::{confirm_detach, confirm_discard, confirm_drop_stash, history_prompt};
 use context_overlay::context_menu_overlay;
 use palette::palette_overlay;
@@ -47,48 +48,6 @@ impl GitApp {
         if self.sessions.is_empty() {
             return welcome(self, tokens, reading);
         }
-        // Only show the detach dialog while we are waiting for the user (dirty worktree).
-        // Clean detach sets confirm_detach then immediately runs the job and clears it.
-        if let Some(commit_id) = &self.confirm_detach {
-            if self
-                .session()
-                .state
-                .current_status
-                .as_ref()
-                .is_some_and(|status| {
-                    !status.staged_files.is_empty()
-                        || !status.unstaged_files.is_empty()
-                        || !status.untracked_files.is_empty()
-                })
-            {
-                return confirm_detach(commit_id, tokens, reading);
-            }
-        }
-        if let Some((paths, _)) = &self.confirm_discard {
-            return confirm_discard(paths, tokens, reading);
-        }
-        if let Some(stash) = &self.confirm_drop {
-            return confirm_drop_stash(&stash.message, tokens, reading);
-        }
-        if let Some(prompt) = &self.branch_prompt {
-            return branch_prompt(prompt, tokens, reading);
-        }
-        if let Some(prompt) = &self.history_prompt {
-            return history_prompt(prompt, tokens, reading);
-        }
-        if let Some(prompt) = &self.worktree_prompt {
-            return worktree_prompt(
-                prompt,
-                self.error.as_deref(),
-                self.worktree_busy,
-                tokens,
-                reading,
-            );
-        }
-        if self.settings_open {
-            return settings_dialog(self, tokens);
-        }
-
         let session = self.session();
         let selection = visible_selection(
             session.selection.as_ref(),
@@ -114,12 +73,65 @@ impl GitApp {
             border: Border::default(),
             shadow: Shadow::default(),
         });
-        if let Some(overlay) = palette_overlay(self, tokens, reading) {
-            stack![main, overlay].into()
+        // The root is always `stack![main, layer]`. iced keeps widget state (scroll offsets,
+        // text cursors) by position in the tree, so swapping the root for a dialog or wrapping
+        // it in a stack only while a menu is open reset every scrollable to the top.
+        let layer: Element<'_, Message> = if let Some(dialog) = self.dialog(tokens, reading) {
+            // `opaque` keeps clicks and hovers from reaching the screen underneath.
+            opaque(dialog)
+        } else if let Some(overlay) = palette_overlay(self, tokens, reading) {
+            overlay
         } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
-            stack![main, overlay].into()
+            overlay
         } else {
-            main.into()
+            Space::new(Length::Shrink, Length::Shrink).into()
+        };
+        stack![main, layer].into()
+    }
+
+    /// The modal dialog that is waiting for the user, if any.
+    fn dialog(&self, tokens: DesignTokens, reading: Reading) -> Option<Element<'_, Message>> {
+        // Only show the detach dialog while we are waiting for the user (dirty worktree).
+        // Clean detach sets confirm_detach then immediately runs the job and clears it.
+        if let Some(commit_id) = &self.confirm_detach {
+            if self
+                .session()
+                .state
+                .current_status
+                .as_ref()
+                .is_some_and(|status| {
+                    !status.staged_files.is_empty()
+                        || !status.unstaged_files.is_empty()
+                        || !status.untracked_files.is_empty()
+                })
+            {
+                return Some(confirm_detach(commit_id, tokens, reading));
+            }
         }
+        if let Some((paths, _)) = &self.confirm_discard {
+            return Some(confirm_discard(paths, tokens, reading));
+        }
+        if let Some(stash) = &self.confirm_drop {
+            return Some(confirm_drop_stash(&stash.message, tokens, reading));
+        }
+        if let Some(prompt) = &self.branch_prompt {
+            return Some(branch_prompt(prompt, tokens, reading));
+        }
+        if let Some(prompt) = &self.history_prompt {
+            return Some(history_prompt(prompt, tokens, reading));
+        }
+        if let Some(prompt) = &self.worktree_prompt {
+            return Some(worktree_prompt(
+                prompt,
+                self.error.as_deref(),
+                self.worktree_busy,
+                tokens,
+                reading,
+            ));
+        }
+        if self.settings_open {
+            return Some(settings_dialog(self, tokens));
+        }
+        None
     }
 }

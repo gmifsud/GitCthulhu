@@ -6,7 +6,9 @@ mod appearance;
 mod changes;
 mod commit_graph;
 mod context_menu;
+mod icons;
 mod dates;
+mod diff_view;
 mod jobs;
 mod layout;
 mod log_filter;
@@ -75,6 +77,7 @@ pub fn run(
         .theme(|_| Theme::Dark)
         .window(repository_window())
         .subscription(GitApp::subscription)
+        .font(icons::FONT_BYTES)
         .run_with(move || {
             (
                 {
@@ -113,6 +116,7 @@ pub fn run_welcome(
         .theme(|_| Theme::Dark)
         .window(repository_window())
         .subscription(GitApp::subscription)
+        .font(icons::FONT_BYTES)
         .run_with(move || {
             (
                 {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Represents a Git commit.
@@ -116,6 +117,38 @@ pub enum ResetMode {
     Hard,
 }
 
+/// How a changed path differs, as `git status` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Conflicted,
+    Untracked,
+}
+
+/// The kind of each staged and unstaged path in a [`RepoStatus`].
+///
+/// A staged or unstaged path with no entry reads as [`ChangeKind::Modified`], so an adapter
+/// that does not classify changes still reports something true. Untracked paths need no entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangeKinds {
+    pub staged: BTreeMap<String, ChangeKind>,
+    pub unstaged: BTreeMap<String, ChangeKind>,
+}
+
+impl ChangeKinds {
+    pub fn of(&self, place: FileDisposition, path: &str) -> ChangeKind {
+        let kinds = match place {
+            FileDisposition::Staged => &self.staged,
+            FileDisposition::Unstaged => &self.unstaged,
+            FileDisposition::Untracked => return ChangeKind::Untracked,
+        };
+        kinds.get(path).copied().unwrap_or(ChangeKind::Modified)
+    }
+}
+
 /// Represents the status of the working directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoStatus {
@@ -126,6 +159,8 @@ pub struct RepoStatus {
     pub tracking: Option<TrackingStatus>,
     /// Peeled `HEAD` commit id when born; `None` when unborn. Used for focus-current when detached.
     pub head_commit_id: Option<String>,
+    /// Added, modified, deleted… for each staged and unstaged path.
+    pub kinds: ChangeKinds,
 }
 
 /// Domain errors that can occur during Git operations.

@@ -46,7 +46,15 @@ Open a repository from the command line or from the welcome screen's folder dial
 
 **Log filter bar.** Above the History table: text search, Branch ▾ (All, HEAD, any local or remote branch), User ▾ (authors of the loaded commits) and the current-branch toggle. Dates are shown in UTC, because the crate reads no time zone. Merge commits are muted.
 
-**Inspector.** A commit, tag or stash shows its changed files as a folder tree with line counts, with its details (hash, author, date, parents, refs) below. Any other selection shows the working tree. The head names the selection and lists its commands as labelled buttons. The Diff head steps through the files (‹ n/N ›).
+**Inspector.** A commit, tag or stash shows its changed files as a folder tree with line counts, with its details (hash, author, date, parents, refs) below. Any other selection shows the working tree, laid out like the JetBrains Commit window: a toolbar on top, then the files (the only part that scrolls) in Staged, Changes and Unversioned Files, then the commit message with Suggest and Commit. File names are coloured by change kind: blue modified, green added, grey deleted, red unversioned. A folder holding only one folder is joined to it on one row. The head names the selection and lists its commands as labelled buttons.
+
+**Diff.** Side by side by default, after the JetBrains diff viewer. Removed and added runs are paired into modified rows (blue, with the changed words marked), unpaired lines are added (green) or removed (red) against an empty filler, and both gutters show line numbers. The head steps through differences (↑ ↓ n/N) and files (‹ n/N files ›) and switches to unified. `crate::diff_view` works the rows out before drawing, with fixed row heights, so jumping to a difference is a computed scroll offset.
+
+**Change kind.** `RepoStatus.kinds` (`ChangeKinds` in `core_domain`) says how each staged or unstaged path changed: added, modified, deleted, renamed or conflicted. Untracked paths are unversioned. A path with no entry reads as modified, so an adapter that does not classify still reports something true.
+
+**Icons.** Every icon comes from Codicons (`gui_app/assets/fonts/codicon.ttf`, CC BY 4.0), compiled into the binary and named by `icons::Icon`. Icons no longer depend on the fonts installed on the machine; a test checks every codepoint is in the font.
+
+**Window resizing.** The Explorer keeps the pixel width you gave it when the window is resized (280 px to start, within 16–36 % of the width). The log and the Diff take up the difference.
 
 **History search.** The log filter bar's text field (Ctrl+K) narrows the history table to loaded commits whose message, author, hash prefix, or tip ref name contains every typed term. Matches show their lane dot without lines, and a line under the headers says how many of the loaded commits matched. It searches what is loaded, not the whole repository.
 

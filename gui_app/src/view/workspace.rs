@@ -6,7 +6,8 @@ use iced::widget::pane_grid::{self, Content};
 use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
-use super::chrome::{command_button, hairline, pane_title, symbol_reading, Reading};
+use super::chrome::{command_button, glyph, hairline, icon_button, pane_title, Reading};
+use crate::icons::Icon;
 use super::commands::{can_commit, can_stash, labelled_command_buttons, placed_commands, CommandPlace};
 use super::filter_bar::filter_bar;
 use super::explorer::explorer_pane;
@@ -22,10 +23,9 @@ const COMMAND_SPACING: f32 = 6.0;
 const FILES_RAIL_WIDTH: f32 = 36.0;
 const FILES_TITLE: &str = "Explorer";
 const DIFF_TITLE: &str = "Diff";
-const PREVIOUS_FILE: &str = "‹";
-const NEXT_FILE: &str = "›";
-const COLLAPSE_FILES: &str = "⟨";
-const EXPAND_FILES: &str = "⟩";
+const DIFF_MODE_TIP: &str = "diff-mode";
+/// Widest the Inspector head's selection name grows before it clips.
+const CONTEXT_LABEL_MAX_WIDTH: f32 = 260.0;
 
 pub(super) fn workspace<'a>(
     app: &'a GitApp,
@@ -135,9 +135,32 @@ fn diff<'a>(
         format!("{DIFF_TITLE} · {}", app.session().patches.len())
     };
     let session = app.session();
+    // Laid out once per frame: the head counts differences, the pane draws the same lines.
+    let layout = crate::diff_view::layout(
+        &session.patches,
+        session.focused_diff_path.as_deref(),
+        session.diff_lines_limit,
+        app.diff_split,
+    );
+    let changes = layout.changes().len();
     let mut head = row![pane_title(&title, tokens, reading), iced::widget::horizontal_space()]
         .spacing(COMMAND_SPACING)
         .align_y(Alignment::Center);
+    if changes > 0 {
+        let at = session.diff_change.filter(|at| *at < changes);
+        let jump = |forward: bool| {
+            crate::diff_view::step(at, changes, forward).map(|_| Message::StepDiffChange(forward))
+        };
+        let count = match (at, changes) {
+            (Some(at), n) => format!("{}/{n} differences", at + 1),
+            (None, 1) => "1 difference".to_string(),
+            (None, n) => format!("{n} differences"),
+        };
+        head = head
+            .push(step_button(Icon::ArrowSmallUp, jump(false), tokens, reading))
+            .push(step_button(Icon::ArrowSmallDown, jump(true), tokens, reading))
+            .push(head_text(count, tokens, reading));
+    }
     if session.patches.len() > 1 {
         let position = session
             .focused_diff_path
@@ -149,19 +172,25 @@ fn diff<'a>(
             );
         let step = |forward: bool| session.diff_step(forward).map(Message::FocusDiffPath);
         head = head
-            .push(step_button(PREVIOUS_FILE, step(false), tokens, reading))
-            .push(
-                text(position)
-                    .font(reading.font)
-                    .size(reading.size)
-                    .style(move |_| text::Style {
-                        color: Some(tokens.text_secondary),
-                    }),
-            )
-            .push(step_button(NEXT_FILE, step(true), tokens, reading));
+            .push(step_button(Icon::ChevronLeft, step(false), tokens, reading))
+            .push(head_text(position, tokens, reading))
+            .push(step_button(Icon::ChevronRight, step(true), tokens, reading));
         if session.focused_diff_path.is_some() {
             head = head.push(command_button("All files", Message::ClearDiffFocus, true, tokens, reading));
         }
+    }
+    if !session.patches.is_empty() {
+        head = head.push(icon_button(
+            Icon::SplitView,
+            if app.diff_split { "Show unified" } else { "Show side by side" },
+            DIFF_MODE_TIP,
+            app.tip_ready(DIFF_MODE_TIP),
+            Message::ToggleDiffSplit,
+            true,
+            app.diff_split,
+            tokens,
+            reading,
+        ));
     }
     column![
         column![
@@ -170,11 +199,22 @@ fn diff<'a>(
                 .width(Length::Fill),
             hairline(tokens),
         ],
-        patch_pane(app, tokens, reading),
+        patch_pane(app, &layout, tokens, reading),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+fn head_text<'a>(value: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    super::chrome::one_line(
+        text(value)
+            .font(reading.font)
+            .size(reading.size)
+            .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+        reading.size,
+        Length::Shrink,
+    )
 }
 
 fn inspector_head<'a>(
@@ -187,13 +227,20 @@ fn inspector_head<'a>(
     let items: Vec<_> = [CommandPlace::Graph, CommandPlace::Inspector]
         .into_iter()
         .flat_map(|place| placed_commands(selection, can_commit(app), can_stash(app), place))
+        // Commit sits under the message in the working tree, as in the JetBrains Commit window.
+        .filter(|item| item.command != crate::selection::RibbonCommand::Commit)
         .collect();
-    let mut commands = row![text(context_label(selection))
-        .font(reading.font)
-        .size(reading.size)
-        .style(move |_| text::Style {
-            color: Some(tokens.accent_primary),
-        })]
+    let mut commands = row![container(super::chrome::one_line(
+        text(context_label(selection))
+            .font(reading.font)
+            .size(reading.size)
+            .style(move |_| text::Style {
+                color: Some(tokens.accent_primary),
+            }),
+        reading.size,
+        Length::Shrink,
+    ))
+    .max_width(CONTEXT_LABEL_MAX_WIDTH)]
     .spacing(COMMAND_SPACING)
     .align_y(Alignment::Center);
     for button in labelled_command_buttons(&items, selection, app, tokens, reading) {
@@ -236,13 +283,10 @@ fn files_head<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message
                     color: Some(tokens.text_muted),
                 }),
             iced::widget::horizontal_space(),
-            command_button(
-                COLLAPSE_FILES,
-                Message::ToggleFilesRail,
-                true,
-                tokens,
-                symbol_reading(&reading)
-            ),
+            button(glyph(Icon::ChevronLeft, reading.size, tokens.text_secondary, &reading))
+                .padding([2, 4])
+                .on_press(Message::ToggleFilesRail)
+                .style(move |_theme, status| rail_button_style(tokens, status)),
         ]
         .spacing(COMMAND_SPACING)
         .align_y(Alignment::Center)
@@ -281,9 +325,7 @@ fn collapsed_files_rail<'a>(
 
 fn rail_toggle<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     button(
-        text(EXPAND_FILES)
-            .font(symbol_reading(&reading).font)
-            .size(reading.size),
+        glyph(Icon::ChevronRight, reading.size, tokens.text_secondary, &reading),
     )
     .padding(4)
     .on_press(Message::ToggleFilesRail)
@@ -329,9 +371,9 @@ fn rail_button_style(
 }
 
 /// "‹" or "›" in the Diff head; disabled at either end of the file list.
-fn step_button<'a>(mark: &'static str, message: Option<Message>, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+fn step_button<'a>(icon: Icon, message: Option<Message>, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let enabled = message.is_some();
-    button(text(mark).font(reading.font).size(reading.size + 2.0))
+    button(glyph(icon, reading.size + 1.0, if enabled { tokens.text_primary } else { tokens.text_muted }, &reading))
         .padding([0, 6])
         .on_press_maybe(message)
         .style(move |_theme, status| {

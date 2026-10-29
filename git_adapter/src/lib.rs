@@ -20,7 +20,7 @@ use core_domain::{
 use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
 use gix::refs::TargetRef;
-use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
+use status::{record_change, staged_changes, tracking_status, unborn_worktree_changes};
 use worktree::{parse_worktree_porcelain, require_worktree_path};
 
 pub(crate) fn unknown(error: impl Display) -> DomainError {
@@ -145,12 +145,17 @@ impl GitRepository for GitoxideAdapter {
                 .ok()
                 .and_then(|head| head.id().map(|id| id.to_string()))
         };
+        let staged = staged_changes(&repo, head_is_unborn)?;
         let mut status = RepoStatus {
-            staged_files: staged_paths(&repo, head_is_unborn)?,
+            staged_files: staged.keys().cloned().collect(),
             unstaged_files: vec![],
             untracked_files: vec![],
             tracking: tracking_status(&self.repo_path)?,
             head_commit_id,
+            kinds: core_domain::ChangeKinds {
+                staged,
+                ..Default::default()
+            },
         };
 
         // Index ↔ worktree: modified/removed tracked files and untracked files, one path each.

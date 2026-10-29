@@ -185,3 +185,24 @@ Assumptions:
 - **Dates are shown in UTC.** `gui_app` has no time-zone source, and adding `chrono` for local time is left as its own decision.
 - **The User ▾ list only covers loaded commits.** It inherits the loaded-history limit (R4).
 
+## 10. Testing round 2 (after the merge to `main`)
+
+![Side-by-side diff](img/2026-10-29-diff-side-by-side.png)
+
+![At 1100 px](img/2026-10-29-narrow-1100.png)
+
+| # | Report | Root cause | Fix |
+|---|---|---|---|
+| 1 | Icons missing | Icons were Unicode symbols drawn from whichever fonts the machine had. Segoe UI Symbol has no `⤵ ⑂ ⤴ ⌕`, and the labelled buttons drew the mark in the text font | Codicons is bundled and loaded at startup (`icons.rs`). Every icon is an `Icon` variant, and a test checks each codepoint against the font's `cmap` |
+| 2 | Working-tree buttons scroll away | The whole panel (commit box, toolbar, files) was inside one `scrollable` | The toolbar and commit box are pinned; only the file list scrolls |
+| 3 | Right-click jumps the scroll | `view()` returned a `container` normally and a `stack` while a menu was open. iced keeps widget state by tree position, so every scrollable reset. Dialogs replaced the root too | The root is always `stack![main, layer]`. Dialogs are an `opaque` layer above the screen instead of replacing it |
+| 4 | No colour in the changes list | The adapter folded every gix `Summary` into a path list, so the change kind never reached the UI | `ChangeKinds` in `RepoStatus`, filled from the index↔HEAD comparison and from gix's index↔worktree summary. JetBrains colours, folder joining, file counts. Commit files are coloured from their hunk ranges |
+| 5 | Diff hard to read | A unified list with no pairing, no word marking and no navigation | `diff_view`: side-by-side pairing, token-level LCS marking of changed words (prefix/suffix above 40,000 token pairs), difference and file stepping, unified toggle |
+| 6 | Inconsistent on resize | Panes were fixed fractions, so the Explorer shrank with the window. Pickers grew to their longest option and crushed the search box. Text still wrapped when squeezed (iced 0.13 ignores `Wrapping::None`) | Explorer pixel width kept across resizes. Fixed-width pickers. `one_line` clamps on tags, labels and tracking text. Ref pills take at most a quarter of the Description column |
+
+Found during verification: `rich_text` showed the same wrap defect. A modified diff row lost everything after its first highlighted word. The row is drawn as one text widget per piece instead.
+
+Not done:
+- Horizontal scrolling of long diff lines (they clip at the column edge).
+- A conflict view.
+

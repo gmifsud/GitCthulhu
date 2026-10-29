@@ -7,7 +7,7 @@ use crate::app::{GitApp, Message};
 use crate::changes::change_sections;
 use crate::dates::full_date;
 use crate::ref_pills::refs_at;
-use crate::ref_tree::{ref_rows, RefRow};
+use crate::ref_tree::{path_rows, RefRow};
 use crate::selection::{short_hash, Selection};
 use crate::theme::DesignTokens;
 use core_domain::{Commit, RepoStatus};
@@ -15,16 +15,16 @@ use iced::widget::{column, container, row, scrollable, text, Space};
 use iced::{Alignment, Element, Length};
 
 use super::changes::wip_working_tree_block;
-use super::chrome::{glyph, hairline, symbol_reading, Reading, FOLD_CLOSED, FOLD_OPEN};
+use super::chrome::{glyph, hairline, Reading};
+use crate::icons::Icon;
 use super::explorer::{label_text, tree_row};
-use super::patch::patch_stats;
+use super::patch::{patch_kind, patch_stats};
 
 /// Collapse-state scope of the changed-files tree, shared with the branch tree's store.
 const FILES_SCOPE: &str = "files";
 /// Changed files take three parts of the height, details two.
 const FILES_PORTION: u16 = 3;
 const DETAILS_PORTION: u16 = 2;
-const FOLDER_MARK: &str = "▭";
 
 pub(crate) fn show_wip_block(status: Option<&RepoStatus>) -> bool {
     status.is_some_and(|status| !change_sections(status).is_empty())
@@ -62,10 +62,8 @@ pub(crate) fn files_navigator<'a>(
     if !show_wip_block(status) {
         return muted_note("Working tree clean. Select a commit to see its files.", tokens, reading);
     }
-    container(scrollable(wip_working_tree_block(app, selection, tokens, reading)))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    // The block scrolls its own file list; the toolbar and commit box stay put.
+    wip_working_tree_block(app, selection, tokens, reading)
 }
 
 fn muted_note<'a>(note: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -109,13 +107,12 @@ fn changed_files_tree<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Readin
 
     let mut tree = column![container(heading).padding([4, 8])].spacing(0).padding([2, 4]);
     let paths = session.patches.iter().map(|patch| patch.path.as_str());
-    let sym = symbol_reading(&reading);
-    for data in ref_rows(FILES_SCOPE, paths, "", |key| session.ref_folder_open(key)) {
+    for data in path_rows(FILES_SCOPE, paths, |key| session.ref_folder_open(key)) {
         tree = tree.push(match data {
             RefRow::Folder { key, label, depth, open, leaves } => tree_row(
                 depth,
-                Some(text(if open { FOLD_OPEN } else { FOLD_CLOSED }).font(sym.font).size(reading.size).into()),
-                Some(glyph(FOLDER_MARK, reading.size, tokens.text_muted, &reading)),
+                Some(glyph(Icon::fold(open), reading.size, tokens.text_muted, &reading)),
+                Some(glyph(if open { Icon::FolderOpened } else { Icon::Folder }, reading.size, tokens.text_muted, &reading)),
                 row![
                     label_text(&label, tokens.text_secondary, reading),
                     label_text(&leaves.to_string(), tokens.text_muted, reading),
@@ -132,7 +129,12 @@ fn changed_files_tree<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Readin
                 let (added, removed) = patch.map(patch_stats).unwrap_or((0, 0));
                 let binary = patch.is_some_and(|patch| patch.binary);
                 let focused = session.focused_diff_path.as_deref() == Some(name.as_str());
-                let mut line = row![label_text(&label, tokens.text_primary, reading), Space::with_width(Length::Fill)]
+                let ink = patch.map_or(tokens.text_primary, |patch| tokens.change_ink(patch_kind(patch)));
+                let mut line = row![
+                    glyph(Icon::File, reading.size, tokens.text_muted, &reading),
+                    label_text(&label, ink, reading),
+                    Space::with_width(Length::Fill)
+                ]
                     .spacing(6)
                     .align_y(Alignment::Center);
                 if binary {
@@ -245,6 +247,7 @@ mod tests {
             untracked_files: vec![],
             tracking: None,
             head_commit_id: None,
+            kinds: Default::default(),
         }
     }
 
@@ -255,6 +258,7 @@ mod tests {
             untracked_files: vec![],
             tracking: None,
             head_commit_id: None,
+            kinds: Default::default(),
         }
     }
 

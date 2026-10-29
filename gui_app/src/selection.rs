@@ -301,6 +301,7 @@ mod tests {
             untracked_files: owned(untracked),
             tracking: None,
             head_commit_id: None,
+            kinds: Default::default(),
         }
     }
 

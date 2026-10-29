@@ -52,6 +52,8 @@ impl std::fmt::Debug for OpenedRepository {
 
 /// Text-input id of the top-bar history search (focused by Ctrl+K).
 pub(crate) const HISTORY_SEARCH_ID: &str = "history-search";
+/// Scrollable id of the Diff pane, for jumping between differences.
+pub(crate) const DIFF_SCROLL_ID: &str = "diff-scroll";
 /// Text-input id of the quick-open palette field.
 pub(crate) const PALETTE_INPUT_ID: &str = "quick-open";
 
@@ -112,6 +114,12 @@ pub(crate) struct GitApp {
     focus_restore: Option<FocusRestore>,
     pub(crate) branch_list_open: bool,
     pub(crate) files_as_tree: bool,
+    /// Diff drawn side by side (true) or as one unified column.
+    pub(crate) diff_split: bool,
+    /// Window width from the last resize event; 0 until the first one.
+    window_width: f32,
+    /// Explorer width the user chose, kept when the window is resized.
+    files_px: f32,
     pub(crate) agent_models: Vec<String>,
     pub(crate) agent_models_error: Option<String>,
     pub(crate) agent_busy: bool,
@@ -164,6 +172,8 @@ pub(crate) enum Message {
     /// Show the native folder dialog.
     ChooseRepositoryFolder,
     PaneResized(pane_grid::ResizeEvent),
+    /// The window is this wide now.
+    WindowResized(f32),
     SetLayout(LayoutPreset),
     ToggleFilesRail,
     /// Collapse or expand one Explorer accordion section for the active session.
@@ -257,6 +267,10 @@ pub(crate) enum Message {
     },
     /// Draw another page of diff lines in the diff pane.
     ShowMoreDiff,
+    /// Side by side ↔ unified.
+    ToggleDiffSplit,
+    /// Jump to the next (true) or previous difference.
+    StepDiffChange(bool),
     AskDiscard,
     CancelDiscard,
     ConfirmDiscard,
@@ -506,6 +520,9 @@ impl GitApp {
             focus_restore: None,
             branch_list_open: false,
             files_as_tree: true,
+            diff_split: true,
+            window_width: 0.0,
+            files_px: layout::FILES_PX,
             agent_models: Vec::new(),
             agent_models_error: None,
             agent_busy: false,
@@ -587,7 +604,32 @@ impl GitApp {
             .unwrap_or_default()
     }
 
+    /// In every preset but Stacked the Explorer is a column, so its split is a width.
+    fn files_split_is_a_width(&self) -> bool {
+        self.layout != LayoutPreset::Stacked
+    }
+
+    /// Hold the Explorer at the width the user chose while the window changes size.
+    fn keep_files_width(&mut self) {
+        if !self.files_split_is_a_width() || self.window_width <= 0.0 {
+            return;
+        }
+        let ratio = layout::files_ratio_for(self.files_px, self.window_width);
+        self.ratios[self.layout.index()].files = ratio;
+        let split = self
+            .split_slots
+            .iter()
+            .find(|(_, slot)| *slot == RatioSlot::Files)
+            .map(|(split, _)| *split);
+        if let Some(split) = split {
+            self.panes.resize(split, ratio);
+        }
+    }
+
     fn install_layout(&mut self) {
+        if self.files_split_is_a_width() && self.window_width > 0.0 {
+            self.ratios[self.layout.index()].files = layout::files_ratio_for(self.files_px, self.window_width);
+        }
         let base = self.ratios[self.layout.index()];
         let ratios = base.for_hunk_mode(self.hunk_mode);
         self.panes = layout::new_panes(
@@ -640,11 +682,36 @@ impl GitApp {
         true
     }
 
+    /// Scroll the Diff pane to the next or previous difference, using the same layout the
+    /// pane is drawn with.
+    fn step_diff_change(&mut self, forward: bool) -> Task<Message> {
+        let split = self.diff_split;
+        let Some(session) = self.active_session_mut() else {
+            return Task::none();
+        };
+        let layout = crate::diff_view::layout(
+            &session.patches,
+            session.focused_diff_path.as_deref(),
+            session.diff_lines_limit,
+            split,
+        );
+        let changes = layout.changes();
+        let Some(next) = crate::diff_view::step(session.diff_change, changes.len(), forward) else {
+            return Task::none();
+        };
+        session.diff_change = Some(next);
+        iced::widget::scrollable::scroll_to(
+            iced::widget::scrollable::Id::new(DIFF_SCROLL_ID),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: layout.offset_of(changes[next]) },
+        )
+    }
+
     fn start_patch(&mut self) -> Task<Message> {
         let Some(session) = self.active_session_mut() else {
             return Task::none();
         };
         session.diff_lines_limit = DIFF_LINES_PER_PAGE;
+        session.diff_change = None;
         let Some(query) = session.patch_query() else {
             session.patches.clear();
             session.patch_error = None;
@@ -951,15 +1018,25 @@ impl GitApp {
             Message::FocusDiffPath(path) => {
                 if let Some(session) = self.active_session_mut() {
                     session.focused_diff_path = Some(path);
+                    session.diff_change = None;
                 }
                 Task::none()
             }
             Message::ClearDiffFocus => {
                 if let Some(session) = self.active_session_mut() {
                     session.focused_diff_path = None;
+                    session.diff_change = None;
                 }
                 Task::none()
             }
+            Message::ToggleDiffSplit => {
+                self.diff_split = !self.diff_split;
+                if let Some(session) = self.active_session_mut() {
+                    session.diff_change = None;
+                }
+                Task::none()
+            }
+            Message::StepDiffChange(forward) => self.step_diff_change(forward),
             Message::ClearError => {
                 self.error = None;
                 self.error_expanded = false;
@@ -1170,9 +1247,17 @@ impl GitApp {
                         RatioSlot::Files => ratios.files,
                     };
                     self.panes.resize(event.split, clamped);
+                    if slot == RatioSlot::Files && self.files_split_is_a_width() && self.window_width > 0.0 {
+                        self.files_px = clamped * self.window_width;
+                    }
                 } else {
                     self.panes.resize(event.split, event.ratio);
                 }
+                Task::none()
+            }
+            Message::WindowResized(width) => {
+                self.window_width = width;
+                self.keep_files_width();
                 Task::none()
             }
             Message::SetLayout(preset) => {
@@ -1527,6 +1612,7 @@ impl GitApp {
                     Ok(patches) => {
                         session.patches = patches;
                         session.patch_error = None;
+                        session.diff_change = None;
                     }
                     Err(error) => {
                         session.patches.clear();
@@ -2966,6 +3052,7 @@ impl GitApp {
                     y: position.y,
                 })
             }
+            iced::Event::Window(iced::window::Event::Resized(size)) => Some(Message::WindowResized(size.width)),
             _ => None,
         });
         let waiting_tip = self.tip_hover.is_some()
@@ -3860,6 +3947,7 @@ mod tests {
             untracked_files: vec![],
             tracking: None,
             head_commit_id: None,
+            kinds: Default::default(),
         });
 
         let _ = app.update(Message::SelectAllFiles);
@@ -5488,6 +5576,7 @@ mod tests {
             untracked_files: vec![],
             tracking: None,
             head_commit_id: Some("abc".into()),
+            kinds: Default::default(),
         });
 
         let _ = app.update(Message::AskDetachHead {
@@ -5507,6 +5596,7 @@ mod tests {
             untracked_files: vec![],
             tracking: None,
             head_commit_id: Some("abc".into()),
+            kinds: Default::default(),
         });
 
         let _ = app.update(Message::AskDetachHead {
@@ -5642,6 +5732,50 @@ mod tests {
         }
         assert!(!app.session().state.loading);
         assert_eq!(app.session().branch_filter.as_deref(), Some("origin/feature"));
+    }
+
+    #[test]
+    fn the_explorer_keeps_its_width_when_the_window_narrows() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::WindowResized(1600.0));
+        let wide = app.ratios[app.layout.index()].files;
+        let _ = app.update(Message::WindowResized(1100.0));
+        let narrow = app.ratios[app.layout.index()].files;
+        assert!((wide * 1600.0 - layout::FILES_PX).abs() < 1.0);
+        assert!((narrow * 1100.0 - layout::FILES_PX).abs() < 1.0);
+        let files = mapped_slot(&app, RatioSlot::Files);
+        let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent { split: files, ratio: 0.30 }));
+        let _ = app.update(Message::WindowResized(1000.0));
+        assert!((app.ratios[app.layout.index()].files * 1000.0 - 330.0).abs() < 1.0, "keeps the dragged 330 px");
+    }
+
+    #[test]
+    fn stepping_through_differences_stops_at_the_last() {
+        use core_domain::{DiffLine, DiffLineKind, Hunk, Patch};
+        let line = |kind, text: &str| DiffLine { kind, text: text.into() };
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().patches = vec![Patch {
+            path: "a.rs".into(),
+            binary: false,
+            hunks: vec![Hunk {
+                header: "@@ -1,3 +1,3 @@".into(),
+                lines: vec![
+                    line(DiffLineKind::Removed, "a"),
+                    line(DiffLineKind::Added, "A"),
+                    line(DiffLineKind::Context, "b"),
+                    line(DiffLineKind::Added, "c"),
+                ],
+            }],
+        }];
+        let _ = app.update(Message::StepDiffChange(true));
+        assert_eq!(app.session().diff_change, Some(0));
+        let _ = app.update(Message::StepDiffChange(true));
+        assert_eq!(app.session().diff_change, Some(1));
+        let _ = app.update(Message::StepDiffChange(true));
+        assert_eq!(app.session().diff_change, Some(1), "stays on the last difference");
+        let _ = app.update(Message::ToggleDiffSplit);
+        assert!(!app.diff_split);
+        assert_eq!(app.session().diff_change, None);
     }
 
     #[test]

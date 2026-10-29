@@ -1,5 +1,6 @@
 use crate::app::Message;
 use crate::appearance::{font_family, font_size};
+use crate::icons::{self, Icon};
 use crate::theme::DesignTokens;
 use core_domain::AppSettings;
 use iced::widget::button::Status;
@@ -10,19 +11,8 @@ use iced::{
     font::Family, Alignment, Background, Border, Color, Element, Font, Length, Shadow, Theme,
 };
 
-/// Fold / menu / branch marks live in Segoe UI Symbol. UI faces (Segoe UI,
-/// Familjen Grotesk) often omit them, which is why tree and branch chrome looked blank.
-pub(super) const FOLD_CLOSED: &str = "▸";
-pub(super) const FOLD_OPEN: &str = "▾";
-pub(super) const MENU_CLOSED: &str = "▾";
-pub(super) const MENU_OPEN: &str = "▴";
-/// Prefer glyphs that render in Segoe UI / Segoe UI Symbol (⎇ often draws blank).
-pub(super) const BRANCH_MARK: &str = "⑂";
-pub(super) const SEARCH_MARK: &str = "⌕";
-pub(super) const REMOTE_MARK: &str = "↑";
-pub(super) const TAG_MARK: &str = "◆";
-pub(super) const STASH_MARK: &str = "≡";
-pub(super) const WORKTREE_MARK: &str = "⧉";
+/// Widest the top-bar branch name grows before it clips.
+const BRANCH_CHIP_MAX_WIDTH: f32 = 280.0;
 
 /// The face and size chosen under Appearance. Hashes and paths stay monospace.
 #[derive(Clone, Copy)]
@@ -79,37 +69,10 @@ pub(super) fn reading(settings: &AppSettings) -> Reading {
     }
 }
 
-/// Segoe UI does not contain the layout and rail glyphs. This face does.
-const SYMBOL_FONT: &str = "Segoe UI Symbol";
-
-pub(super) fn symbol_reading(reading: &Reading) -> Reading {
-    Reading {
-        font: Font {
-            family: Family::Name(SYMBOL_FONT),
-            ..reading.font
-        },
-        mono: reading.mono,
-        size: reading.size,
-    }
-}
-
-pub(super) fn fold_mark(folded: bool) -> &'static str {
-    if folded {
-        FOLD_CLOSED
-    } else {
-        FOLD_OPEN
-    }
-}
-
-/// One chrome glyph, always drawn with the symbol face.
-pub(super) fn glyph<'a>(
-    mark: &'a str,
-    size: f32,
-    color: Color,
-    reading: &Reading,
-) -> Element<'a, Message> {
-    text(mark)
-        .font(symbol_reading(reading).font)
+/// One icon from the bundled icon font.
+pub(super) fn glyph<'a>(icon: Icon, size: f32, color: Color, _reading: &Reading) -> Element<'a, Message> {
+    text(icon.codepoint())
+        .font(icons::FONT)
         .size(size)
         .line_height(1.0)
         .style(move |_| text::Style {
@@ -127,12 +90,12 @@ pub(super) fn branch_chip<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let chevron = if open { MENU_OPEN } else { MENU_CLOSED };
+    let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
     let label = name.into();
     button(
         row![
             glyph(
-                BRANCH_MARK,
+                Icon::Branch,
                 reading.size,
                 if enabled {
                     tokens.accent_primary
@@ -141,17 +104,22 @@ pub(super) fn branch_chip<'a>(
                 },
                 &reading,
             ),
-            text(label)
-                .font(reading.font)
-                .size(reading.size)
-                .wrapping(Wrapping::None)
-                .style(move |_| text::Style {
-                    color: Some(if enabled {
-                        tokens.accent_primary
-                    } else {
-                        tokens.text_muted
+            container(one_line(
+                text(label)
+                    .font(reading.font)
+                    .size(reading.size)
+                    .wrapping(Wrapping::None)
+                    .style(move |_| text::Style {
+                        color: Some(if enabled {
+                            tokens.accent_primary
+                        } else {
+                            tokens.text_muted
+                        }),
                     }),
-                }),
+                reading.size,
+                Length::Shrink,
+            ))
+            .max_width(BRANCH_CHIP_MAX_WIDTH),
             glyph(
                 chevron,
                 (reading.size - 1.0).max(10.0),
@@ -287,7 +255,7 @@ pub(super) fn command_button<'a>(
 /// two-second tip becomes ready (that remount was clearing hover and flickering).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn icon_button<'a>(
-    mark: &'static str,
+    icon: Icon,
     title: impl Into<String>,
     tip_key: impl Into<String>,
     tip_ready: bool,
@@ -309,7 +277,7 @@ pub(super) fn icon_button<'a>(
     } else {
         tokens.text_muted
     };
-    let control = button(glyph(mark, size, ink, &reading))
+    let control = button(glyph(icon, size, ink, &reading))
         .padding([3, 5])
         .on_press_maybe(enabled.then_some(message))
         .style(move |_theme, status| bordered_button(tokens, status, enabled, accent));
@@ -413,8 +381,9 @@ pub(super) fn accent_button<'a>(
         .into()
 }
 
-/// Bordered text button with an owned label; `accent` fills it for the primary command.
+/// Bordered "icon Label" button; `accent` fills it for the primary command.
 pub(super) fn labelled_button<'a>(
+    icon: Icon,
     label: String,
     message: Message,
     enabled: bool,
@@ -422,7 +391,18 @@ pub(super) fn labelled_button<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    button(text(label).font(reading.font).size(reading.size))
+    let ink = if !enabled {
+        tokens.text_muted
+    } else if accent {
+        Color::BLACK
+    } else {
+        tokens.text_secondary
+    };
+    button(
+        row![glyph(icon, reading.size, ink, &reading), text(label).font(reading.font).size(reading.size)]
+            .spacing(5)
+            .align_y(Alignment::Center),
+    )
         .padding([2, 6])
         .on_press_maybe(enabled.then_some(message))
         .style(move |_theme, status| bordered_button(tokens, status, enabled, accent))

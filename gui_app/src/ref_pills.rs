@@ -1,5 +1,6 @@
 //! Branch and tag labels drawn beside the commit that is their tip.
 
+use crate::icons::Icon;
 use core_domain::{Branch, Tag, Worktree};
 
 /// How a ref pill is coloured and marked in the graph.
@@ -26,13 +27,13 @@ pub(crate) struct RefPill {
 /// Long enough for typical `feature/…` names; still caps pathological refs.
 const PILL_LABEL_MAX: usize = 48;
 
-/// Glyph shown inside the pill for the ref kind (must render in Segoe UI Symbol).
-pub(crate) fn pill_mark(kind: RefPillKind) -> &'static str {
+/// Icon shown inside the pill for the ref kind.
+pub(crate) fn pill_mark(kind: RefPillKind) -> Icon {
     match kind {
-        RefPillKind::Head | RefPillKind::Local => "⑂",
-        RefPillKind::Worktree => "⧉",
-        RefPillKind::Remote => "↑",
-        RefPillKind::Tag => "◆",
+        RefPillKind::Head | RefPillKind::Local => Icon::Branch,
+        RefPillKind::Worktree => Icon::Worktree,
+        RefPillKind::Remote => Icon::Cloud,
+        RefPillKind::Tag => Icon::Tag,
     }
 }
 

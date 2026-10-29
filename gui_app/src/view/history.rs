@@ -23,6 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::chrome::{glyph, panel_style, Reading};
 use crate::dates::log_date;
+use crate::icons::Icon;
 
 const COL_GAP: f32 = 10.0;
 /// Space between the subject and the first ref pill.
@@ -47,6 +48,9 @@ const PILL_GAP: f32 = 3.0;
 const MAX_PILLS_SHOWN: usize = 1;
 /// Widest the pill strip may grow; the subject keeps the rest of the cell.
 const PILL_STRIP_MAX: f32 = 180.0;
+/// Description column split between the subject and the ref pills.
+const SUBJECT_PORTION: u16 = 3;
+const PILL_PORTION: u16 = 1;
 /// One text line inside a pill. iced 0.13 can still wrap `Wrapping::None` text when
 /// squeezed, so pills are clamped to this height and clipped.
 const PILL_HEIGHT: f32 = 16.0;
@@ -387,15 +391,18 @@ fn description_cell<'a>(
                 color: Some(subject_colour),
             }),
     )
-    .width(Length::Fill)
+    .width(Length::FillPortion(SUBJECT_PORTION))
     .clip(true);
     let mut cell = row![subject]
         .spacing(SUBJECT_PILL_GAP)
         .align_y(Alignment::Center);
     if !pills.is_empty() {
+        // At most a quarter of the column: on a narrow log the subject is what must stay.
         cell = cell.push(
             container(pill_strip(pills, tokens, reading))
+                .width(Length::FillPortion(PILL_PORTION))
                 .max_width(PILL_STRIP_MAX)
+                .align_x(Alignment::End)
                 .clip(true),
         );
     }
@@ -428,7 +435,14 @@ fn filter_summary<'a>(
             .style(move |_| text::Style {
                 color: Some(if unloaded { tokens.accent_primary } else { tokens.text_muted }),
             }),
-        button(text("✕ Show all").font(reading.font).size(HEADER_SIZE))
+        button(
+            row![
+                glyph(Icon::Close, HEADER_SIZE, tokens.text_secondary, &reading),
+                text("Show all").font(reading.font).size(HEADER_SIZE),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
             .padding([0, 6])
             .on_press(Message::ClearBranchFilter)
             .style(move |_theme, status| commit_style(tokens, status, false)),
@@ -689,6 +703,7 @@ mod tests {
             untracked_files: Vec::new(),
             tracking: None,
             head_commit_id: None,
+            kinds: Default::default(),
         });
         session.state.branches = head
             .map(|name| {

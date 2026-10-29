@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::atomic::AtomicBool;
 
-use core_domain::{DomainError, RepoStatus};
+use core_domain::{ChangeKind, DomainError, RepoStatus};
 use gix::bstr::{BStr, BString};
 use gix::status::index_worktree::iter::Summary;
 use gix::status::plumbing::index_as_worktree::traits::{FastEq, SubmoduleStatus};
@@ -22,12 +22,12 @@ fn entries_by_path(
         .collect()
 }
 
-/// Paths whose index entry differs from `HEAD` — what `git status` calls "Changes to be committed".
-/// gix 0.66 has no tree-to-index status, so the two are compared directly.
-pub(crate) fn staged_paths(
+/// Paths whose index entry differs from `HEAD` — what `git status` calls "Changes to be committed" —
+/// each with how it differs. gix 0.66 has no tree-to-index status, so the two are compared directly.
+pub(crate) fn staged_changes(
     repo: &gix::Repository,
     head_is_unborn: bool,
-) -> Result<Vec<String>, DomainError> {
+) -> Result<BTreeMap<String, ChangeKind>, DomainError> {
     let index = repo.index_or_empty().map_err(unknown)?;
     let head_entries = if head_is_unborn {
         BTreeMap::new()
@@ -38,23 +38,36 @@ pub(crate) fn staged_paths(
     };
     let index_entries = entries_by_path(&index);
 
-    let mut paths: Vec<String> = index_entries
+    Ok(index_entries
         .keys()
         .chain(head_entries.keys())
-        .filter(|path| index_entries.get(*path) != head_entries.get(*path))
-        .map(|path| path.to_string())
-        .collect();
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
+        .filter_map(|path| {
+            let kind = match (head_entries.get(path), index_entries.get(path)) {
+                (None, Some(_)) => ChangeKind::Added,
+                (Some(_), None) => ChangeKind::Deleted,
+                (head, index) if head != index => ChangeKind::Modified,
+                _ => return None,
+            };
+            Some((path.to_string(), kind))
+        })
+        .collect())
 }
 
 /// File one index ↔ worktree change under the matching `RepoStatus` list.
 pub(crate) fn record_change(status: &mut RepoStatus, summary: Summary, path: String) {
-    match summary {
-        Summary::Added => status.untracked_files.push(path),
-        _ => status.unstaged_files.push(path),
-    }
+    let kind = match summary {
+        Summary::Added => {
+            status.untracked_files.push(path);
+            return;
+        }
+        Summary::Removed => ChangeKind::Deleted,
+        Summary::Renamed | Summary::Copied => ChangeKind::Renamed,
+        Summary::IntentToAdd => ChangeKind::Added,
+        Summary::Conflict => ChangeKind::Conflicted,
+        Summary::Modified | Summary::TypeChange => ChangeKind::Modified,
+    };
+    status.kinds.unstaged.insert(path.clone(), kind);
+    status.unstaged_files.push(path);
 }
 
 /// Submodule checker that never reports a change.

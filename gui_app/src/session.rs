@@ -99,6 +99,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) branch_filter: Option<String>,
     /// Log narrowed to commits by this author (the filter bar's User ▾).
     pub(crate) author_filter: Option<String>,
+    /// The difference last jumped to in the Diff pane (‹ › arrows).
+    pub(crate) diff_change: Option<usize>,
 }
 
 impl WorktreeSession {
@@ -127,6 +129,7 @@ impl WorktreeSession {
             ref_folders_toggled: HashSet::new(),
             branch_filter: None,
             author_filter: None,
+            diff_change: None,
         }
     }
 

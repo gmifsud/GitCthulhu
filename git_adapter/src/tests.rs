@@ -447,6 +447,26 @@ fn status_reports_unstaged_and_untracked_files() {
     assert_eq!(status.staged_files, Vec::<String>::new());
     assert_eq!(status.unstaged_files, vec!["a.txt".to_string()]);
     assert_eq!(status.untracked_files, vec!["new.txt".to_string()]);
+    use core_domain::{ChangeKind, FileDisposition};
+    assert_eq!(status.kinds.of(FileDisposition::Unstaged, "a.txt"), ChangeKind::Modified);
+    assert_eq!(status.kinds.of(FileDisposition::Untracked, "new.txt"), ChangeKind::Untracked);
+}
+
+#[test]
+fn a_deleted_worktree_file_is_reported_as_deleted() {
+    let fixture = TestRepo::new();
+    let files = [("a.txt", "a\n"), ("b.txt", "b\n")];
+    fixture.commit("initial", &files, 0);
+    fixture.stage_and_write(&files);
+    std::fs::remove_file(fixture.workdir().join("b.txt")).expect("remove");
+
+    let status = fixture.adapter().status().expect("status");
+
+    assert_eq!(status.unstaged_files, vec!["b.txt".to_string()]);
+    assert_eq!(
+        status.kinds.of(core_domain::FileDisposition::Unstaged, "b.txt"),
+        core_domain::ChangeKind::Deleted
+    );
 }
 
 #[test]
@@ -461,6 +481,10 @@ fn status_reports_staged_changes_against_head() {
     assert_eq!(status.staged_files, vec!["a.txt", "b.txt", "gone.txt"]);
     assert_eq!(status.unstaged_files, Vec::<String>::new());
     assert_eq!(status.untracked_files, Vec::<String>::new());
+    use core_domain::{ChangeKind, FileDisposition::Staged};
+    assert_eq!(status.kinds.of(Staged, "a.txt"), ChangeKind::Modified);
+    assert_eq!(status.kinds.of(Staged, "b.txt"), ChangeKind::Added);
+    assert_eq!(status.kinds.of(Staged, "gone.txt"), ChangeKind::Deleted);
 }
 
 #[test]

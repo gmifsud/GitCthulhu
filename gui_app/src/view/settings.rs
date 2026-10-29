@@ -93,7 +93,7 @@ pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Elem
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
-        text("From kilo.ai → API keys. Used for ✦ commit suggestions.")
+        text("From kilo.ai → API keys. Used by Suggest commit message.")
             .font(reading.font)
             .size((reading.size - 2.0).max(11.0))
             .style(move |_| text::Style {
