@@ -447,6 +447,26 @@ fn status_reports_unstaged_and_untracked_files() {
     assert_eq!(status.staged_files, Vec::<String>::new());
     assert_eq!(status.unstaged_files, vec!["a.txt".to_string()]);
     assert_eq!(status.untracked_files, vec!["new.txt".to_string()]);
+    use core_domain::{ChangeKind, FileDisposition};
+    assert_eq!(status.kinds.of(FileDisposition::Unstaged, "a.txt"), ChangeKind::Modified);
+    assert_eq!(status.kinds.of(FileDisposition::Untracked, "new.txt"), ChangeKind::Untracked);
+}
+
+#[test]
+fn a_deleted_worktree_file_is_reported_as_deleted() {
+    let fixture = TestRepo::new();
+    let files = [("a.txt", "a\n"), ("b.txt", "b\n")];
+    fixture.commit("initial", &files, 0);
+    fixture.stage_and_write(&files);
+    std::fs::remove_file(fixture.workdir().join("b.txt")).expect("remove");
+
+    let status = fixture.adapter().status().expect("status");
+
+    assert_eq!(status.unstaged_files, vec!["b.txt".to_string()]);
+    assert_eq!(
+        status.kinds.of(core_domain::FileDisposition::Unstaged, "b.txt"),
+        core_domain::ChangeKind::Deleted
+    );
 }
 
 #[test]
@@ -461,6 +481,10 @@ fn status_reports_staged_changes_against_head() {
     assert_eq!(status.staged_files, vec!["a.txt", "b.txt", "gone.txt"]);
     assert_eq!(status.unstaged_files, Vec::<String>::new());
     assert_eq!(status.untracked_files, Vec::<String>::new());
+    use core_domain::{ChangeKind, FileDisposition::Staged};
+    assert_eq!(status.kinds.of(Staged, "a.txt"), ChangeKind::Modified);
+    assert_eq!(status.kinds.of(Staged, "b.txt"), ChangeKind::Added);
+    assert_eq!(status.kinds.of(Staged, "gone.txt"), ChangeKind::Deleted);
 }
 
 #[test]
@@ -1103,7 +1127,7 @@ fn a_stash_lists_its_commit_and_its_patch_is_the_stashed_change() {
     fixture.stage_and_write(&[("a.txt", "one\n")]);
     fixture.write_file("a.txt", "one\ntwo\n");
     let adapter = fixture.adapter();
-    adapter.stash_push("wip: colon: in subject").expect("stash");
+    adapter.stash_push("wip: colon: in subject", false).expect("stash");
 
     let stash = adapter.stashes().expect("list").remove(0);
     assert_eq!(stash.message, format!("On {}: wip: colon: in subject", fixture.head_branch()));
@@ -1148,7 +1172,7 @@ fn stash_push_apply_pop_and_drop_round_trip() {
     fixture.write_file("extra.txt", "new\n");
     let adapter = fixture.adapter();
 
-    adapter.stash_push("wip").expect("stash");
+    adapter.stash_push("wip", false).expect("stash");
     let stashes = adapter.stashes().expect("list");
     assert_eq!(stashes.len(), 1);
     assert_eq!(stashes[0].index, 0);
@@ -1171,14 +1195,14 @@ fn stash_push_apply_pop_and_drop_round_trip() {
     assert_eq!(popped.replace("\r\n", "\n"), "one\ntwo\n");
 
     adapter
-        .stash_push("")
+        .stash_push("", false)
         .expect("stash with git's own subject");
     assert_eq!(adapter.stashes().expect("list before drop").len(), 1);
     adapter.stash_drop(0).expect("drop");
     assert!(adapter.stashes().expect("list after drop").is_empty());
     let dropped = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
     assert_eq!(dropped.replace("\r\n", "\n"), "one\n");
-    assert!(adapter.stash_push("\0").is_err());
+    assert!(adapter.stash_push("\0", false).is_err());
 }
 
 #[test]
@@ -1331,12 +1355,12 @@ fn cherry_pick_reset_merge_and_rebase_use_the_selected_commit_or_branch() {
     adapter
         .reset(&main_id, ResetMode::Hard)
         .expect("back to main");
-    adapter.merge_branch("feature").expect("explicit merge");
+    adapter.merge_branch("feature", true).expect("explicit merge");
     let tip = adapter.log(Some(1)).expect("log after merge");
     assert_eq!(tip[0].parent_ids.len(), 2);
     assert_eq!(fixture.read_file("b.txt").as_deref(), Some("b\n"));
     assert_eq!(fixture.current_branch(), branch);
-    assert!(adapter.merge_branch("-feature").is_err());
+    assert!(adapter.merge_branch("-feature", false).is_err());
 
     adapter
         .reset(&main_id, ResetMode::Hard)
@@ -1543,3 +1567,75 @@ fn remove_worktree_refuses_main_and_bad_paths() {
     assert!(adapter.remove_worktree("", false).is_err());
     assert!(adapter.remove_worktree("-f", false).is_err());
 }
+
+/// `main` and `feature` both change `a.txt` from the same base, so merging conflicts.
+fn conflicting_branches() -> TestRepo {
+    let fixture = TestRepo::new();
+    fixture.commit("base", &[("a.txt", "base\n"), ("b.txt", "b\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "base\n"), ("b.txt", "b\n")]);
+    let main = fixture.current_branch();
+    git_in(fixture.workdir(), &["checkout", "-q", "-b", "feature"]);
+    fixture.write_file("a.txt", "theirs\n");
+    git_in(fixture.workdir(), &["commit", "-qam", "feature edit"]);
+    git_in(fixture.workdir(), &["checkout", "-q", &main]);
+    fixture.write_file("a.txt", "yours\n");
+    git_in(fixture.workdir(), &["commit", "-qam", "main edit"]);
+    fixture
+}
+
+#[test]
+fn a_conflicting_merge_stays_in_progress_with_the_path_listed_once() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+
+    assert!(adapter.merge_branch("feature", false).is_err(), "git reports the conflict");
+    let status = adapter.status().expect("status");
+
+    assert_eq!(status.operation, Some(core_domain::RepoOperation::Merge));
+    assert_eq!(status.conflicted_files, vec!["a.txt".to_string()]);
+    assert!(!status.staged_files.contains(&"a.txt".to_string()), "not a staged deletion: {:?}", status.staged_files);
+    assert!(!status.unstaged_files.contains(&"a.txt".to_string()));
+}
+
+#[test]
+fn taking_their_side_then_continuing_commits_the_merge() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let _ = adapter.merge_branch("feature", false);
+
+    adapter.resolve_conflict("a.txt", core_domain::ConflictSide::Theirs).expect("theirs");
+    assert_eq!(fixture.read_file("a.txt").as_deref(), Some("theirs\n"));
+    assert!(adapter.status().expect("status").conflicted_files.is_empty());
+
+    adapter.continue_operation(core_domain::RepoOperation::Merge).expect("commit merge");
+    let status = adapter.status().expect("status after");
+    assert_eq!(status.operation, None);
+    assert_eq!(adapter.log(Some(1)).expect("log")[0].parent_ids.len(), 2);
+}
+
+#[test]
+fn aborting_a_merge_restores_your_side() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let _ = adapter.merge_branch("feature", false);
+
+    adapter.abort_operation(core_domain::RepoOperation::Merge).expect("abort");
+    let status = adapter.status().expect("status");
+    assert_eq!(status.operation, None);
+    assert!(status.conflicted_files.is_empty());
+    assert_eq!(fixture.read_file("a.txt").as_deref(), Some("yours\n"));
+}
+
+#[test]
+fn a_stash_can_take_untracked_files() {
+    let fixture = TestRepo::new();
+    fixture.commit("base", &[("a.txt", "a\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "a\n")]);
+    fixture.write_file("new.txt", "new\n");
+    let adapter = fixture.adapter();
+
+    adapter.stash_push("with new", true).expect("stash -u");
+    assert!(adapter.status().expect("status").untracked_files.is_empty());
+    assert_eq!(adapter.stashes().expect("stashes").len(), 1);
+}
+

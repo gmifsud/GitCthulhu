@@ -4,10 +4,11 @@
 use crate::app::{GitApp, Message, HISTORY_SEARCH_ID};
 use crate::log_filter::{author_choices, branch_choice, branch_choices, LogChoice};
 use crate::theme::DesignTokens;
-use iced::widget::{container, horizontal_space, pick_list, row, text, text_input};
+use iced::widget::{container, pick_list, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{embedded_field_style, glyph, hairline, icon_button, Reading, SEARCH_MARK};
+use super::chrome::{embedded_field_style, glyph, hairline, icon_button, one_line, Reading};
+use crate::icons::Icon;
 
 const SEARCH_PLACEHOLDER: &str = "Text or hash";
 const SEARCH_SHORTCUT: &str = "Ctrl K";
@@ -16,9 +17,10 @@ const SEARCH_MAX_WIDTH: f32 = 320.0;
 const FIELD_RADIUS: f32 = 4.0;
 const BAR_SPACING: f32 = 6.0;
 const BAR_PADDING: [f32; 2] = [4.0, 8.0];
-const PICK_MAX_WIDTH: f32 = 220.0;
+/// Pickers have a fixed width: sized to their longest option they pushed the search box to
+/// nothing on a narrow window. Long names clip inside.
+const PICK_WIDTH: f32 = 130.0;
 const FOCUS_TIP_KEY: &str = "graph-focus";
-const FOCUS_MARK: &str = "◎";
 
 pub(super) fn filter_bar<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let session = app.session();
@@ -32,9 +34,9 @@ pub(super) fn filter_bar<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Rea
         search_field(&app.history_query, tokens, reading),
         picker("Branch", branch_choices(&session.state.branches), branch, Message::BranchChoicePicked, tokens, reading),
         picker("User", author_choices(&session.state.commits), author, Message::AuthorChoicePicked, tokens, reading),
-        horizontal_space(),
+        // No spacer: it took half the free width from the search box on a narrow window.
         icon_button(
-            FOCUS_MARK,
+            Icon::Target,
             if focus { "Show all branches" } else { "Show only the current branch" },
             FOCUS_TIP_KEY,
             app.tip_ready(FOCUS_TIP_KEY),
@@ -61,14 +63,19 @@ fn picker<'a>(
 ) -> Element<'a, Message> {
     let active = selected != LogChoice::All;
     row![
-        text(format!("{label}:"))
-            .font(reading.font)
-            .size(reading.size)
-            .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+        one_line(
+            text(format!("{label}:"))
+                .font(reading.font)
+                .size(reading.size)
+                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+            reading.size,
+            Length::Shrink,
+        ),
         container(
             pick_list(options, Some(selected), on_pick)
                 .font(reading.font)
                 .text_size(reading.size)
+                .width(Length::Fixed(PICK_WIDTH))
                 .padding([2, 6])
                 .style(move |_theme: &Theme, _status| pick_list::Style {
                     text_color: if active { tokens.accent_primary } else { tokens.text_primary },
@@ -78,7 +85,7 @@ fn picker<'a>(
                     border: Border { color: tokens.chip_border, width: 1.0, radius: FIELD_RADIUS.into() },
                 }),
         )
-        .max_width(PICK_MAX_WIDTH),
+        .clip(true),
     ]
     .spacing(4)
     .align_y(Alignment::Center)
@@ -93,7 +100,7 @@ fn search_field<'a>(
     container(
         row![
             glyph(
-                SEARCH_MARK,
+                Icon::Search,
                 reading.size,
                 tokens.text_secondary,
                 &reading,
@@ -106,14 +113,16 @@ fn search_field<'a>(
                 .padding(0)
                 .width(Length::Fill)
                 .style(embedded_field_style(tokens)),
-            container(
+            container(one_line(
                 text(SEARCH_SHORTCUT)
                     .font(reading.mono)
                     .size((reading.size - 2.0).max(10.0))
                     .style(move |_| text::Style {
                         color: Some(tokens.text_muted),
                     }),
-            )
+                (reading.size - 2.0).max(10.0),
+                Length::Shrink,
+            ))
             .padding([1, 5])
             .style(move |_theme: &Theme| container::Style {
                 background: Some(Background::Color(Color::TRANSPARENT)),

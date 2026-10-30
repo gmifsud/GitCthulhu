@@ -16,16 +16,13 @@ use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Shadow};
 
-use super::chrome::{
-    field_style, glyph, icon_button, one_line, symbol_reading, Reading, BRANCH_MARK, FOLD_CLOSED,
-    FOLD_OPEN, REMOTE_MARK, STASH_MARK, TAG_MARK, WORKTREE_MARK,
-};
+use super::chrome::{field_style, glyph, icon_button, one_line, Reading};
+use crate::icons::Icon;
 
 /// Text-input id of the branch-tree filter.
 pub(crate) const REF_FILTER_ID: &str = "ref-filter";
 const INDENT: f32 = 14.0;
 const ROW_PAD_X: f32 = 6.0;
-const OPEN_MARK: &str = "●";
 const DETACHED: &str = "(detached)";
 const FILTER_PLACEHOLDER: &str = "Branch or tag";
 
@@ -46,7 +43,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     tree = tree.push(tree_row(
         0,
         None,
-        Some(glyph(BRANCH_MARK, reading.size, tokens.accent_primary, &reading)),
+        Some(glyph(Icon::Branch, reading.size, tokens.accent_primary, &reading)),
         row![
             label_text("HEAD", tokens.text_primary, reading),
             label_text(&format!("({head_label})"), tokens.text_muted, reading),
@@ -86,7 +83,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     // Worktrees
     let worktrees = &app.worktree_catalogue;
     let new_worktree = icon_button(
-        "+",
+        Icon::Add,
         "New worktree…",
         "worktree-new",
         app.tip_ready("worktree-new"),
@@ -115,7 +112,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
             tree = tree.push(tree_row(
                 1,
                 None,
-                Some(glyph(STASH_MARK, reading.size, tokens.text_muted, &reading)),
+                Some(glyph(Icon::Stash, reading.size, tokens.text_muted, &reading)),
                 row![
                     label_text(&stash.message, tokens.text_secondary, reading),
                     label_text(&format!("stash@{{{}}}", stash.index), tokens.text_muted, reading),
@@ -148,7 +145,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
             tree = tree.push(tree_row(
                 1,
                 None,
-                Some(glyph(TAG_MARK, reading.size, tokens.added, &reading)),
+                Some(glyph(Icon::Tag, reading.size, tokens.added, &reading)),
                 label_text(&tag.name, tokens.text_secondary, reading),
                 is_selected,
                 Message::Select(Selection::Tag {
@@ -204,10 +201,9 @@ fn group_header<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let sym = symbol_reading(&reading);
     let toggle = button(
         row![
-            text(if collapsed { FOLD_CLOSED } else { FOLD_OPEN }).font(sym.font).size(reading.size),
+            glyph(Icon::fold(!collapsed), reading.size, tokens.text_muted, &reading),
             label_text(title, tokens.text_primary, reading),
             label_text(&count.to_string(), tokens.text_muted, reading),
         ]
@@ -237,11 +233,10 @@ fn branch_tree_row<'a>(
     let session = app.session();
     match data {
         RefRow::Folder { key, label, depth, open, leaves } => {
-            let sym = symbol_reading(&reading);
             tree_row(
                 depth + 1,
-                Some(text(if *open { FOLD_OPEN } else { FOLD_CLOSED }).font(sym.font).size(reading.size).into()),
-                Some(glyph("▭", reading.size, tokens.text_muted, &reading)),
+                Some(glyph(Icon::fold(*open), reading.size, tokens.text_muted, &reading)),
+                Some(glyph(if *open { Icon::FolderOpened } else { Icon::Folder }, reading.size, tokens.text_muted, &reading)),
                 row![
                     label_text(label, tokens.text_secondary, reading),
                     label_text(&leaves.to_string(), tokens.text_muted, reading),
@@ -272,7 +267,7 @@ fn branch_tree_row<'a>(
                 _ => false,
             } || session.branch_filter.as_deref() == Some(name.as_str());
             let ink = if current { tokens.accent_primary } else { tokens.text_secondary };
-            let mark = if remote { REMOTE_MARK } else if in_worktree { WORKTREE_MARK } else { BRANCH_MARK };
+            let mark = if remote { Icon::Cloud } else if in_worktree { Icon::Worktree } else { Icon::Branch };
             let mut content = row![label_text(label, ink, reading)].spacing(6).align_y(Alignment::Center);
             if let Some(branch) = branch {
                 content = content.push(tracking_badges(branch.ahead, branch.behind, tokens, reading));
@@ -386,7 +381,7 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
         1,
         None,
         Some(glyph(
-            if open { WORKTREE_MARK } else { OPEN_MARK },
+            Icon::Worktree,
             (reading.size - 2.0).max(9.0),
             if open { tokens.accent_primary } else { tokens.text_muted },
             &reading,
@@ -405,14 +400,17 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
 
 fn wt_tag<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     use iced::widget::Theme;
-    container(
+    let size = (reading.size - 3.0).max(10.0);
+    container(one_line(
         text(label)
             .font(reading.font)
-            .size((reading.size - 3.0).max(10.0))
+            .size(size)
             .style(move |_| iced::widget::text::Style {
                 color: Some(tokens.text_muted),
             }),
-    )
+        size,
+        Length::Shrink,
+    ))
     .padding([0, 4])
     .style(move |_theme: &Theme| container::Style {
         background: Some(Background::Color(Color::TRANSPARENT)),

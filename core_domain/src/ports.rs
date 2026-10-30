@@ -1,6 +1,6 @@
 use super::{
-    AppSettings, Branch, Commit, DagNode, DomainError, FileDisposition, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag, Worktree,
+    AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, Patch,
+    RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
 /// The GitRepository port.
@@ -39,8 +39,10 @@ pub trait GitRepository {
     fn cherry_pick(&self, commit_id: &str) -> Result<(), DomainError>;
     /// `git reset --soft`, `--mixed`, or `--hard` to a hex object id.
     fn reset(&self, commit_id: &str, mode: ResetMode) -> Result<(), DomainError>;
-    /// `git merge --no-ff -- <name>`. Records a merge commit even when a fast-forward is possible.
-    fn merge_branch(&self, name: &str) -> Result<(), DomainError>;
+    /// `git merge [--no-ff] -- <name>`. With `no_ff` a merge commit is recorded even when a
+    /// fast-forward is possible. A conflict leaves the merge in progress
+    /// ([`RepoStatus::operation`]) and returns git's message.
+    fn merge_branch(&self, name: &str, no_ff: bool) -> Result<(), DomainError>;
     /// `git rebase <name>`. Replays the current branch onto that tip.
     fn rebase_onto(&self, name: &str) -> Result<(), DomainError>;
     fn stage_paths(&self, paths: &[String]) -> Result<(), DomainError>;
@@ -67,8 +69,8 @@ pub trait GitRepository {
         hunk: &Hunk,
         place: FileDisposition,
     ) -> Result<(), DomainError>;
-    /// `git stash push`. A blank message keeps git's own subject. Untracked files stay put.
-    fn stash_push(&self, message: &str) -> Result<(), DomainError>;
+    /// `git stash push [--include-untracked]`. A blank message keeps git's own subject.
+    fn stash_push(&self, message: &str, include_untracked: bool) -> Result<(), DomainError>;
     /// `git stash push [-- <paths>…]`. Empty `paths` matches [`Self::stash_push`].
     fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), DomainError>;
     /// Append `patterns` to `.gitignore` (creating the file when missing). Patterns are relative.
@@ -79,6 +81,13 @@ pub trait GitRepository {
     fn stash_pop(&self, index: usize) -> Result<(), DomainError>;
     /// `git stash drop stash@{index}`. The saved change is discarded.
     fn stash_drop(&self, index: usize) -> Result<(), DomainError>;
+    /// `git merge --abort`, `git rebase --abort`… Restores the state before the operation.
+    fn abort_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
+    /// Finish the operation once every conflict is resolved and staged: the merge commit, or
+    /// `--continue` for a rebase, cherry-pick or revert. Git's prepared message is kept.
+    fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
+    /// Keep one side of a conflicted file (`git checkout --ours|--theirs`) and stage it.
+    fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError>;
 }
 
 pub trait CredentialStore {

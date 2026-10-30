@@ -5,6 +5,7 @@
 
 use crate::app::{GitApp, Message};
 use crate::session::{basename, same_path, WorktreeSession};
+use crate::icons::Icon;
 use crate::theme::DesignTokens;
 use core_domain::Worktree;
 use iced::widget::button::Status;
@@ -14,8 +15,6 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme}
 
 use super::chrome::{glyph, hairline, Reading};
 
-const CLOSE_MARK: &str = "×";
-const ADD_MARK: &str = "+";
 const PICKER_MAX_HEIGHT: f32 = 200.0;
 const DETACHED: &str = "(detached)";
 
@@ -90,7 +89,7 @@ fn tab<'a>(
     .spacing(1);
 
     let close = button(glyph(
-        CLOSE_MARK,
+        Icon::Close,
         reading.size,
         if can_close {
             tokens.text_secondary
@@ -201,7 +200,7 @@ fn tooltip_text(app: &GitApp, session: &WorktreeSession) -> String {
 
 fn add_button<'a>(open: bool, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     button(glyph(
-        ADD_MARK,
+        Icon::Add,
         reading.size + 2.0,
         if open {
             tokens.accent_primary

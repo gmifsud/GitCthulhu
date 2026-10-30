@@ -440,9 +440,10 @@ pub(crate) fn load_patch_in_background(
 /// Push, apply, pop, or drop. The index is the `stash@{n}` slot from the last list.
 #[derive(Debug, Clone)]
 pub(crate) enum StashAction {
-    Push,
-    /// `git stash push -- <paths>…`
-    PushPaths(Vec<String>),
+    /// `git stash push [-u] [-m <message>]`.
+    Push { message: String, include_untracked: bool },
+    /// `git stash push [-m <message>] -- <paths>…`
+    PushPaths { message: String, paths: Vec<String> },
     Apply(usize),
     Pop(usize),
     Drop(usize),
@@ -461,8 +462,14 @@ pub(crate) enum BranchAction {
 pub(crate) enum HistoryAction {
     CherryPick { id: String },
     Reset { id: String, mode: ResetMode },
-    Merge { name: String },
+    Merge { name: String, no_ff: bool },
     Rebase { name: String },
+    /// Stop the merge, rebase… in progress and restore the state before it.
+    Abort(core_domain::RepoOperation),
+    /// Finish it once conflicts are resolved.
+    Continue(core_domain::RepoOperation),
+    /// Keep one side of a conflicted file and stage it.
+    Resolve { path: String, side: core_domain::ConflictSide },
 }
 
 pub(crate) fn history_in_background(
@@ -473,7 +480,10 @@ pub(crate) fn history_in_background(
         move || match action {
             HistoryAction::CherryPick { id } => repo.cherry_pick(&id),
             HistoryAction::Reset { id, mode } => repo.reset(&id, mode),
-            HistoryAction::Merge { name } => repo.merge_branch(&name),
+            HistoryAction::Merge { name, no_ff } => repo.merge_branch(&name, no_ff),
+            HistoryAction::Abort(operation) => repo.abort_operation(operation),
+            HistoryAction::Continue(operation) => repo.continue_operation(operation),
+            HistoryAction::Resolve { path, side } => repo.resolve_conflict(&path, side),
             HistoryAction::Rebase { name } => repo.rebase_onto(&name),
         },
         || {
@@ -508,8 +518,8 @@ pub(crate) fn stash_in_background(
 ) -> impl Future<Output = Result<(), DomainError>> {
     in_background(
         move || match action {
-            StashAction::Push => repo.stash_push(""),
-            StashAction::PushPaths(paths) => repo.stash_push_paths("", &paths),
+            StashAction::Push { message, include_untracked } => repo.stash_push(&message, include_untracked),
+            StashAction::PushPaths { message, paths } => repo.stash_push_paths(&message, &paths),
             StashAction::Apply(index) => repo.stash_apply(index),
             StashAction::Pop(index) => repo.stash_pop(index),
             StashAction::Drop(index) => repo.stash_drop(index),
@@ -518,15 +528,15 @@ pub(crate) fn stash_in_background(
     )
 }
 
+/// Discard each file from the place it sits in (a selection can span Staged and Changes).
 pub(crate) fn discard_paths_in_background(
     repo: SharedRepository,
-    paths: Vec<String>,
-    place: FileDisposition,
+    files: Vec<crate::changes::MarkedFile>,
 ) -> impl Future<Output = Result<(), DomainError>> {
     in_background(
         move || {
-            for path in &paths {
-                repo.discard_path(path, place)?;
+            for file in &files {
+                repo.discard_path(&file.path, file.place)?;
             }
             Ok(())
         },
@@ -684,7 +694,7 @@ mod tests {
         ) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
-        fn merge_branch(&self, _name: &str) -> Result<(), DomainError> {
+        fn merge_branch(&self, _name: &str, _no_ff: bool) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
         fn rebase_onto(&self, _name: &str) -> Result<(), DomainError> {
@@ -736,7 +746,16 @@ mod tests {
         ) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
-        fn stash_push(&self, _message: &str) -> Result<(), DomainError> {
+        fn stash_push(&self, _message: &str, _include_untracked: bool) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn abort_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn continue_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn resolve_conflict(&self, _path: &str, _side: core_domain::ConflictSide) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
         fn stash_push_paths(&self, _message: &str, _paths: &[String]) -> Result<(), DomainError> {

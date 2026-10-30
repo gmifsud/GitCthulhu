@@ -14,13 +14,13 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag, Worktree,
+    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, Patch,
+    RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
 use gix::refs::TargetRef;
-use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
+use status::{record_change, staged_changes, tracking_status, unborn_worktree_changes};
 use worktree::{parse_worktree_porcelain, require_worktree_path};
 
 pub(crate) fn unknown(error: impl Display) -> DomainError {
@@ -145,12 +145,19 @@ impl GitRepository for GitoxideAdapter {
                 .ok()
                 .and_then(|head| head.id().map(|id| id.to_string()))
         };
+        let (staged, conflicted_files) = staged_changes(&repo, head_is_unborn)?;
         let mut status = RepoStatus {
-            staged_files: staged_paths(&repo, head_is_unborn)?,
+            operation: operation_of(repo.state()),
+            conflicted_files,
+            staged_files: staged.keys().cloned().collect(),
             unstaged_files: vec![],
             untracked_files: vec![],
             tracking: tracking_status(&self.repo_path)?,
             head_commit_id,
+            kinds: core_domain::ChangeKinds {
+                staged,
+                ..Default::default()
+            },
         };
 
         // Index ↔ worktree: modified/removed tracked files and untracked files, one path each.
@@ -408,10 +415,16 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["reset", flag, commit_id])
     }
 
-    fn merge_branch(&self, name: &str) -> Result<(), DomainError> {
+    fn merge_branch(&self, name: &str, no_ff: bool) -> Result<(), DomainError> {
         self.open_repo()?;
         require_branch_name(name)?;
-        run_git(&self.repo_path, &["merge", "--no-ff", "--", name])
+        let mut args = vec!["merge"];
+        if no_ff {
+            args.push("--no-ff");
+        }
+        // No editor: git's prepared "Merge branch …" message is kept.
+        args.extend(["--no-edit", "--", name]);
+        run_git(&self.repo_path, &args)
     }
 
     fn rebase_onto(&self, name: &str) -> Result<(), DomainError> {
@@ -572,28 +585,41 @@ impl GitRepository for GitoxideAdapter {
         stash::parse_stash_list(&text)
     }
 
-    fn stash_push(&self, message: &str) -> Result<(), DomainError> {
-        self.stash_push_paths(message, &[])
+    fn stash_push(&self, message: &str, include_untracked: bool) -> Result<(), DomainError> {
+        self.stash(message, &[], include_untracked)
     }
 
     fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), DomainError> {
+        self.stash(message, paths, false)
+    }
+
+    fn abort_operation(&self, operation: RepoOperation) -> Result<(), DomainError> {
         self.open_repo()?;
-        if message.contains('\0') {
-            return Err(DomainError::Unknown(
-                "stash message contains a null byte".to_string(),
-            ));
+        run_git(&self.repo_path, &[operation_command(operation), "--abort"])
+    }
+
+    fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError> {
+        self.open_repo()?;
+        // `true` as the editor keeps git's prepared message without opening anything.
+        let quiet = ["-c", "core.editor=true", "-c", "sequence.editor=true"];
+        match operation {
+            RepoOperation::Merge => run_git(&self.repo_path, &[quiet[0], quiet[1], "commit", "--no-edit"]),
+            other => run_git(
+                &self.repo_path,
+                &[quiet[0], quiet[1], quiet[2], quiet[3], operation_command(other), "--continue"],
+            ),
         }
-        let message = message.trim();
-        let mut args: Vec<&str> = vec!["stash", "push"];
-        if !message.is_empty() {
-            args.push("-m");
-            args.push(message);
-        }
-        if paths.is_empty() {
-            run_git(&self.repo_path, &args)
-        } else {
-            run_git_paths(&self.repo_path, &args, paths)
-        }
+    }
+
+    fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError> {
+        self.open_repo()?;
+        let flag = match side {
+            ConflictSide::Yours => "--ours",
+            ConflictSide::Theirs => "--theirs",
+        };
+        let paths = [path.to_string()];
+        run_git_paths(&self.repo_path, &["checkout", flag], &paths)?;
+        run_git_paths(&self.repo_path, &["add"], &paths)
     }
 
     fn append_gitignore(&self, patterns: &[String]) -> Result<(), DomainError> {
@@ -756,5 +782,55 @@ fn tracked_at_head(repo_path: &str, path: &str) -> Result<bool, DomainError> {
             Ok(false)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// The git subcommand that owns `operation`'s `--abort` and `--continue`.
+fn operation_command(operation: RepoOperation) -> &'static str {
+    match operation {
+        RepoOperation::Merge => "merge",
+        RepoOperation::Rebase => "rebase",
+        RepoOperation::CherryPick => "cherry-pick",
+        RepoOperation::Revert => "revert",
+    }
+}
+
+/// The operation `state` records as in progress, in the port's terms.
+fn operation_of(state: Option<gix::state::InProgress>) -> Option<RepoOperation> {
+    use gix::state::InProgress;
+    match state? {
+        InProgress::Merge => Some(RepoOperation::Merge),
+        InProgress::Rebase | InProgress::RebaseInteractive | InProgress::ApplyMailboxRebase => {
+            Some(RepoOperation::Rebase)
+        }
+        InProgress::CherryPick | InProgress::CherryPickSequence => Some(RepoOperation::CherryPick),
+        InProgress::Revert | InProgress::RevertSequence => Some(RepoOperation::Revert),
+        InProgress::ApplyMailbox | InProgress::Bisect => None,
+    }
+}
+
+impl GitoxideAdapter {
+    /// `git stash push [-u] [-m <message>] [-- <paths>…]`.
+    fn stash(&self, message: &str, paths: &[String], include_untracked: bool) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if message.contains('\0') {
+            return Err(DomainError::Unknown(
+                "stash message contains a null byte".to_string(),
+            ));
+        }
+        let message = message.trim();
+        let mut args: Vec<&str> = vec!["stash", "push"];
+        if include_untracked {
+            args.push("--include-untracked");
+        }
+        if !message.is_empty() {
+            args.push("-m");
+            args.push(message);
+        }
+        if paths.is_empty() {
+            run_git(&self.repo_path, &args)
+        } else {
+            run_git_paths(&self.repo_path, &args, paths)
+        }
     }
 }

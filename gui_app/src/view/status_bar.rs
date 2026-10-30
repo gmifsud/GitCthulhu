@@ -6,7 +6,8 @@ use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, horizontal_space, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{fold_mark, glyph, Reading};
+use super::chrome::{glyph, Reading};
+use crate::icons::Icon;
 
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const STATUS_BAR_EXPANDED: f32 = 72.0;
@@ -128,7 +129,7 @@ fn error_cluster<'a>(
         }),
         row![
             glyph(
-                fold_mark(!expanded),
+                Icon::fold(expanded),
                 quiet,
                 tokens.text_muted,
                 &reading,
@@ -143,7 +144,7 @@ fn error_cluster<'a>(
         .spacing(4)
         .align_y(Alignment::Center),
         button(
-            glyph("×", quiet, tokens.text_muted, &reading),
+            glyph(Icon::Close, quiet, tokens.text_muted, &reading),
         )
         .padding([0, 4])
         .on_press(Message::ClearError)
@@ -260,6 +261,9 @@ mod tests {
                 untracked_files: vec![],
                 tracking: None,
                 head_commit_id: None,
+                kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
             })),
             "No upstream"
         );
@@ -274,6 +278,9 @@ mod tests {
                     behind: 0,
                 }),
                 head_commit_id: None,
+                kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
             })),
             "origin/dev ↑1"
         );

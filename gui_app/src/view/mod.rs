@@ -1,4 +1,5 @@
 mod branch;
+mod branch_popup;
 mod changes;
 mod chrome;
 mod files_nav;
@@ -8,6 +9,7 @@ mod context_overlay;
 mod explorer;
 mod filter_bar;
 mod history;
+mod operation;
 mod palette;
 mod patch;
 mod refs;
@@ -22,12 +24,13 @@ mod worktrees;
 
 use crate::app::{GitApp, Message};
 use crate::selection::visible_selection;
-use iced::widget::{column, container, stack};
+use iced::widget::{column, container, opaque, stack, Space};
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use branch::branch_prompt;
-use chrome::{compact, hairline, reading};
-use confirm::{confirm_detach, confirm_discard, confirm_drop_stash, history_prompt};
+use chrome::{compact, hairline, reading, Reading};
+use crate::theme::DesignTokens;
+use confirm::{confirm_detach, confirm_discard, confirm_drop_stash, history_prompt, stash_dialog};
 use context_overlay::context_menu_overlay;
 use palette::palette_overlay;
 use settings::settings_dialog;
@@ -47,6 +50,52 @@ impl GitApp {
         if self.sessions.is_empty() {
             return welcome(self, tokens, reading);
         }
+        let session = self.session();
+        let selection = visible_selection(
+            session.selection.as_ref(),
+            &session.state.branches,
+            &session.state.commits,
+            &session.state.stashes,
+            &session.state.tags,
+            session.state.current_status.as_ref(),
+        );
+        let main = container(column![
+            top_bar(self, tokens, reading),
+            hairline(tokens),
+            tab_strip(self, tokens, reading),
+            operation::operation_banner(self, tokens, reading),
+            workspace(self, &selection, tokens, reading),
+            terminal_pane(self, tokens, reading),
+            status_bar(self, tokens, reading),
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.bg_app)),
+            text_color: Some(tokens.text_secondary),
+            border: Border::default(),
+            shadow: Shadow::default(),
+        });
+        // The root is always `stack![main, layer]`. iced keeps widget state (scroll offsets,
+        // text cursors) by position in the tree, so swapping the root for a dialog or wrapping
+        // it in a stack only while a menu is open reset every scrollable to the top.
+        let layer: Element<'_, Message> = if let Some(dialog) = self.dialog(tokens, reading) {
+            // `opaque` keeps clicks and hovers from reaching the screen underneath.
+            opaque(dialog)
+        } else if let Some(overlay) = palette_overlay(self, tokens, reading) {
+            overlay
+        } else if let Some(overlay) = branch_popup::branch_popup(self, tokens, reading) {
+            overlay
+        } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
+            overlay
+        } else {
+            Space::new(Length::Shrink, Length::Shrink).into()
+        };
+        stack![main, layer].into()
+    }
+
+    /// The modal dialog that is waiting for the user, if any.
+    fn dialog(&self, tokens: DesignTokens, reading: Reading) -> Option<Element<'_, Message>> {
         // Only show the detach dialog while we are waiting for the user (dirty worktree).
         // Clean detach sets confirm_detach then immediately runs the job and clears it.
         if let Some(commit_id) = &self.confirm_detach {
@@ -61,65 +110,44 @@ impl GitApp {
                         || !status.untracked_files.is_empty()
                 })
             {
-                return confirm_detach(commit_id, tokens, reading);
+                return Some(confirm_detach(commit_id, tokens, reading));
             }
         }
-        if let Some((paths, _)) = &self.confirm_discard {
-            return confirm_discard(paths, tokens, reading);
+        if let Some(files) = &self.confirm_discard {
+            let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+            return Some(confirm_discard(&paths, tokens, reading));
         }
         if let Some(stash) = &self.confirm_drop {
-            return confirm_drop_stash(&stash.message, tokens, reading);
+            return Some(confirm_drop_stash(&stash.message, tokens, reading));
         }
         if let Some(prompt) = &self.branch_prompt {
-            return branch_prompt(prompt, tokens, reading);
+            return Some(branch_prompt(prompt, tokens, reading));
         }
         if let Some(prompt) = &self.history_prompt {
-            return history_prompt(prompt, tokens, reading);
+            let branches = &self.session().state.branches;
+            let current = refs::current_branch_name(branches);
+            let mergeable: Vec<String> = branches
+                .iter()
+                .filter(|branch| !(branch.is_head && !branch.is_remote))
+                .map(|branch| branch.name.clone())
+                .collect();
+            return Some(history_prompt(prompt, &mergeable, &current, tokens, reading));
+        }
+        if let Some(prompt) = &self.stash_prompt {
+            return Some(stash_dialog(prompt, tokens, reading));
         }
         if let Some(prompt) = &self.worktree_prompt {
-            return worktree_prompt(
+            return Some(worktree_prompt(
                 prompt,
                 self.error.as_deref(),
                 self.worktree_busy,
                 tokens,
                 reading,
-            );
+            ));
         }
         if self.settings_open {
-            return settings_dialog(self, tokens);
+            return Some(settings_dialog(self, tokens));
         }
-
-        let session = self.session();
-        let selection = visible_selection(
-            session.selection.as_ref(),
-            &session.state.branches,
-            &session.state.commits,
-            &session.state.stashes,
-            &session.state.tags,
-            session.state.current_status.as_ref(),
-        );
-        let main = container(column![
-            top_bar(self, tokens, reading),
-            hairline(tokens),
-            tab_strip(self, tokens, reading),
-            workspace(self, &selection, tokens, reading),
-            terminal_pane(self, tokens, reading),
-            status_bar(self, tokens, reading),
-        ])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(tokens.bg_app)),
-            text_color: Some(tokens.text_secondary),
-            border: Border::default(),
-            shadow: Shadow::default(),
-        });
-        if let Some(overlay) = palette_overlay(self, tokens, reading) {
-            stack![main, overlay].into()
-        } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
-            stack![main, overlay].into()
-        } else {
-            main.into()
-        }
+        None
     }
 }

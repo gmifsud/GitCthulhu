@@ -23,6 +23,10 @@ pub(crate) enum ContextTarget {
         place: FileDisposition,
         is_dir: bool,
     },
+    /// Several selected files in the working tree. The menu acts on all of them.
+    Changes { files: Vec<crate::changes::MarkedFile> },
+    /// A file with unresolved conflicts.
+    Conflict { path: String },
 }
 
 /// One row in the context menu.
@@ -41,6 +45,13 @@ pub(crate) enum ContextActionKind {
         start_point: Option<String>,
     },
     DetachHead { commit_id: String },
+    StageFiles(Vec<String>),
+    UnstageFiles(Vec<String>),
+    DiscardFiles(Vec<crate::changes::MarkedFile>),
+    StashFiles(Vec<String>),
+    IgnoreFiles(Vec<String>),
+    ResolveConflict { path: String, side: core_domain::ConflictSide },
+    MarkResolved(String),
     /// Stage (or unstage when `unstage`) this path — a file or directory prefix.
     StageChange {
         path: String,
@@ -277,7 +288,54 @@ pub(crate) fn context_actions(
             place,
             is_dir,
         } => change_path_actions(path, *place, *is_dir, loading),
+        ContextTarget::Changes { files } => selection_actions(files, loading),
+        ContextTarget::Conflict { path } => conflict_actions(path, loading),
     }
+}
+
+fn files_label(verb: &str, count: usize) -> String {
+    if count == 1 {
+        format!("{verb} 1 file")
+    } else {
+        format!("{verb} {count} files")
+    }
+}
+
+/// Stage, unstage, discard, stash and ignore for a multi-file selection. Each counts only the
+/// files it applies to: unstage the staged ones, ignore the unversioned ones.
+fn selection_actions(files: &[crate::changes::MarkedFile], loading: bool) -> Vec<ContextAction> {
+    let idle = !loading;
+    let paths_where = |keep: &dyn Fn(FileDisposition) -> bool| -> Vec<String> {
+        files.iter().filter(|file| keep(file.place)).map(|file| file.path.clone()).collect()
+    };
+    let stage = paths_where(&|place| place != FileDisposition::Staged);
+    let unstage = paths_where(&|place| place == FileDisposition::Staged);
+    let tracked = paths_where(&|place| place != FileDisposition::Untracked);
+    let untracked = paths_where(&|place| place == FileDisposition::Untracked);
+    let all: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+    vec![
+        action(files_label("Stage", stage.len()), idle && !stage.is_empty(), ContextActionKind::StageFiles(stage)),
+        action(files_label("Unstage", unstage.len()), idle && !unstage.is_empty(), ContextActionKind::UnstageFiles(unstage)),
+        action(
+            format!("{}…", files_label("Discard", files.len())),
+            idle,
+            ContextActionKind::DiscardFiles(files.to_vec()),
+        ),
+        action(format!("{}…", files_label("Stash", tracked.len())), idle && !tracked.is_empty(), ContextActionKind::StashFiles(tracked)),
+        action(files_label("Ignore", untracked.len()), idle && !untracked.is_empty(), ContextActionKind::IgnoreFiles(untracked)),
+        action("Copy paths", true, ContextActionKind::CopyText { text: all.join("\n") }),
+    ]
+}
+
+fn conflict_actions(path: &str, loading: bool) -> Vec<ContextAction> {
+    let idle = !loading;
+    let side = |side| ContextActionKind::ResolveConflict { path: path.to_string(), side };
+    vec![
+        action("Accept yours (keep this branch)", idle, side(core_domain::ConflictSide::Yours)),
+        action("Accept theirs (take the incoming change)", idle, side(core_domain::ConflictSide::Theirs)),
+        action("Mark resolved (I edited the file)", idle, ContextActionKind::MarkResolved(path.to_string())),
+        action("Copy path", true, ContextActionKind::CopyText { text: path.to_string() }),
+    ]
 }
 
 fn change_path_actions(

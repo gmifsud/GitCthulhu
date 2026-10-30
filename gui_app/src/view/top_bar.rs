@@ -132,14 +132,17 @@ fn repository_path<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> El
 }
 
 fn tracking<'a>(summary: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    text(summary)
-        .font(reading.font)
-        .size(reading.size)
-        .wrapping(Wrapping::None)
-        .style(move |_| text::Style {
-            color: Some(tokens.text_secondary),
-        })
-        .into()
+    one_line(
+        text(summary)
+            .font(reading.font)
+            .size(reading.size)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_secondary),
+            }),
+        reading.size,
+        Length::Shrink,
+    )
 }
 
 fn hunk_segment<'a>(current: crate::layout::HunkMode, tokens: DesignTokens) -> Element<'a, Message> {
