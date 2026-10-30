@@ -1,4 +1,5 @@
 mod branch;
+mod activity;
 mod branch_popup;
 mod changes;
 mod chrome;

@@ -164,6 +164,20 @@ pub(crate) struct GitApp {
     /// The Compare window, when open.
     pub(crate) compare: Option<CompareState>,
     compare_generation: u64,
+    /// What every repository opened in this window has done, and what is running now.
+    pub(crate) activity: crate::activity::ActivityLog,
+    /// Keeps each repository's log between runs. A no-op until the composition root sets one.
+    pub(crate) activity_store: crate::jobs::SharedActivityStore,
+    /// Repository keys whose saved log has been asked for, so it is read once.
+    activity_requested: Vec<String>,
+    /// Which tab the bottom panel shows.
+    pub(crate) bottom_tab: BottomTab,
+    /// The Activity tab lists failures only.
+    pub(crate) activity_failures_only: bool,
+    /// Last error line of the running terminal command, for its activity entry.
+    shell_last_error: Option<String>,
+    /// The running terminal command was stopped by the user.
+    shell_stopped: bool,
     pub(crate) list_models: crate::ModelLister,
     pub(crate) suggest_commit: crate::CommitSuggester,
     pub(crate) error: Option<String>,
@@ -334,6 +348,18 @@ pub(crate) enum Message {
     CompareSwap,
     CompareLoaded { generation: u64, result: Result<Patch, DomainError> },
     CloseCompare,
+    /// A repository's saved activity log was read.
+    ActivityLoaded(String, Vec<core_domain::ActivityRecord>),
+    /// A finished action was written to disk. No UI effect.
+    ActivitySaved,
+    /// Open the bottom panel on the Activity tab.
+    ShowActivity,
+    SetBottomTab(BottomTab),
+    ToggleActivityFailuresOnly,
+    /// Forget the active repository's log, here and on disk.
+    ClearActivity,
+    /// Redraw the status bar while an action runs or its result is showing.
+    ActivityTick,
     CloseSettings,
     /// Disk write finished. No UI effect; keeps the task from being discarded silently.
     SettingsSaved,
@@ -512,6 +538,54 @@ pub(crate) enum Message {
     PaletteActivate(usize),
 }
 
+/// The bottom panel's tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BottomTab {
+    Terminal,
+    Activity,
+}
+
+/// Keeps nothing. Used until the composition root hands over a real store, and in tests.
+struct NoActivityStore;
+
+impl core_domain::ActivityStore for NoActivityStore {
+    fn load_activity(&self, _repository: &str, _limit: usize) -> Result<Vec<core_domain::ActivityRecord>, DomainError> {
+        Ok(Vec::new())
+    }
+    fn append_activity(&self, _repository: &str, _record: &core_domain::ActivityRecord) -> Result<(), DomainError> {
+        Ok(())
+    }
+    fn clear_activity(&self, _repository: &str) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+/// The lane and outcome of a finish message, so its activity entry can be closed.
+/// Every message that ends a git action is listed here.
+fn finished_outcome(message: &Message) -> Option<(crate::activity::Lane, core_domain::ActivityOutcome)> {
+    use crate::activity::Lane;
+    let (lane, result) = match message {
+        Message::CheckoutFinished(path, result)
+        | Message::FetchFinished(path, result)
+        | Message::PushFinished(path, result)
+        | Message::PullFinished(path, result)
+        | Message::DiscardFinished(path, result)
+        | Message::IgnoreFinished(path, result)
+        | Message::HunkFinished(path, result)
+        | Message::StashFinished(path, result)
+        | Message::BranchFinished(path, result)
+        | Message::HistoryFinished(path, result)
+        | Message::WorktreeEditFinished(path, _, result) => (Lane::Worktree(path.clone()), result),
+        Message::WorktreeCreated { result, .. } | Message::WorktreeRemoved { result, .. } => (Lane::Worktrees, result),
+        _ => return None,
+    };
+    let outcome = match result {
+        Ok(()) => core_domain::ActivityOutcome::Succeeded,
+        Err(error) => core_domain::ActivityOutcome::Failed(error_message(error)),
+    };
+    Some((lane, outcome))
+}
+
 /// The terminal, carried across the rebuild that opening another repository does.
 struct KeptTerminal {
     console: crate::terminal::Console,
@@ -662,6 +736,13 @@ impl GitApp {
             repository_filter: String::new(),
             compare: None,
             compare_generation: 0,
+            activity: crate::activity::ActivityLog::default(),
+            activity_store: Arc::new(NoActivityStore),
+            activity_requested: Vec::new(),
+            bottom_tab: BottomTab::Terminal,
+            activity_failures_only: false,
+            shell_last_error: None,
+            shell_stopped: false,
             list_models: unavailable_model_lister(),
             suggest_commit: unavailable_suggester(),
             error: None,
@@ -1064,6 +1145,18 @@ impl GitApp {
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        // Every git action ends in one of a few finish messages. Close its activity entry here,
+        // once, whatever the handler then does with the result.
+        let saved = match finished_outcome(&message) {
+            Some((lane, outcome)) => self.finish_activity(&lane, outcome),
+            None => Task::none(),
+        };
+        let handled = self.handle(message);
+        let loaded = self.load_activity_once();
+        Task::batch([saved, handled, loaded])
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::RefreshRepository => {
                 Task::batch([self.begin_refresh(true), self.load_catalogue()])
@@ -1330,6 +1423,7 @@ impl GitApp {
                 let path = session.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
+                self.begin_activity(&path, crate::activity::Action::new("Fetch", "default remote", "git fetch"));
                 Task::perform(fetch_in_background(repo), move |result| {
                     Message::FetchFinished(path.clone(), result)
                 })
@@ -1346,6 +1440,8 @@ impl GitApp {
                 let path = session.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
+                let branch = crate::view::current_branch(&self.session().state.branches);
+                self.begin_activity(&path, crate::activity::Action::new("Push", branch, "git push"));
                 Task::perform(push_in_background(repo), move |result| {
                     Message::PushFinished(path.clone(), result)
                 })
@@ -1362,6 +1458,11 @@ impl GitApp {
                 let path = session.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
+                let branch = crate::view::current_branch(&self.session().state.branches);
+                self.begin_activity(
+                    &path,
+                    crate::activity::Action::new("Pull", branch, "git pull --no-rebase --ff-only"),
+                );
                 Task::perform(pull_in_background(repo), move |result| {
                     Message::PullFinished(path.clone(), result)
                 })
@@ -1389,6 +1490,7 @@ impl GitApp {
                 let path = session.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
+                self.begin_activity(&path, crate::activity::edit_action(&edit));
                 let report = edit.clone();
                 Task::perform(edit_in_background(repo, edit), move |result| {
                     Message::WorktreeEditFinished(path.clone(), report.clone(), result)
@@ -1587,6 +1689,11 @@ impl GitApp {
                 let list_models = Arc::clone(&self.list_models);
                 let suggest_commit = Arc::clone(&self.suggest_commit);
                 let terminal = self.take_terminal();
+                // Every repository's log stays: switching back shows it again.
+                let activity = std::mem::take(&mut self.activity);
+                let activity_store = Arc::clone(&self.activity_store);
+                let activity_requested = std::mem::take(&mut self.activity_requested);
+                let bottom_tab = self.bottom_tab;
                 *self = Self::new(
                     Some(repo),
                     Some(path),
@@ -1600,6 +1707,10 @@ impl GitApp {
                 self.list_models = list_models;
                 self.suggest_commit = suggest_commit;
                 self.restore_terminal(terminal);
+                self.activity = activity;
+                self.activity_store = activity_store;
+                self.activity_requested = activity_requested;
+                self.bottom_tab = bottom_tab;
                 Task::done(Message::RefreshRepository)
             }
             Message::RepositoryOpened(_, Err(error)) => {
@@ -1789,6 +1900,7 @@ impl GitApp {
             Message::Shell(run, event) => self.shell_event(run, event),
             Message::ShellInterrupt => {
                 if let Some(pid) = self.shell_pid.take() {
+                    self.shell_stopped = true;
                     stop_shell(pid);
                     self.console_line(LineKind::Error, "^C");
                 }
@@ -1932,6 +2044,40 @@ impl GitApp {
                 self.compare = None;
                 Task::none()
             }
+            Message::ActivityLoaded(repository, records) => {
+                self.activity.restore(&repository, records);
+                Task::none()
+            }
+            Message::ActivitySaved | Message::ActivityTick => Task::none(),
+            Message::ShowActivity => {
+                self.terminal_open = true;
+                self.bottom_tab = BottomTab::Activity;
+                Task::none()
+            }
+            Message::SetBottomTab(tab) => {
+                self.bottom_tab = tab;
+                self.terminal_open = true;
+                if tab == BottomTab::Terminal {
+                    focus_shell()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ToggleActivityFailuresOnly => {
+                self.activity_failures_only = !self.activity_failures_only;
+                Task::none()
+            }
+            Message::ClearActivity => {
+                let Some(repository) = self.repository_root() else {
+                    return Task::none();
+                };
+                self.activity.clear(&repository);
+                let store = Arc::clone(&self.activity_store);
+                Task::perform(
+                    crate::jobs::save_activity_in_background(store, repository, None),
+                    |_| Message::ActivitySaved,
+                )
+            }
             Message::CloseSettings => {
                 self.settings_open = false;
                 self.persist_settings(self.settings.clone())
@@ -2012,6 +2158,14 @@ impl GitApp {
                 self.confirm_discard = None;
                 self.session_mut().state.loading = true;
                 self.error = None;
+                let detail = match files.as_slice() {
+                    [one] => one.path.clone(),
+                    many => format!("{} files", many.len()),
+                };
+                self.begin_activity(
+                    &session_path,
+                    crate::activity::Action::new("Discard", detail, "git restore / git clean"),
+                );
                 Task::perform(
                     discard_paths_in_background(repo, files),
                     move |result| Message::DiscardFinished(session_path.clone(), result),
@@ -2697,6 +2851,15 @@ impl GitApp {
         };
         self.worktree_busy = true;
         self.error = None;
+        self.begin_activity_in(
+            &session,
+            crate::activity::Lane::Worktrees,
+            crate::activity::Action::new(
+                "Add worktree",
+                format!("{branch} at {path}"),
+                if create_branch { format!("git worktree add -b {branch}") } else { "git worktree add".to_string() },
+            ),
+        );
         let created = path.clone();
         Task::perform(
             add_worktree_in_background(repo, path, branch, create_branch, start_point),
@@ -2747,6 +2910,11 @@ impl GitApp {
         let path = session.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
+        let short = commit_id.get(..8).unwrap_or(&commit_id).to_string();
+        self.begin_activity(
+            &path,
+            crate::activity::Action::new("Checkout", format!("{short} (detached)"), format!("git checkout --detach {short}")),
+        );
         use crate::jobs::checkout_detached_in_background;
         Task::perform(
             checkout_detached_in_background(repo, commit_id),
@@ -2786,6 +2954,15 @@ impl GitApp {
         };
         self.worktree_busy = true;
         self.error = None;
+        self.begin_activity_in(
+            &session,
+            crate::activity::Lane::Worktrees,
+            crate::activity::Action::new(
+                "Remove worktree",
+                path.clone(),
+                if force { "git worktree remove --force" } else { "git worktree remove" },
+            ),
+        );
         let removed = path.clone();
         Task::perform(
             remove_worktree_in_background(repo, path, force),
@@ -2856,6 +3033,10 @@ impl GitApp {
             current: false,
         });
         self.error = None;
+        self.begin_activity(
+            &path,
+            crate::activity::Action::new("Checkout", branch.clone(), format!("git checkout {branch}")),
+        );
         Task::perform(checkout_in_background(repo, branch), move |result| {
             Message::CheckoutFinished(path.clone(), result)
         })
@@ -2914,6 +3095,54 @@ impl GitApp {
         self.history_prompt = None;
         self.branch_prompt = Some(prompt);
         Task::none()
+    }
+
+    /// The repository the window has open: its first tab's folder. Worktree tabs belong to it,
+    /// so their actions go in the same log.
+    pub(crate) fn repository_root(&self) -> Option<String> {
+        self.sessions.first().map(|session| session.path.clone())
+    }
+
+    /// Record that `action` started in the worktree at `worktree`.
+    fn begin_activity(&mut self, worktree: &str, action: crate::activity::Action) {
+        self.begin_activity_in(worktree, crate::activity::Lane::Worktree(worktree.to_string()), action);
+    }
+
+    fn begin_activity_in(&mut self, worktree: &str, lane: crate::activity::Lane, action: crate::activity::Action) {
+        let Some(repository) = self.repository_root() else {
+            return;
+        };
+        self.activity.begin(&repository, worktree, lane, action);
+    }
+
+    /// Close the running entry in `lane` and save it with its repository's log.
+    fn finish_activity(&mut self, lane: &crate::activity::Lane, outcome: core_domain::ActivityOutcome) -> Task<Message> {
+        let Some((repository, record)) = self.activity.finish(lane, outcome) else {
+            return Task::none();
+        };
+        let store = Arc::clone(&self.activity_store);
+        Task::perform(
+            crate::jobs::save_activity_in_background(store, repository, Some(record)),
+            |_| Message::ActivitySaved,
+        )
+    }
+
+    /// Read the open repository's saved log the first time it is seen this run.
+    fn load_activity_once(&mut self) -> Task<Message> {
+        let Some(repository) = self.repository_root() else {
+            return Task::none();
+        };
+        let key = core_domain::repository_key(&repository);
+        if self.activity_requested.contains(&key) {
+            return Task::none();
+        }
+        self.activity_requested.push(key);
+        let store = Arc::clone(&self.activity_store);
+        let finished = repository.clone();
+        Task::perform(
+            crate::jobs::load_activity_in_background(store, repository),
+            move |records| Message::ActivityLoaded(finished.clone(), records),
+        )
     }
 
     /// Lift the terminal out before the window is rebuilt for another repository.
@@ -3012,6 +3241,13 @@ impl GitApp {
         };
         self.shell_busy = true;
         self.shell_run = self.shell_run.wrapping_add(1);
+        self.shell_last_error = None;
+        self.shell_stopped = false;
+        self.begin_activity_in(
+            &cwd,
+            crate::activity::Lane::Terminal,
+            crate::activity::Action::new("Terminal", crate::session::basename(&cwd).to_string(), command.clone()),
+        );
         let run = self.shell_run;
         Task::run(shell_stream(cwd, command), move |event| Message::Shell(run, event))
     }
@@ -3027,12 +3263,26 @@ impl GitApp {
             }
             ShellEvent::Line { error, text } => {
                 let kind = if error { LineKind::Error } else { LineKind::Output };
+                if error && !text.trim().is_empty() {
+                    self.shell_last_error = Some(text.trim().to_string());
+                }
                 self.console_line(kind, &text);
                 Task::none()
             }
-            ShellEvent::Finished { cwd, code: _ } => {
+            ShellEvent::Finished { cwd, code } => {
                 self.shell_busy = false;
                 self.shell_pid = None;
+                let outcome = match (self.shell_stopped, code) {
+                    (true, _) => core_domain::ActivityOutcome::Stopped,
+                    (false, Some(0)) => core_domain::ActivityOutcome::Succeeded,
+                    (false, code) => core_domain::ActivityOutcome::Failed(
+                        self.shell_last_error.take().unwrap_or_else(|| match code {
+                            Some(code) => format!("exit code {code}"),
+                            None => "ended without an exit code".to_string(),
+                        }),
+                    ),
+                };
+                let saved = self.finish_activity(&crate::activity::Lane::Terminal, outcome);
                 if let Some(cwd) = cwd {
                     self.shell_cwd = Some(cwd);
                 }
@@ -3044,7 +3294,7 @@ impl GitApp {
                     .iter()
                     .find(|session| folder_is_inside(&folder, &session.path))
                     .map(|session| session.path.clone());
-                let focus = focus_shell();
+                let focus = Task::batch([focus_shell(), saved]);
                 match refresh {
                     Some(path) => Task::batch([focus, self.update(Message::RefreshSession(path))]),
                     None => focus,
@@ -3252,6 +3502,7 @@ impl GitApp {
         self.confirm_discard = None;
         self.confirm_drop = None;
         self.error = None;
+        self.begin_activity(&path, crate::activity::branch_action(&action));
         Task::perform(branch_in_background(repo, action), move |result| {
             Message::BranchFinished(path.clone(), result)
         })
@@ -3395,6 +3646,7 @@ impl GitApp {
         self.confirm_drop = None;
         self.session_mut().state.loading = true;
         self.error = None;
+        self.begin_activity(&path, crate::activity::history_action(&action));
         Task::perform(history_in_background(repo, action), move |result| {
             Message::HistoryFinished(path.clone(), result)
         })
@@ -3429,11 +3681,15 @@ impl GitApp {
         if session.state.loading || paths.is_empty() {
             return Task::none();
         }
-        let patterns = paths.iter().map(|path| gitignore_pattern(path, false)).collect();
+        let patterns: Vec<String> = paths.iter().map(|path| gitignore_pattern(path, false)).collect();
         let repo = session.adapter.clone();
         let session_path = session.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
+        self.begin_activity(
+            &session_path,
+            crate::activity::Action::new("Ignore", patterns.join(", "), "append to .gitignore"),
+        );
         Task::perform(append_gitignore_in_background(repo, patterns), move |result| {
             Message::IgnoreFinished(session_path.clone(), result)
         })
@@ -3451,6 +3707,10 @@ impl GitApp {
         let session_path = session.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
+        self.begin_activity(
+            &session_path,
+            crate::activity::Action::new("Ignore", pattern.clone(), "append to .gitignore"),
+        );
         Task::perform(
             append_gitignore_in_background(repo, vec![pattern]),
             move |result| Message::IgnoreFinished(session_path.clone(), result),
@@ -3613,6 +3873,7 @@ impl GitApp {
         self.confirm_discard = None;
         self.session_mut().state.loading = true;
         self.error = None;
+        self.begin_activity(&path, crate::activity::stash_action(&action));
         Task::perform(stash_in_background(repo, action), move |result| {
             Message::StashFinished(path.clone(), result)
         })
@@ -3641,6 +3902,14 @@ impl GitApp {
         let session_path = session.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
+        self.begin_activity(
+            &session_path,
+            if stage {
+                crate::activity::Action::new("Stage hunk", path.clone(), "git apply --cached")
+            } else {
+                crate::activity::Action::new("Discard hunk", path.clone(), "git apply --reverse")
+            },
+        );
         if stage {
             let finish_path = session_path.clone();
             Task::perform(stage_hunk_in_background(repo, path, hunk), move |result| {
@@ -3684,17 +3953,19 @@ impl GitApp {
         let waiting_tip = self.tip_hover.is_some()
             && self.tip_ready_key.as_ref()
                 != self.tip_hover.as_ref().map(|(key, _, _)| key);
+        let mut subscriptions = vec![keys, typing_keys, cursor];
         if waiting_tip {
-            iced::Subscription::batch([
-                keys,
-                typing_keys,
-                cursor,
-                iced::time::every(iced::time::Duration::from_millis(200))
-                    .map(|_| Message::IconTipTick),
-            ])
-        } else {
-            iced::Subscription::batch([keys, typing_keys, cursor])
+            subscriptions.push(
+                iced::time::every(iced::time::Duration::from_millis(200)).map(|_| Message::IconTipTick),
+            );
         }
+        // Keep the running time counting and let a finished result fade out of the status bar.
+        if self.activity.running().is_some() || self.activity.recent_result().is_some() {
+            subscriptions.push(
+                iced::time::every(iced::time::Duration::from_millis(500)).map(|_| Message::ActivityTick),
+            );
+        }
+        iced::Subscription::batch(subscriptions)
     }
 
     /// True when the hover tip for `key` should be drawn (two seconds elapsed).
@@ -6558,6 +6829,101 @@ mod tests {
         assert!(app.console.text().contains("fatal"));
         assert!(!app.shell_busy);
         assert_eq!(app.shell_folder().as_deref(), Some(r"D:\elsewhere"), "cd carries over");
+    }
+
+    #[test]
+    fn a_push_is_logged_while_it_runs_and_with_its_result() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let repository = app.repository_root().expect("open");
+        let _ = app.update(Message::Push);
+        let running = app.activity.running().expect("running");
+        assert_eq!(running.record.title, "Push");
+        assert_eq!(running.record.command, "git push");
+
+        let _ = app.update(Message::PushFinished(
+            app.active_path(),
+            Err(DomainError::Unknown("! [rejected] development -> development (fetch first)".into())),
+        ));
+        assert!(app.activity.running().is_none());
+        let entries = app.activity.for_repository(&repository);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].record.outcome, core_domain::ActivityOutcome::Failed(message) if message.contains("rejected")));
+        assert_eq!(app.activity.fresh_failures(&repository), 1);
+
+        let _ = app.update(Message::Fetch);
+        let _ = app.update(Message::FetchFinished(app.active_path(), Ok(())));
+        let entries = app.activity.for_repository(&repository);
+        assert_eq!(entries[0].record.title, "Fetch", "newest first");
+        assert_eq!(entries[0].record.outcome, core_domain::ActivityOutcome::Succeeded);
+    }
+
+    #[test]
+    fn stash_and_branch_actions_are_named_after_what_they_did() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let repository = app.repository_root().expect("open");
+        let _ = app.update(Message::StashPop(1));
+        let _ = app.update(Message::StashFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::EditWorktree(WorktreeEdit::Untrack { paths: vec!["bin".into()], ignore: vec!["bin/".into()] }));
+        let _ = app.update(Message::WorktreeEditFinished(
+            app.active_path(),
+            WorktreeEdit::Untrack { paths: vec!["bin".into()], ignore: vec!["bin/".into()] },
+            Ok(()),
+        ));
+        let titles: Vec<String> = app.activity.for_repository(&repository).iter().map(|e| e.record.title.clone()).collect();
+        assert_eq!(titles, vec!["Untrack and ignore", "Stash pop"]);
+    }
+
+    #[test]
+    fn terminal_commands_are_logged_with_their_last_error() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let repository = app.repository_root().expect("open");
+        let _ = app.update(Message::ShellInputChanged("git pul".into()));
+        let _ = app.update(Message::ShellSubmit);
+        let run = app.shell_run;
+        assert_eq!(app.activity.running().map(|e| e.record.command.clone()).as_deref(), Some("git pul"));
+        let _ = app.update(Message::Shell(run, ShellEvent::Line { error: true, text: "git: 'pul' is not a git command.".into() }));
+        let _ = app.update(Message::Shell(run, ShellEvent::Finished { cwd: None, code: Some(1) }));
+        let entry = app.activity.for_repository(&repository)[0].clone();
+        assert_eq!(entry.record.title, "Terminal");
+        assert_eq!(entry.record.outcome, core_domain::ActivityOutcome::Failed("git: 'pul' is not a git command.".into()));
+    }
+
+    #[test]
+    fn the_saved_log_comes_back_and_survives_opening_another_repository() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let first = app.repository_root().expect("open");
+        let saved = core_domain::ActivityRecord {
+            started: 1,
+            duration_ms: 900,
+            title: "Pull".into(),
+            detail: "development".into(),
+            command: "git pull".into(),
+            worktree: String::new(),
+            outcome: core_domain::ActivityOutcome::Succeeded,
+        };
+        let _ = app.update(Message::ActivityLoaded(first.clone(), vec![saved]));
+        assert_eq!(app.activity.for_repository(&first).len(), 1);
+
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\other".to_string(),
+            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+        ));
+        assert_eq!(app.repository_root().as_deref(), Some(r"D:\other"));
+        assert!(app.activity.for_repository(r"D:\other").is_empty(), "a fresh repository has its own log");
+        assert_eq!(app.activity.for_repository(&first).len(), 1, "the first repository's log is kept");
+
+        let _ = app.update(Message::ShowActivity);
+        assert!(app.terminal_open && app.bottom_tab == BottomTab::Activity);
+    }
+
+    #[test]
+    fn clearing_the_log_forgets_only_this_repository() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let repository = app.repository_root().expect("open");
+        let _ = app.update(Message::Fetch);
+        let _ = app.update(Message::FetchFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::ClearActivity);
+        assert!(app.activity.for_repository(&repository).is_empty());
     }
 
     #[test]
