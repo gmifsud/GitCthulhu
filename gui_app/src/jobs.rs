@@ -276,6 +276,43 @@ pub(crate) fn stop_shell(pid: u32) {
     }
 }
 
+/// Where each repository's activity log is kept between runs.
+pub(crate) type SharedActivityStore = Arc<dyn core_domain::ActivityStore + Send + Sync>;
+
+/// A repository's saved activity, oldest first. A store that cannot be read gives nothing:
+/// the log is a convenience and must never stop a repository from opening.
+pub(crate) fn load_activity_in_background(
+    store: SharedActivityStore,
+    repository: String,
+) -> impl Future<Output = Vec<core_domain::ActivityRecord>> {
+    in_background(
+        move || {
+            store
+                .load_activity(&repository, crate::activity::KEEP_PER_REPOSITORY)
+                .unwrap_or_default()
+        },
+        Vec::new,
+    )
+}
+
+/// Save one finished action, or clear a repository's log (`record` = `None`).
+/// Failures are ignored for the same reason as above.
+pub(crate) fn save_activity_in_background(
+    store: SharedActivityStore,
+    repository: String,
+    record: Option<core_domain::ActivityRecord>,
+) -> impl Future<Output = ()> {
+    in_background(
+        move || {
+            let _ = match record {
+                Some(record) => store.append_activity(&repository, &record),
+                None => store.clear_activity(&repository),
+            };
+        },
+        || (),
+    )
+}
+
 /// Diff of one file between two versions, for the Compare window.
 pub(crate) fn compare_in_background(
     repo: SharedRepository,

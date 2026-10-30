@@ -2,6 +2,9 @@
 //! Implements the ConfigStore port for persisting user-defined settings using confy.
 
 use core_domain::{AppSettings, ConfigStore, DomainError, HeaderMark, WorktreeTabRetention};
+
+mod activity;
+pub use activity::JsonlActivityStore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]

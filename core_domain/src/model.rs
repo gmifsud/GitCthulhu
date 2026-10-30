@@ -309,17 +309,51 @@ impl AppSettings {
 /// True when two remembered paths name the same folder. Separators and a trailing
 /// separator are ignored; case is ignored on Windows only, matching its filesystem.
 pub fn same_repository_path(left: &str, right: &str) -> bool {
-    fn key(path: &str) -> String {
-        let unified = path.trim().replace('\\', "/");
-        let trimmed = unified.trim_end_matches('/');
-        let kept = if trimmed.is_empty() { unified.as_str() } else { trimmed };
-        if cfg!(windows) {
-            kept.to_lowercase()
-        } else {
-            kept.to_string()
-        }
+    repository_key(left) == repository_key(right)
+}
+
+/// One spelling per folder: forward slashes, no trailing slash, lower case on Windows.
+/// Two paths with the same key are the same repository.
+pub fn repository_key(path: &str) -> String {
+    let unified = path.trim().replace('\\', "/");
+    let trimmed = unified.trim_end_matches('/');
+    let kept = if trimmed.is_empty() { unified.as_str() } else { trimmed };
+    if cfg!(windows) {
+        kept.to_lowercase()
+    } else {
+        kept.to_string()
     }
-    key(left) == key(right)
+}
+
+/// How a recorded action ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "message")]
+pub enum ActivityOutcome {
+    Succeeded,
+    /// Git's (or the shell's) own message.
+    Failed(String),
+    /// The user stopped it.
+    Stopped,
+}
+
+/// One finished action in a repository's activity log: a push, a stash, a terminal command…
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityRecord {
+    /// When it started, in Unix seconds (UTC).
+    pub started: i64,
+    pub duration_ms: u64,
+    /// What happened, in a word or two: "Push", "Stash pop".
+    pub title: String,
+    /// What it acted on: a branch, a file count, a stash message. May be empty.
+    #[serde(default)]
+    pub detail: String,
+    /// The git command (or terminal line) it amounts to. May be empty.
+    #[serde(default)]
+    pub command: String,
+    /// The worktree folder it ran in. Empty when it is the repository's own folder.
+    #[serde(default)]
+    pub worktree: String,
+    pub outcome: ActivityOutcome,
 }
 
 impl Default for AppSettings {

@@ -7,7 +7,7 @@ mod startup;
 
 use std::sync::Arc;
 
-use config_adapter::ConfyConfigStore;
+use config_adapter::{ConfyConfigStore, JsonlActivityStore};
 use core_domain::ConfigStore;
 use git_adapter::GitoxideAdapter;
 use startup::{launch_path, remember};
@@ -59,6 +59,7 @@ fn main() -> iced::Result {
     let save_settings = save_appearance(Arc::clone(&store));
     let list_models = kilo::lister();
     let suggest_commit = kilo::suggester();
+    let activity = activity_keeper();
     let argument = std::env::args().nth(1);
     if let Some(path) = argument.as_deref() {
         remember(store.as_ref(), path);
@@ -76,6 +77,7 @@ fn main() -> iced::Result {
             save_settings,
             list_models,
             suggest_commit,
+            activity,
         ),
         None => gui_app::run_welcome(
             open,
@@ -86,6 +88,18 @@ fn main() -> iced::Result {
             save_settings,
             list_models,
             suggest_commit,
+            activity,
         ),
+    }
+}
+
+/// Each repository's activity log, beside the settings file. If the config folder cannot be
+/// found the log goes to the temp folder: it is a convenience, never a reason not to start.
+fn activity_keeper() -> gui_app::ActivityKeeper {
+    match JsonlActivityStore::new(APP_NAME) {
+        Ok(store) => Arc::new(store),
+        Err(_) => Arc::new(JsonlActivityStore::in_folder(
+            std::env::temp_dir().join("gitcthulhu-activity"),
+        )),
     }
 }

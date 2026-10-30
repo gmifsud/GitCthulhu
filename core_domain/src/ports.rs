@@ -1,5 +1,5 @@
 use super::{
-    AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, Patch,
+    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, Patch,
     RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
@@ -125,6 +125,15 @@ pub trait ConfigStore {
     fn watch_settings<F>(&self, callback: F) -> Result<(), DomainError>
     where
         F: Fn(AppSettings) + Send + 'static;
+}
+
+/// Port for each repository's activity log, kept between runs.
+pub trait ActivityStore {
+    /// The newest `limit` records of the repository at `repository`, oldest first.
+    /// A repository with no log yet has none.
+    fn load_activity(&self, repository: &str, limit: usize) -> Result<Vec<ActivityRecord>, DomainError>;
+    fn append_activity(&self, repository: &str, record: &ActivityRecord) -> Result<(), DomainError>;
+    fn clear_activity(&self, repository: &str) -> Result<(), DomainError>;
 }
 
 /// Port for DAG caching.
