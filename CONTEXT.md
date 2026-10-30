@@ -52,7 +52,7 @@ Open a repository from the command line or from the welcome screen's folder dial
 
 **Branches popup.** The top-bar branch chip opens it, after the JetBrains Git branches popup: a search field, New Branch… (from HEAD, checkout ticked) and Merge into Current…, then the local and remote branches with ahead/behind. A branch opens its own menu: checkout, new branch from it, merge, rebase, rename, delete.
 
-**Working-tree selection.** Click selects one file and shows its diff, Ctrl-click (Cmd on macOS) toggles a file, Shift-click selects the range from the last click in the order the files are drawn. The check boxes show the same selection. Right-click acts on the selection: stage, unstage, discard, stash, ignore, copy paths. Each counts only the files it applies to. Right-clicking outside the selection selects that row first. Discard asks once for everything selected, staged or not.
+**Working-tree selection.** Click selects one file and shows its diff, Ctrl-click (Cmd on macOS) toggles a file, Shift-click selects the range from the last click in the order the files are drawn. The check boxes show the same selection. Right-click acts on the selection: stage, unstage, discard, stash, ignore, untrack, copy paths. Each counts only the files it applies to. Right-clicking outside the selection selects that row first. Discard asks once for everything selected, staged or not.
 
 **Stash dialog.** Stash (top bar) and "Stash N files…" (right-click) ask for an optional message first. Stashing everything can include untracked files.
 
@@ -68,7 +68,17 @@ Open a repository from the command line or from the welcome screen's folder dial
 
 **Quick open.** Ctrl+P opens one field over branches, remotes, worktrees, tags, stashes, changed files, loaded commits, and recent repositories, ranked by a subsequence score that favours word starts. A prefix scopes it: `b:` `t:` `s:` `w:` `c:` `f:` `r:`. Enter selects a branch, tag, stash, commit, or file (nothing is checked out), opens a worktree in a tab, or opens a repository. Esc, Ctrl+P, and Ctrl+K work while a text field has focus.
 
-**Recent repositories.** `recent_repositories` in the settings, newest first, at most twelve. The repository opener and a command-line path add to it; worktree tabs do not. The welcome screen lists them and the top bar's Recent opens Quick open on `r:`.
+**Recent repositories.** `recent_repositories` in the settings, newest first, at most 24. The repository opener and a command-line path add to it; worktree tabs do not. The welcome screen lists them, the top bar's Recent opens Quick open on `r:`, and the Repositories column shows them all.
+
+**Header.** Two rows. The title row holds the header mark, the repository's folder name and full path, then Recent, Open… and Settings. The branch row holds the branch chip and tracking line, then fetch, pull, push, stash, Compare and the view switches. The chip has a row of its own so a long path can never push it. The header mark (`HeaderMark` in `core_domain`) is chosen under Settings → Appearance: two-tone, badge and name, spaced capitals, shell prompt, or badge only.
+
+**Repositories column.** Left of everything below the header. Lists the recent repositories with a filter; a click opens one, × forgets it (the folder is left alone). Pinned (`repositories_pinned`, the default) it is a column; unpinned it folds to a rail of initials whose top button shows the list over the window. The Explorer keeps its pixel width when the column is pinned or unpinned, because pane ratios are taken against the pane grid, not the window.
+
+**Terminal.** A console under the workspace: scrollback on top, the prompt and command line under it. Commands run through `pwsh` (else Windows PowerShell; `sh` elsewhere), one process each, with output streamed line by line; standard error is red, the prompt is in the accent colour. `cd` carries over to the next command, so the prompt shows the folder and, inside the open repository, the branch. Up and Down recall commands, Ctrl+C or Stop ends the running one with everything it started, `cls`/`clear` and `exit` are handled by the window, and Ctrl+` shows or hides it. The top edge drags to resize. After a command the tab it ran in reloads, so a checkout or commit typed there shows up. Opening another repository keeps the scrollback. It is not a terminal emulator: full-screen programs and prompts that wait for input do not work.
+
+**Compare.** One file, two versions, side by side (or unified). Opened from Compare in the branch row, or Resolve… on a conflicted file. Either side is the working tree, HEAD, a branch, a tag, any typed commit, or for a conflict the base, yours (`:2`) or theirs (`:3`). A conflicted file opens on yours against theirs with Accept yours, Accept theirs and Mark resolved; any other file opens on HEAD against the working tree. Both sides are read in working-tree form (`git cat-file --filters`) and diffed with `git diff --no-index`, so line endings do not show as changes. A working tree on the left is asked of git the other way round and the diff reversed.
+
+**Untrack.** Right-click a tracked file, folder or selection: Untrack (keep on disk) runs `git rm --cached -r`; Untrack and ignore also appends the path to `.gitignore`. The file stays on disk and shows as unversioned; the next commit records the removal. Git refuses a file whose staged version differs from both HEAD and the disk, so no staged work is lost.
 
 ### Later: several repositories
 

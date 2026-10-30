@@ -39,17 +39,13 @@ fn opener(store: Arc<ConfyConfigStore>) -> gui_app::RepositoryOpener {
     })
 }
 
-/// Write only the font and size, so a remembered path saved by [`remember`] stays put.
+/// Write only what the window may change, so a remembered path saved by [`remember`] stays put.
 fn save_appearance(store: Arc<ConfyConfigStore>) -> gui_app::SettingsSaver {
     Arc::new(move |incoming| {
         let Ok(mut stored) = store.load_settings() else {
             return;
         };
-        stored.ui_font = incoming.ui_font;
-        stored.ui_size = incoming.ui_size;
-        stored.agent_token = incoming.agent_token;
-        stored.agent_model = incoming.agent_model;
-        stored.worktree_tab_retention = incoming.worktree_tab_retention;
+        startup::merge_window_settings(&mut stored, incoming);
         let _ = store.save_settings(&stored);
     })
 }

@@ -34,12 +34,14 @@ pub struct FakeGitRepository {
     pub rebase_result: Result<(), DomainError>,
     pub stage_result: Result<(), DomainError>,
     pub unstage_result: Result<(), DomainError>,
+    pub untrack_result: Result<(), DomainError>,
     pub commit_result: Result<(), DomainError>,
     pub fetch_result: Result<(), DomainError>,
     pub push_result: Result<(), DomainError>,
     pub pull_result: Result<(), DomainError>,
     pub commit_patch_result: Result<Vec<Patch>, DomainError>,
     pub file_patch_result: Result<Patch, DomainError>,
+    pub compare_result: Result<Patch, DomainError>,
     pub discard_result: Result<(), DomainError>,
     pub stage_hunk_result: Result<(), DomainError>,
     pub discard_hunk_result: Result<(), DomainError>,
@@ -83,12 +85,18 @@ impl FakeGitRepository {
             rebase_result: Ok(()),
             stage_result: Ok(()),
             unstage_result: Ok(()),
+            untrack_result: Ok(()),
             commit_result: Ok(()),
             fetch_result: Ok(()),
             push_result: Ok(()),
             pull_result: Ok(()),
             commit_patch_result: Ok(vec![]),
             file_patch_result: Ok(Patch {
+                path: String::new(),
+                hunks: vec![],
+                binary: false,
+            }),
+            compare_result: Ok(Patch {
                 path: String::new(),
                 hunks: vec![],
                 binary: false,
@@ -187,6 +195,10 @@ impl GitRepository for FakeGitRepository {
         self.unstage_result.clone()
     }
 
+    fn untrack_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
+        self.untrack_result.clone()
+    }
+
     fn commit(&self, _message: &str) -> Result<(), DomainError> {
         self.commit_result.clone()
     }
@@ -262,5 +274,12 @@ impl GitRepository for FakeGitRepository {
 
     fn resolve_conflict(&self, _path: &str, _side: core_domain::ConflictSide) -> Result<(), DomainError> {
         self.resolve_result.clone()
+    }
+
+    fn compare_file(&self, path: &str, _left: &str, _right: Option<&str>) -> Result<Patch, DomainError> {
+        self.compare_result.clone().map(|mut patch| {
+            patch.path = path.to_string();
+            patch
+        })
     }
 }

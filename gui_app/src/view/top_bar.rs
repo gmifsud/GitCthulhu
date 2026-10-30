@@ -3,19 +3,24 @@ use crate::palette::REPOSITORY_SCOPE;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use iced::widget::text::Wrapping;
-use iced::widget::{container, horizontal_space, row, text};
+use iced::widget::{column, container, horizontal_space, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::chrome::{branch_chip, one_line, quiet_button, Reading};
 use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
 use super::refs::current_branch_name;
 
-const TOP_BAR_HEIGHT: f32 = 40.0;
+/// Identity row: app mark, repository name and folder, then app-level commands.
+const TITLE_ROW_HEIGHT: f32 = 36.0;
+/// Branch row: the branch chip and tracking line, then branch and view commands.
+/// Its own row so a long repository path can never push the chip around.
+const BRANCH_ROW_HEIGHT: f32 = 34.0;
+/// Both rows plus the hairline under them: where the area below the header starts.
+pub(super) const HEADER_HEIGHT: f32 = TITLE_ROW_HEIGHT + BRANCH_ROW_HEIGHT + 1.0;
 const TOP_BAR_PADDING: f32 = 12.0;
 const CLUSTER_SPACING: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 
-const APP_NAME: &str = "GitCthulhu";
 const OPEN_REPOSITORY: &str = "Open…";
 const RECENT_REPOSITORIES: &str = "Recent";
 const SETTINGS: &str = "Settings";
@@ -29,6 +34,68 @@ pub(super) fn top_bar<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    column![
+        chrome_row(title_row(app, tokens, reading), TITLE_ROW_HEIGHT, tokens),
+        chrome_row(branch_row(app, tokens, reading), BRANCH_ROW_HEIGHT, tokens),
+    ]
+    .into()
+}
+
+fn chrome_row<'a>(
+    content: Element<'a, Message>,
+    height: f32,
+    tokens: DesignTokens,
+) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(height))
+        .padding([0.0, TOP_BAR_PADDING])
+        .align_y(Alignment::Center)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.bg_chrome)),
+            text_color: Some(tokens.text_primary),
+            border: Border::default(),
+            shadow: Shadow::default(),
+        })
+        .into()
+}
+
+fn title_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let path = &app.session().path;
+    let mut bar = row![
+        super::wordmark::wordmark(app.settings.header_mark, tokens, reading),
+        separator(tokens),
+        repository_name(path, tokens, reading),
+        repository_folder(path, tokens, reading),
+    ]
+    .spacing(CLUSTER_SPACING)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+    bar = bar.push(quiet_button(
+        RECENT_REPOSITORIES,
+        Message::TogglePalette(format!("{REPOSITORY_SCOPE} ")),
+        !app.session().state.loading && app.settings.recent_repositories.len() > 1,
+        tokens,
+        reading,
+    ));
+    bar = bar.push(quiet_button(
+        OPEN_REPOSITORY,
+        Message::ChooseRepositoryFolder,
+        !app.session().state.loading,
+        tokens,
+        reading,
+    ));
+    bar.push(quiet_button(
+        SETTINGS,
+        Message::OpenSettings,
+        true,
+        tokens,
+        reading,
+    ))
+    .into()
+}
+
+fn branch_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let branch_name = current_branch_name(&app.session().state.branches);
     let branch_selection = Selection::Branch {
         name: branch_name.clone(),
@@ -42,89 +109,80 @@ pub(super) fn top_bar<'a>(
         CommandPlace::TopBar,
     );
 
-    let mut left = row![mark(tokens, reading)]
-        .spacing(CLUSTER_SPACING)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-    left = left.push(repository_path(&app.session().path, tokens, reading));
-    left = left.push(branch_chip(
-        branch_name,
-        Message::ToggleBranchList,
-        !app.session().state.loading,
-        app.files_rail_open && !app.session().explorer_collapsed.local,
-        tokens,
-        reading,
-    ));
-    left = left.push(tracking(summary, tokens, reading));
-
-    let mut right = row![horizontal_space()]
-        .spacing(COMMAND_SPACING)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
+    let mut bar = row![
+        branch_chip(
+            branch_name,
+            Message::ToggleBranchList,
+            !app.session().state.loading,
+            app.files_rail_open && !app.session().explorer_collapsed.local,
+            tokens,
+            reading,
+        ),
+        tracking(summary, tokens, reading),
+        horizontal_space(),
+    ]
+    .spacing(COMMAND_SPACING)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
     for button in command_buttons(&top_commands, &branch_selection, app, tokens, reading) {
-        right = right.push(button);
+        bar = bar.push(button);
     }
-    right = right.push(hunk_segment(app.hunk_mode, tokens));
-    right = right.push(layout_segment(app.layout, tokens));
-    right = right.push(quiet_button(
-        RECENT_REPOSITORIES,
-        Message::TogglePalette(format!("{REPOSITORY_SCOPE} ")),
-        !app.session().state.loading && app.settings.recent_repositories.len() > 1,
-        tokens,
-        reading,
-    ));
-    right = right.push(quiet_button(
-        OPEN_REPOSITORY,
-        Message::ChooseRepositoryFolder,
+    // The compare / conflict window: the selected change against HEAD, or yours against
+    // theirs when the file is conflicted.
+    bar = bar.push(super::chrome::labelled_button(
+        crate::icons::Icon::Compare,
+        "Compare".to_string(),
+        Message::OpenCompare { path: None, against: None },
         !app.session().state.loading,
+        false,
         tokens,
         reading,
     ));
-    right = right.push(quiet_button(
-        SETTINGS,
-        Message::OpenSettings,
-        true,
-        tokens,
-        reading,
-    ));
+    bar.push(hunk_segment(app.hunk_mode, tokens))
+        .push(layout_segment(app.layout, tokens))
+        .into()
+}
 
-    let bar = row![left, right]
-        .spacing(CLUSTER_SPACING)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fixed(TOP_BAR_HEIGHT));
-
-    container(bar)
-        .width(Length::Fill)
-        .height(Length::Fixed(TOP_BAR_HEIGHT))
-        .padding([0.0, TOP_BAR_PADDING])
+/// A thin upright rule between the mark and the repository.
+fn separator<'a>(tokens: DesignTokens) -> Element<'a, Message> {
+    container(column![])
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(16.0))
         .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(tokens.bg_chrome)),
-            text_color: Some(tokens.text_primary),
-            border: Border::default(),
-            shadow: Shadow::default(),
+            background: Some(Background::Color(tokens.border)),
+            ..container::Style::default()
         })
         .into()
 }
 
-fn mark<'a>(tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    text(APP_NAME)
-        .font(reading.font)
-        .size(reading.size)
-        .style(move |_| text::Style {
-            color: Some(tokens.text_primary),
-        })
-        .into()
-}
-
-fn repository_path<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+/// The folder's own name, which is what people call the repository.
+fn repository_name<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     one_line(
-        text(path.to_string())
-            .font(reading.mono)
+        text(crate::session::basename(path).to_string())
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..reading.font
+            })
             .size(reading.size)
             .wrapping(Wrapping::None)
             .style(move |_| text::Style {
-                color: Some(tokens.text_secondary),
+                color: Some(tokens.text_primary),
+            }),
+        reading.size,
+        Length::Shrink,
+    )
+}
+
+/// The full folder, muted. Takes whatever room is left and clips; it no longer shares a row
+/// with the branch chip, so clipping it costs nothing else.
+fn repository_folder<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    one_line(
+        text(path.to_string())
+            .font(reading.mono)
+            .size((reading.size - 1.0).max(10.0))
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_muted),
             }),
         reading.size,
         Length::Fill,

@@ -18,10 +18,12 @@ use crate::jobs::{
     init_in_background, list_models_in_background, load_patch_in_background,
     load_repository_in_background, open_repository_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
-    shell_in_background, stage_hunk_in_background, stash_in_background, suggest_commit_in_background,
-    worktrees_in_background, BranchAction, HistoryAction, SharedRepository, StashAction,
-    WorktreeEdit,
+    compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
+    stop_shell, suggest_commit_in_background, worktrees_in_background, BranchAction,
+    HistoryAction, SharedRepository, ShellEvent, StashAction, WorktreeEdit,
 };
+use crate::compare::{CompareSide, CompareState};
+use crate::terminal::{ConsoleChange, LineKind};
 use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
 use crate::session::{apply_retention, same_path, WorktreeSession, DIFF_LINES_PER_PAGE};
@@ -60,6 +62,14 @@ pub(crate) const STASH_MESSAGE_ID: &str = "stash-message";
 pub(crate) const BRANCH_POPUP_ID: &str = "branch-popup-filter";
 /// Text-input id of the quick-open palette field.
 pub(crate) const PALETTE_INPUT_ID: &str = "quick-open";
+/// Text-input id of the terminal's command line.
+pub(crate) const SHELL_INPUT_ID: &str = "shell-input";
+/// Text-input id of the Repositories filter.
+pub(crate) const REPOSITORY_FILTER_ID: &str = "repository-filter";
+/// Terminal height to start with, and its limits while dragging.
+pub(crate) const TERMINAL_HEIGHT: f32 = 240.0;
+const TERMINAL_MIN_HEIGHT: f32 = 110.0;
+const TERMINAL_MAX_HEIGHT: f32 = 900.0;
 
 /// The open Ctrl+P palette: its query and the highlighted row among the ranked results.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -130,13 +140,30 @@ pub(crate) struct GitApp {
     pub(crate) agent_models: Vec<String>,
     pub(crate) agent_models_error: Option<String>,
     pub(crate) agent_busy: bool,
-    pub(crate) terminal: crate::terminal::Transcript,
+    /// Scrollback and history. `terminal_log` mirrors its text for selection and copy.
+    pub(crate) console: crate::terminal::Console,
     pub(crate) terminal_log: text_editor::Content,
     pub(crate) terminal_open: bool,
+    /// Height the user dragged the terminal to.
+    pub(crate) terminal_height: f32,
+    /// Dragging the terminal's top edge: pointer y and height when the drag began.
+    terminal_drag: Option<(f32, f32)>,
     /// Draft line for the interactive terminal.
     pub(crate) shell_input: String,
     /// A shell command is running in the active worktree.
     pub(crate) shell_busy: bool,
+    /// Folder the next command starts in, after a `cd`. `None` is the active tab's folder.
+    pub(crate) shell_cwd: Option<String>,
+    /// Process of the running command, for Stop and Ctrl+C.
+    shell_pid: Option<u32>,
+    /// Numbers each command so output from one that was stopped cannot land in the next.
+    shell_run: u64,
+    /// The Repositories column folded to a rail is showing its list over the window.
+    pub(crate) repositories_flyout: bool,
+    pub(crate) repository_filter: String,
+    /// The Compare window, when open.
+    pub(crate) compare: Option<CompareState>,
+    compare_generation: u64,
     pub(crate) list_models: crate::ModelLister,
     pub(crate) suggest_commit: crate::CommitSuggester,
     pub(crate) error: Option<String>,
@@ -266,8 +293,47 @@ pub(crate) enum Message {
     ShellInputChanged(String),
     /// User pressed Enter to run the terminal command.
     ShellSubmit,
-    /// Background shell finished: (command, output body).
-    ShellFinished(String, String),
+    /// Output, start or end of the command numbered `run`.
+    Shell(u64, ShellEvent),
+    /// Stop button, or Ctrl+C while the command line has focus.
+    ShellInterrupt,
+    /// Ctrl+C anywhere; stops the command only when the command line has focus.
+    CtrlCPressed,
+    /// Ctrl+C was pressed; `focused` says whether the command line had focus.
+    ShellCtrlC { focused: bool },
+    /// Up / Down. `focused` says whether the command line had focus.
+    ShellHistory { step: i32, focused: bool },
+    /// Click in the terminal: put the caret on the command line.
+    FocusShell,
+    /// The terminal's top edge was grabbed.
+    TerminalDragStart,
+    /// The mouse button went up anywhere.
+    PointerReleased,
+    /// Pin or unpin the Repositories column.
+    ToggleRepositoriesPinned,
+    /// Show or hide the Repositories list over the window while the column is unpinned.
+    ToggleRepositoriesFlyout,
+    RepositoryFilterChanged(String),
+    /// Take a repository off the Repositories list. The folder is left alone.
+    ForgetRepository(String),
+    /// Settings: how the header draws the app name.
+    HeaderMarkChosen(core_domain::HeaderMark),
+    /// Open the Compare window: a file (else the selected or first changed file), and
+    /// optionally the revision to compare the working tree against.
+    OpenCompare { path: Option<String>, against: Option<String> },
+    ComparePathChanged(String),
+    /// Run the compare for the path typed.
+    ComparePathSubmitted,
+    /// A changed file picked from the list.
+    ComparePathPicked(String),
+    /// A side picked from a list: `left` true for the left side.
+    CompareSidePicked { left: bool, side: CompareSide },
+    CompareDraftChanged { left: bool, text: String },
+    /// Enter in a side's revision field.
+    CompareDraftSubmitted { left: bool },
+    CompareSwap,
+    CompareLoaded { generation: u64, result: Result<Patch, DomainError> },
+    CloseCompare,
     CloseSettings,
     /// Disk write finished. No UI effect; keeps the task from being discarded silently.
     SettingsSaved,
@@ -446,6 +512,18 @@ pub(crate) enum Message {
     PaletteActivate(usize),
 }
 
+/// The terminal, carried across the rebuild that opening another repository does.
+struct KeptTerminal {
+    console: crate::terminal::Console,
+    log: text_editor::Content,
+    open: bool,
+    height: f32,
+    input: String,
+    busy: bool,
+    pid: Option<u32>,
+    run: u64,
+}
+
 /// A worktree create or remove waiting for the user to confirm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorktreePrompt {
@@ -569,12 +647,21 @@ impl GitApp {
             agent_models: Vec::new(),
             agent_models_error: None,
             agent_busy: false,
-            terminal: crate::terminal::Transcript::new(),
+            console: crate::terminal::Console::new(),
             terminal_log: text_editor::Content::new(),
-            // Collapsed by default: it costs ~130 px of History. Ctrl+` / the status bar opens it.
+            // Collapsed by default: it costs History rows. Ctrl+` / the status bar opens it.
             terminal_open: false,
+            terminal_height: TERMINAL_HEIGHT,
+            terminal_drag: None,
             shell_input: String::new(),
             shell_busy: false,
+            shell_cwd: None,
+            shell_pid: None,
+            shell_run: 0,
+            repositories_flyout: false,
+            repository_filter: String::new(),
+            compare: None,
+            compare_generation: 0,
             list_models: unavailable_model_lister(),
             suggest_commit: unavailable_suggester(),
             error: None,
@@ -658,12 +745,22 @@ impl GitApp {
         self.layout != LayoutPreset::Stacked
     }
 
+    /// Width of the pane grid: the window less the Repositories column beside it.
+    /// 0 until the first resize event.
+    fn grid_width(&self) -> f32 {
+        if self.window_width <= 0.0 {
+            return 0.0;
+        }
+        (self.window_width - crate::view::repositories_width(self.settings.repositories_pinned)).max(0.0)
+    }
+
     /// Hold the Explorer at the width the user chose while the window changes size.
     fn keep_files_width(&mut self) {
-        if !self.files_split_is_a_width() || self.window_width <= 0.0 {
+        let grid = self.grid_width();
+        if !self.files_split_is_a_width() || grid <= 0.0 {
             return;
         }
-        let ratio = layout::files_ratio_for(self.files_px, self.window_width);
+        let ratio = layout::files_ratio_for(self.files_px, grid);
         self.ratios[self.layout.index()].files = ratio;
         let split = self
             .split_slots
@@ -676,8 +773,9 @@ impl GitApp {
     }
 
     fn install_layout(&mut self) {
-        if self.files_split_is_a_width() && self.window_width > 0.0 {
-            self.ratios[self.layout.index()].files = layout::files_ratio_for(self.files_px, self.window_width);
+        let grid = self.grid_width();
+        if self.files_split_is_a_width() && grid > 0.0 {
+            self.ratios[self.layout.index()].files = layout::files_ratio_for(self.files_px, grid);
         }
         let base = self.ratios[self.layout.index()];
         let ratios = base.for_hunk_mode(self.hunk_mode);
@@ -1175,8 +1273,20 @@ impl GitApp {
                 let count = self.palette_results().1.len();
                 if let Some(palette) = &mut self.palette {
                     palette.selected = step_selection(palette.selected, step, count);
+                    return Task::none();
+                }
+                // No palette: Up / Down recall commands when the terminal's line has focus.
+                if self.terminal_open {
+                    return when_shell_focused(move |focused| Message::ShellHistory { step, focused });
                 }
                 Task::none()
+            }
+            Message::CtrlCPressed => {
+                if self.shell_busy {
+                    when_shell_focused(|focused| Message::ShellCtrlC { focused })
+                } else {
+                    Task::none()
+                }
             }
             Message::PaletteSubmit => {
                 let selected = self.palette.as_ref().map_or(0, |palette| palette.selected);
@@ -1317,8 +1427,9 @@ impl GitApp {
                         RatioSlot::Files => ratios.files,
                     };
                     self.panes.resize(event.split, clamped);
-                    if slot == RatioSlot::Files && self.files_split_is_a_width() && self.window_width > 0.0 {
-                        self.files_px = clamped * self.window_width;
+                    let grid = self.grid_width();
+                    if slot == RatioSlot::Files && self.files_split_is_a_width() && grid > 0.0 {
+                        self.files_px = clamped * grid;
                     }
                 } else {
                     self.panes.resize(event.split, event.ratio);
@@ -1475,6 +1586,7 @@ impl GitApp {
                 settings.remember_recent(&path);
                 let list_models = Arc::clone(&self.list_models);
                 let suggest_commit = Arc::clone(&self.suggest_commit);
+                let terminal = self.take_terminal();
                 *self = Self::new(
                     Some(repo),
                     Some(path),
@@ -1487,6 +1599,7 @@ impl GitApp {
                 );
                 self.list_models = list_models;
                 self.suggest_commit = suggest_commit;
+                self.restore_terminal(terminal);
                 Task::done(Message::RefreshRepository)
             }
             Message::RepositoryOpened(_, Err(error)) => {
@@ -1595,8 +1708,8 @@ impl GitApp {
             }
             Message::AgentModelsLoaded(result) => {
                 self.agent_busy = false;
-                self.terminal.record(result.exchange);
-                self.sync_terminal_log();
+                let change = self.console.record(result.exchange);
+                self.mirror_console(change);
                 match result.ids {
                     Ok(mut ids) => {
                         self.agent_models_error = None;
@@ -1633,8 +1746,8 @@ impl GitApp {
                 // The agent is a global resource and the transcript a global log, so both
                 // settle even when the originating tab is gone. Session state does not.
                 self.agent_busy = false;
-                self.terminal.record(result.exchange);
-                self.sync_terminal_log();
+                let change = self.console.record(result.exchange);
+                self.mirror_console(change);
                 if self.session_mut_by_path(&path).is_none() {
                     return Task::none();
                 }
@@ -1650,28 +1763,173 @@ impl GitApp {
             }
             Message::ToggleTerminal => {
                 self.terminal_open = !self.terminal_open;
-                Task::none()
+                if self.terminal_open {
+                    focus_shell()
+                } else {
+                    Task::none()
+                }
             }
             Message::TerminalEdited(action) => {
+                // The log is read-only: select, scroll and copy, never type.
                 if !action.is_edit() {
                     self.terminal_log.perform(action);
                 }
                 Task::none()
             }
             Message::ClearTerminal => {
-                self.terminal.clear();
-                self.sync_terminal_log();
-                Task::none()
+                self.console.clear();
+                self.terminal_log = text_editor::Content::new();
+                focus_shell()
             }
             Message::ShellInputChanged(value) => {
                 self.shell_input = value;
                 Task::none()
             }
             Message::ShellSubmit => self.submit_shell(),
-            Message::ShellFinished(_command, output) => {
-                self.shell_busy = false;
-                self.terminal.finish_last(output);
-                self.sync_terminal_log();
+            Message::Shell(run, event) => self.shell_event(run, event),
+            Message::ShellInterrupt => {
+                if let Some(pid) = self.shell_pid.take() {
+                    stop_shell(pid);
+                    self.console_line(LineKind::Error, "^C");
+                }
+                Task::none()
+            }
+            Message::ShellCtrlC { focused } => {
+                if focused && self.shell_busy {
+                    self.update(Message::ShellInterrupt)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ShellHistory { step, focused } => {
+                if focused && !self.shell_busy {
+                    if let Some(line) = self.console.step_history(step) {
+                        self.shell_input = line;
+                        // Put the caret at the end, like a shell recalling a line.
+                        return iced::widget::text_input::move_cursor_to_end(
+                            iced::widget::text_input::Id::new(SHELL_INPUT_ID),
+                        );
+                    }
+                }
+                Task::none()
+            }
+            Message::FocusShell => focus_shell(),
+            Message::TerminalDragStart => {
+                self.terminal_drag = Some((self.cursor.1, self.terminal_height));
+                Task::none()
+            }
+            Message::PointerReleased => {
+                self.terminal_drag = None;
+                Task::none()
+            }
+            Message::ToggleRepositoriesPinned => {
+                self.settings.repositories_pinned = !self.settings.repositories_pinned;
+                self.repositories_flyout = false;
+                // The grid just got wider or narrower; keep the Explorer's pixel width.
+                self.keep_files_width();
+                self.persist_settings(self.settings.clone())
+            }
+            Message::ToggleRepositoriesFlyout => {
+                self.repositories_flyout = !self.repositories_flyout;
+                if self.repositories_flyout {
+                    iced::widget::text_input::focus(iced::widget::text_input::Id::new(
+                        REPOSITORY_FILTER_ID,
+                    ))
+                } else {
+                    Task::none()
+                }
+            }
+            Message::RepositoryFilterChanged(value) => {
+                self.repository_filter = value;
+                Task::none()
+            }
+            Message::ForgetRepository(path) => {
+                if self.settings.forget_recent(&path) {
+                    self.persist_settings(self.settings.clone())
+                } else {
+                    Task::none()
+                }
+            }
+            Message::HeaderMarkChosen(mark) => {
+                self.settings.header_mark = mark;
+                self.persist_settings(self.settings.clone())
+            }
+            Message::OpenCompare { path, against } => self.open_compare(path, against),
+            Message::ComparePathChanged(value) => {
+                if let Some(compare) = &mut self.compare {
+                    compare.path = value;
+                }
+                Task::none()
+            }
+            Message::ComparePathSubmitted => self.run_compare(),
+            Message::ComparePathPicked(path) => {
+                // A conflicted file reopens on yours against theirs; anything else keeps the sides.
+                let conflicted = self
+                    .active_session()
+                    .is_some_and(|session| crate::compare::is_conflicted(session.state.current_status.as_ref(), &path));
+                let was_conflicted = self.compare.as_ref().is_some_and(|compare| {
+                    compare.left == CompareSide::Revision(crate::compare::STAGE_YOURS.to_string())
+                });
+                if conflicted || was_conflicted {
+                    return self.open_compare(Some(path), None);
+                }
+                if let Some(compare) = &mut self.compare {
+                    compare.path = path;
+                }
+                self.run_compare()
+            }
+            Message::CompareSidePicked { left, side } => {
+                if let Some(compare) = &mut self.compare {
+                    if left {
+                        compare.left = side;
+                    } else {
+                        compare.right = side;
+                    }
+                }
+                self.run_compare()
+            }
+            Message::CompareDraftChanged { left, text } => {
+                if let Some(compare) = &mut self.compare {
+                    if left {
+                        compare.left_draft = text;
+                    } else {
+                        compare.right_draft = text;
+                    }
+                }
+                Task::none()
+            }
+            Message::CompareDraftSubmitted { left } => {
+                if let Some(compare) = &mut self.compare {
+                    let draft = if left { &compare.left_draft } else { &compare.right_draft };
+                    let revision = draft.trim().to_string();
+                    if !revision.is_empty() {
+                        let side = CompareSide::Revision(revision);
+                        if left {
+                            compare.left = side;
+                        } else {
+                            compare.right = side;
+                        }
+                    }
+                }
+                self.run_compare()
+            }
+            Message::CompareSwap => {
+                if let Some(compare) = &mut self.compare {
+                    compare.swap();
+                }
+                self.run_compare()
+            }
+            Message::CompareLoaded { generation, result } => {
+                if let Some(compare) = &mut self.compare {
+                    if compare.generation == generation {
+                        compare.loading = false;
+                        compare.result = Some(result.map_err(|error| error_message(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::CloseCompare => {
+                self.compare = None;
                 Task::none()
             }
             Message::CloseSettings => {
@@ -1816,8 +2074,14 @@ impl GitApp {
                 Some(operation) => self.run_history(HistoryAction::Continue(operation)),
                 None => Task::none(),
             },
-            Message::ResolveConflict { path, side } => self.run_history(HistoryAction::Resolve { path, side }),
-            Message::MarkResolved(path) => self.update(Message::EditWorktree(WorktreeEdit::Stage(vec![path]))),
+            Message::ResolveConflict { path, side } => {
+                self.compare = None;
+                self.run_history(HistoryAction::Resolve { path, side })
+            }
+            Message::MarkResolved(path) => {
+                self.compare = None;
+                self.update(Message::EditWorktree(WorktreeEdit::Stage(vec![path])))
+            }
             Message::StashApply(index) => self.run_stash(StashAction::Apply(index)),
             Message::StashPop(index) => self.run_stash(StashAction::Pop(index)),
             Message::AskDropStash => {
@@ -2093,6 +2357,11 @@ impl GitApp {
             }
             Message::CursorMoved { x, y } => {
                 self.cursor = (x, y);
+                if let Some((start_y, start_height)) = self.terminal_drag {
+                    // The edge is on top, so dragging up (smaller y) makes the terminal taller.
+                    self.terminal_height = (start_height + (start_y - y))
+                        .clamp(TERMINAL_MIN_HEIGHT, TERMINAL_MAX_HEIGHT);
+                }
                 Task::none()
             }
             Message::ContextMenuAction(kind) => {
@@ -2647,8 +2916,73 @@ impl GitApp {
         Task::none()
     }
 
-    fn sync_terminal_log(&mut self) {
-        self.terminal_log = text_editor::Content::with_text(&self.terminal.shell_text());
+    /// Lift the terminal out before the window is rebuilt for another repository.
+    fn take_terminal(&mut self) -> KeptTerminal {
+        KeptTerminal {
+            console: std::mem::replace(&mut self.console, crate::terminal::Console::new()),
+            log: std::mem::take(&mut self.terminal_log),
+            open: self.terminal_open,
+            height: self.terminal_height,
+            input: std::mem::take(&mut self.shell_input),
+            busy: self.shell_busy,
+            pid: self.shell_pid,
+            run: self.shell_run,
+        }
+    }
+
+    /// Put the terminal back after a rebuild. The next command runs in the new repository,
+    /// like opening a project in an editor; a command still running keeps streaming here.
+    fn restore_terminal(&mut self, kept: KeptTerminal) {
+        self.console = kept.console;
+        self.terminal_log = kept.log;
+        self.terminal_open = kept.open;
+        self.terminal_height = kept.height;
+        self.shell_input = kept.input;
+        self.shell_busy = kept.busy;
+        self.shell_pid = kept.pid;
+        self.shell_run = kept.run;
+        self.shell_cwd = None;
+    }
+
+    /// Copy a console change into the text editor. Appends go on the end, which also scrolls
+    /// to the newest line; a trim redraws the whole log.
+    fn mirror_console(&mut self, change: ConsoleChange) {
+        use text_editor::{Action, Edit, Motion};
+        match change {
+            ConsoleChange::Trimmed => {
+                self.terminal_log = text_editor::Content::with_text(&self.console.text());
+                self.terminal_log.perform(Action::Move(Motion::DocumentEnd));
+            }
+            ConsoleChange::Appended { text, first } => {
+                let text = if first { text } else { format!("\n{text}") };
+                self.terminal_log.perform(Action::Move(Motion::DocumentEnd));
+                self.terminal_log
+                    .perform(Action::Edit(Edit::Paste(Arc::new(text))));
+            }
+        }
+    }
+
+    fn console_line(&mut self, kind: LineKind, text: &str) {
+        let change = self.console.push(kind, text);
+        self.mirror_console(change);
+    }
+
+    /// Where the next command runs: the folder the last `cd` left, else the active tab.
+    pub(crate) fn shell_folder(&self) -> Option<String> {
+        self.shell_cwd
+            .clone()
+            .or_else(|| self.active_session().map(|session| session.path.clone()))
+    }
+
+    /// The prompt for the folder the next command runs in, with the branch when that folder
+    /// is inside the active tab's worktree.
+    pub(crate) fn shell_prompt(&self) -> String {
+        let folder = self.shell_folder().unwrap_or_default();
+        let branch = self.active_session().and_then(|session| {
+            let inside = folder_is_inside(&folder, &session.path);
+            inside.then(|| crate::view::current_branch(&session.state.branches))
+        });
+        crate::terminal::prompt(&folder, branch.as_deref())
     }
 
     fn submit_shell(&mut self) -> Task<Message> {
@@ -2656,27 +2990,126 @@ impl GitApp {
             return Task::none();
         }
         let command = self.shell_input.trim().to_string();
+        let prompt = self.shell_prompt();
+        self.shell_input.clear();
+        // An empty line prints a fresh prompt, as a shell does.
+        self.console_line(LineKind::Prompt, &format!("{prompt}{command}"));
         if command.is_empty() {
             return Task::none();
         }
-        let Some(session) = self.active_session() else {
-            self.terminal.record(crate::ProviderExchange::new(
-                "shell",
-                "Open a repository before running commands.",
-            ));
-            self.sync_terminal_log();
+        self.console.remember(&command);
+        match crate::terminal::builtin(&command) {
+            Some(crate::terminal::Builtin::Clear) => return self.update(Message::ClearTerminal),
+            Some(crate::terminal::Builtin::Exit) => {
+                self.terminal_open = false;
+                return Task::none();
+            }
+            None => {}
+        }
+        let Some(cwd) = self.shell_folder() else {
+            self.console_line(LineKind::Note, "Open a repository before running commands.");
             return Task::none();
         };
-        let cwd = session.path.clone();
-        self.shell_input.clear();
         self.shell_busy = true;
-        self.terminal.record(crate::ProviderExchange::new(
-            format!("shell · {command}"),
-            "Running…",
-        ));
-        self.sync_terminal_log();
-        Task::perform(shell_in_background(cwd, command), |(command, output)| {
-            Message::ShellFinished(command, output)
+        self.shell_run = self.shell_run.wrapping_add(1);
+        let run = self.shell_run;
+        Task::run(shell_stream(cwd, command), move |event| Message::Shell(run, event))
+    }
+
+    fn shell_event(&mut self, run: u64, event: ShellEvent) -> Task<Message> {
+        if run != self.shell_run {
+            return Task::none();
+        }
+        match event {
+            ShellEvent::Started(pid) => {
+                self.shell_pid = Some(pid);
+                Task::none()
+            }
+            ShellEvent::Line { error, text } => {
+                let kind = if error { LineKind::Error } else { LineKind::Output };
+                self.console_line(kind, &text);
+                Task::none()
+            }
+            ShellEvent::Finished { cwd, code: _ } => {
+                self.shell_busy = false;
+                self.shell_pid = None;
+                if let Some(cwd) = cwd {
+                    self.shell_cwd = Some(cwd);
+                }
+                // The command may have changed the repository (checkout, commit, stash…).
+                // Reload the tab whose worktree it ran in, so the window catches up.
+                let folder = self.shell_folder().unwrap_or_default();
+                let refresh = self
+                    .sessions
+                    .iter()
+                    .find(|session| folder_is_inside(&folder, &session.path))
+                    .map(|session| session.path.clone());
+                let focus = focus_shell();
+                match refresh {
+                    Some(path) => Task::batch([focus, self.update(Message::RefreshSession(path))]),
+                    None => focus,
+                }
+            }
+        }
+    }
+
+    /// Open the Compare window on `path`, or on the selected file, or on the first change.
+    fn open_compare(&mut self, path: Option<String>, against: Option<String>) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        let status = session.state.current_status.as_ref();
+        let selected = match session.selection.as_ref() {
+            Some(crate::selection::Selection::File { path, .. }) => Some(path.clone()),
+            _ => None,
+        };
+        let path = path
+            .or(selected)
+            .or_else(|| crate::compare::changed_paths(status).into_iter().next())
+            .unwrap_or_default();
+        let conflicted = crate::compare::is_conflicted(status, &path);
+        let state = CompareState::open(session.path.clone(), path, conflicted, against);
+        self.close_prompts();
+        self.context_menu = None;
+        self.compare = Some(state);
+        self.run_compare()
+    }
+
+    /// Ask git for the open compare. A newer request makes an older answer stale.
+    fn run_compare(&mut self) -> Task<Message> {
+        let Some(compare) = &self.compare else {
+            return Task::none();
+        };
+        let path = compare.path.trim().to_string();
+        let query = crate::compare::query(&compare.left, &compare.right);
+        let repo = self
+            .sessions
+            .iter()
+            .find(|session| session.path == compare.session_path)
+            .map(|session| session.adapter.clone());
+        self.compare_generation = self.compare_generation.wrapping_add(1);
+        let generation = self.compare_generation;
+        let Some(compare) = &mut self.compare else {
+            return Task::none();
+        };
+        compare.generation = generation;
+        let (Some(repo), Some((left, right, reversed)), false) = (repo, query, path.is_empty()) else {
+            compare.loading = false;
+            compare.result = None;
+            return Task::none();
+        };
+        compare.loading = true;
+        Task::perform(compare_in_background(repo, path, left, right), move |result| {
+            Message::CompareLoaded {
+                generation,
+                result: result.map(|patch| {
+                    if reversed {
+                        crate::compare::reverse(patch)
+                    } else {
+                        patch
+                    }
+                }),
+            }
         })
     }
 
@@ -3079,6 +3512,9 @@ impl GitApp {
             }
             Kind::StashFiles(paths) => self.update(Message::AskStash(paths)),
             Kind::IgnoreFiles(paths) => self.run_ignore_paths(paths),
+            Kind::Untrack { paths, ignore } => {
+                self.update(Message::EditWorktree(WorktreeEdit::Untrack { paths, ignore }))
+            }
             Kind::ResolveConflict { path, side } => self.update(Message::ResolveConflict { path, side }),
             Kind::MarkResolved(path) => self.update(Message::MarkResolved(path)),
             Kind::CheckoutBranch { name } => self.update(Message::CheckoutBranch(name)),
@@ -3237,6 +3673,9 @@ impl GitApp {
                 })
             }
             iced::Event::Window(iced::window::Event::Resized(size)) => Some(Message::WindowResized(size.width)),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Message::PointerReleased)
+            }
             iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
                 Some(Message::ModifiersChanged(modifiers))
             }
@@ -3265,6 +3704,13 @@ impl GitApp {
 
     fn handle_escape(&mut self) -> Task<Message> {
         if self.palette.take().is_some() {
+            return Task::none();
+        }
+        if self.compare.take().is_some() {
+            return Task::none();
+        }
+        if self.repositories_flyout {
+            self.repositories_flyout = false;
             return Task::none();
         }
         if self.confirm_detach.is_some() {
@@ -3367,6 +3813,34 @@ fn shortcut_message(
 /// Two clicks on the same branch within this window are a double-click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// Put the caret on the terminal's command line.
+fn focus_shell() -> Task<Message> {
+    iced::widget::text_input::focus(iced::widget::text_input::Id::new(SHELL_INPUT_ID))
+}
+
+/// Ask which widget has focus, then `to_message(true)` when it is the command line.
+/// Nothing focused sends nothing.
+fn when_shell_focused(to_message: impl Fn(bool) -> Message + Send + 'static) -> Task<Message> {
+    let shell = iced::advanced::widget::Id::from(iced::widget::text_input::Id::new(SHELL_INPUT_ID));
+    iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::find_focused())
+        .map(move |focused| to_message(focused == shell))
+}
+
+/// True when `folder` is `root` or below it. Separators and (on Windows) case are ignored.
+fn folder_is_inside(folder: &str, root: &str) -> bool {
+    fn key(path: &str) -> String {
+        let unified = path.trim().replace('\\', "/");
+        let trimmed = unified.trim_end_matches('/').to_string();
+        if cfg!(windows) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed
+        }
+    }
+    let (folder, root) = (key(folder), key(root));
+    !root.is_empty() && (folder == root || folder.starts_with(&format!("{root}/")))
+}
+
 /// Reveal `path` in the platform file manager. Fire and forget: a missing tool is not an error.
 fn open_in_file_manager(path: &std::path::Path) {
         #[cfg(windows)]
@@ -3459,6 +3933,10 @@ fn typing_shortcut(
         Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("k") => {
             Some(Message::FocusHistorySearch)
         }
+        Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("c") => {
+            Some(Message::CtrlCPressed)
+        }
+        Key::Character(c) if ctrl && c.as_str() == "`" => Some(Message::ToggleTerminal),
         _ => None,
     }
 }
@@ -5976,17 +6454,117 @@ mod tests {
 
     #[test]
     fn the_explorer_keeps_its_width_when_the_window_narrows() {
+        // Ratios are of the pane grid, which is the window less the Repositories column.
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         let _ = app.update(Message::WindowResized(1600.0));
         let wide = app.ratios[app.layout.index()].files;
+        let wide_grid = app.grid_width();
         let _ = app.update(Message::WindowResized(1100.0));
         let narrow = app.ratios[app.layout.index()].files;
-        assert!((wide * 1600.0 - layout::FILES_PX).abs() < 1.0);
-        assert!((narrow * 1100.0 - layout::FILES_PX).abs() < 1.0);
+        let narrow_grid = app.grid_width();
+        assert!((wide * wide_grid - layout::FILES_PX).abs() < 1.0);
+        assert!((narrow * narrow_grid - layout::FILES_PX).abs() < 1.0);
         let files = mapped_slot(&app, RatioSlot::Files);
         let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent { split: files, ratio: 0.30 }));
+        let dragged = 0.30 * narrow_grid;
         let _ = app.update(Message::WindowResized(1000.0));
-        assert!((app.ratios[app.layout.index()].files * 1000.0 - 330.0).abs() < 1.0, "keeps the dragged 330 px");
+        let grid = app.grid_width();
+        assert!((app.ratios[app.layout.index()].files * grid - dragged).abs() < 1.0, "keeps the dragged width");
+    }
+
+    #[test]
+    fn pinning_the_repositories_column_keeps_the_explorer_width() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        assert!(app.settings.repositories_pinned, "pinned by default");
+        let _ = app.update(Message::WindowResized(1400.0));
+        let pinned_grid = app.grid_width();
+        let _ = app.update(Message::ToggleRepositoriesPinned);
+        let rail_grid = app.grid_width();
+        assert!(rail_grid > pinned_grid, "the rail is narrower than the column");
+        assert!((app.ratios[app.layout.index()].files * rail_grid - layout::FILES_PX).abs() < 1.0);
+    }
+
+    #[test]
+    fn forgetting_a_repository_drops_it_from_the_list() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.settings.recent_repositories = vec![r"D:\a".to_string(), r"D:\b".to_string()];
+        let _ = app.update(Message::ForgetRepository(r"D:\a\".to_string()));
+        assert_eq!(app.settings.recent_repositories, vec![r"D:\b".to_string()]);
+    }
+
+    #[test]
+    fn a_conflicted_file_opens_compare_on_yours_against_theirs() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["plain.rs".into()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec!["clash.rs".into()],
+        });
+        let _ = app.update(Message::OpenCompare { path: None, against: None });
+        let compare = app.compare.as_ref().expect("open");
+        assert_eq!(compare.path, "clash.rs", "conflicts come first");
+        assert_eq!(compare.left, CompareSide::Revision(crate::compare::STAGE_YOURS.into()));
+        assert!(compare.loading);
+
+        let _ = app.update(Message::ComparePathPicked("plain.rs".into()));
+        let compare = app.compare.as_ref().expect("still open");
+        assert_eq!(compare.left, CompareSide::Revision(crate::compare::HEAD.into()));
+        assert_eq!(compare.right, CompareSide::WorkingTree);
+
+        let _ = app.update(Message::Escape);
+        assert!(app.compare.is_none(), "Escape closes it");
+    }
+
+    #[test]
+    fn a_stale_compare_answer_is_dropped() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::OpenCompare { path: Some("a.rs".into()), against: Some("main".into()) });
+        let first = app.compare.as_ref().expect("open").generation;
+        let _ = app.update(Message::CompareSwap);
+        let patch = core_domain::Patch { path: "a.rs".into(), hunks: vec![], binary: false };
+        let _ = app.update(Message::CompareLoaded { generation: first, result: Ok(patch) });
+        let compare = app.compare.as_ref().expect("open");
+        assert!(compare.loading && compare.result.is_none(), "the older answer must not land");
+    }
+
+    #[test]
+    fn typed_commands_echo_with_a_prompt_and_builtins_stay_local() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.terminal_open = true;
+        let _ = app.update(Message::ShellInputChanged("cls".into()));
+        let _ = app.update(Message::ShellSubmit);
+        assert!(app.console.text().is_empty(), "cls clears, the echo included");
+        assert!(!app.shell_busy);
+        let _ = app.update(Message::ShellInputChanged("exit".into()));
+        let _ = app.update(Message::ShellSubmit);
+        assert!(!app.terminal_open, "exit folds the terminal");
+        assert!(app.console.text().contains("exit"));
+    }
+
+    #[test]
+    fn output_of_a_stopped_command_cannot_land_in_the_next() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.shell_run = 2;
+        app.shell_busy = true;
+        let _ = app.update(Message::Shell(1, ShellEvent::Line { error: false, text: "old".into() }));
+        assert!(!app.console.text().contains("old"));
+        let _ = app.update(Message::Shell(2, ShellEvent::Line { error: true, text: "fatal".into() }));
+        let _ = app.update(Message::Shell(2, ShellEvent::Finished { cwd: Some(r"D:\elsewhere".into()), code: Some(1) }));
+        assert!(app.console.text().contains("fatal"));
+        assert!(!app.shell_busy);
+        assert_eq!(app.shell_folder().as_deref(), Some(r"D:\elsewhere"), "cd carries over");
+    }
+
+    #[test]
+    fn a_folder_is_inside_its_root_and_not_a_sibling() {
+        assert!(folder_is_inside(r"D:\Repos\x\src", r"D:\Repos\x"));
+        assert!(folder_is_inside("D:/Repos/x/", r"D:\Repos\x"));
+        assert!(!folder_is_inside(r"D:\Repos\xy", r"D:\Repos\x"));
     }
 
     fn dirty_app() -> GitApp {

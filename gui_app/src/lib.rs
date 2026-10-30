@@ -5,6 +5,7 @@ mod app;
 mod appearance;
 mod changes;
 mod commit_graph;
+mod compare;
 mod context_menu;
 mod icons;
 mod dates;

@@ -47,6 +47,10 @@ pub trait GitRepository {
     fn rebase_onto(&self, name: &str) -> Result<(), DomainError>;
     fn stage_paths(&self, paths: &[String]) -> Result<(), DomainError>;
     fn unstage_paths(&self, paths: &[String]) -> Result<(), DomainError>;
+    /// `git rm --cached -r -- <paths>`: stop tracking, keep the files on disk. The next commit
+    /// records the removal and the files show as unversioned. Git refuses a path whose staged
+    /// content differs from both HEAD and the file, so no staged work is lost.
+    fn untrack_paths(&self, paths: &[String]) -> Result<(), DomainError>;
     fn commit(&self, message: &str) -> Result<(), DomainError>;
     /// `git fetch` of the default remote, using the repository's own credential helper and SSH config.
     fn fetch(&self) -> Result<(), DomainError>;
@@ -88,6 +92,10 @@ pub trait GitRepository {
     fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
     /// Keep one side of a conflicted file (`git checkout --ours|--theirs`) and stage it.
     fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError>;
+    /// Diff of one path between two versions, both in working-tree form. `left` is a revision
+    /// (branch, tag, commit, or `:2` / `:3` for the yours / theirs stage of a conflict);
+    /// `right` is another, or `None` for the file on disk. A side without the file reads as empty.
+    fn compare_file(&self, path: &str, left: &str, right: Option<&str>) -> Result<Patch, DomainError>;
 }
 
 pub trait CredentialStore {

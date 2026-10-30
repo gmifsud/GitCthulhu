@@ -1035,6 +1035,68 @@ fn commit_patch_is_the_diff_of_that_commit() {
 }
 
 #[test]
+fn untrack_keeps_the_file_on_disk_and_stages_its_removal() {
+    let fixture = TestRepo::new();
+    let files = [("keep.txt", "k\n"), ("secret.env", "token\n")];
+    fixture.commit("first", &files, 0);
+    fixture.stage_and_write(&files);
+    let adapter = fixture.adapter();
+
+    adapter.untrack_paths(&["secret.env".to_string()]).expect("untrack");
+
+    let status = adapter.status().expect("status");
+    assert!(status.staged_files.iter().any(|path| path == "secret.env"), "removal staged: {status:?}");
+    assert!(status.untracked_files.iter().any(|path| path == "secret.env"), "now unversioned: {status:?}");
+    assert!(fixture.workdir().join("secret.env").exists(), "the file stays on disk");
+    assert!(adapter.untrack_paths(&["../outside".to_string()]).is_err());
+}
+
+#[test]
+fn compare_file_diffs_the_disk_against_a_revision_and_two_revisions() {
+    let fixture = TestRepo::new();
+    let first = fixture.commit("first", &[("a.txt", "one\n")], 0);
+    let second = fixture.commit("second", &[("a.txt", "one\ntwo\n")], 1);
+    fixture.write_file("a.txt", "one\ntwo\nthree\n");
+    let adapter = fixture.adapter();
+    let added = |patch: &core_domain::Patch| -> Vec<String> {
+        patch
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .filter(|line| line.kind == core_domain::DiffLineKind::Added)
+            .map(|line| line.text.clone())
+            .collect()
+    };
+
+    let disk = adapter
+        .compare_file("a.txt", &first.to_string(), None)
+        .expect("disk vs first");
+    assert_eq!(disk.path, "a.txt");
+    assert_eq!(added(&disk), vec!["two", "three"]);
+
+    let revisions = adapter
+        .compare_file("a.txt", &first.to_string(), Some(&second.to_string()))
+        .expect("first vs second");
+    assert_eq!(added(&revisions), vec!["two"]);
+
+    let same = adapter
+        .compare_file("a.txt", &second.to_string(), Some(&second.to_string()))
+        .expect("same");
+    assert!(same.hunks.is_empty());
+
+    // A file the revision lacks reads as empty, so every line is added.
+    fixture.write_file("new.txt", "fresh\n");
+    let missing = adapter
+        .compare_file("new.txt", &first.to_string(), None)
+        .expect("missing side");
+    assert_eq!(added(&missing), vec!["fresh"]);
+
+    assert!(adapter.compare_file("a.txt", "no-such-branch", None).is_err());
+    assert!(adapter.compare_file("a.txt", "--output=x", None).is_err());
+    assert!(adapter.compare_file("a.txt", "HEAD..HEAD~1", None).is_err());
+}
+
+#[test]
 fn file_patch_stage_hunk_and_discard_hunk_round_trip() {
     let fixture = TestRepo::new();
     fixture.commit("first", &[("a.txt", "one\n")], 0);
