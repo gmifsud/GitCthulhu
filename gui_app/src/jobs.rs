@@ -25,6 +25,9 @@ pub(crate) enum PatchQuery {
 pub(crate) enum WorktreeEdit {
     Stage(Vec<String>),
     Unstage(Vec<String>),
+    /// Stop tracking these paths (files stay on disk), then append `ignore` to `.gitignore`
+    /// when it is not empty, so they stay out of the next `git add .`.
+    Untrack { paths: Vec<String>, ignore: Vec<String> },
     Commit(String),
 }
 
@@ -73,64 +76,217 @@ fn in_background<T: Send + 'static>(
     async move { receiver.await.unwrap_or_else(|_| interrupted()) }
 }
 
-/// Run a shell command in `cwd` and return the printed transcript body.
-pub(crate) fn shell_in_background(
-    cwd: String,
-    command: String,
-) -> impl Future<Output = (String, String)> {
-    in_background(
-        move || {
-            let output = run_shell_command(&cwd, &command);
-            (command, output)
-        },
-        || {
-            (
-                String::new(),
-                "command was interrupted before it finished.".to_string(),
-            )
-        },
-    )
+/// What a running shell command reports, in order: `Started` once, `Line` for each line as it
+/// is printed, then `Finished` once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShellEvent {
+    /// The process id, so Stop / Ctrl+C can end it.
+    Started(u32),
+    Line { error: bool, text: String },
+    /// `cwd` is the folder the command left the shell in (after `cd`), when it got that far.
+    Finished { cwd: Option<String>, code: Option<i32> },
 }
 
-fn run_shell_command(cwd: &str, command: &str) -> String {
-    #[cfg(windows)]
-    let result = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", command])
-        .current_dir(cwd)
-        .output();
-    #[cfg(not(windows))]
-    let result = std::process::Command::new("sh")
-        .args(["-lc", command])
-        .current_dir(cwd)
-        .output();
+/// Printed by the wrapper after the command so the next command starts where this one ended.
+const CWD_MARK: &str = "\u{1e}GITCTHULHU_CWD\u{1e}";
 
-    match result {
-        Ok(output) => {
-            let mut text = String::new();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.is_empty() {
-                text.push_str(stdout.trim_end());
-            }
-            if !stderr.is_empty() {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(stderr.trim_end());
-            }
-            if text.is_empty() {
-                if output.status.success() {
-                    text.push_str("(no output)");
-                } else {
-                    text.push_str(&format!("exit {}", output.status));
-                }
-            } else if !output.status.success() {
-                text.push_str(&format!("\nexit {}", output.status));
-            }
-            text
+/// Run `command` in `cwd` through the platform shell, streaming its output line by line.
+/// Each command is its own process; only the folder carries over, like `cd` in a real shell.
+pub(crate) fn shell_stream(
+    cwd: String,
+    command: String,
+) -> impl iced::futures::Stream<Item = ShellEvent> {
+    let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+    thread::spawn(move || run_shell(&cwd, &command, sender));
+    receiver
+}
+
+fn run_shell(
+    cwd: &str,
+    command: &str,
+    sender: iced::futures::channel::mpsc::UnboundedSender<ShellEvent>,
+) {
+    use std::io::BufRead;
+    use std::process::Stdio;
+
+    let send = |event: ShellEvent| {
+        let _ = sender.unbounded_send(event);
+    };
+    let mut child = match shell_command(cwd, command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            send(ShellEvent::Line {
+                error: true,
+                text: format!("could not start the shell: {error}"),
+            });
+            send(ShellEvent::Finished { cwd: None, code: None });
+            return;
         }
-        Err(error) => format!("failed to run command: {error}"),
+    };
+    send(ShellEvent::Started(child.id()));
+
+    let errors = child.stderr.take().map(|pipe| {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            for line in std::io::BufReader::new(pipe).split(b'\n').map_while(Result::ok) {
+                let _ = sender.unbounded_send(ShellEvent::Line {
+                    error: true,
+                    text: String::from_utf8_lossy(&line).trim_end_matches('\r').to_string(),
+                });
+            }
+        })
+    });
+    let mut final_cwd = None;
+    if let Some(pipe) = child.stdout.take() {
+        for line in std::io::BufReader::new(pipe).split(b'\n').map_while(Result::ok) {
+            let text = String::from_utf8_lossy(&line).trim_end_matches('\r').to_string();
+            // The mark can follow output that did not end in a newline.
+            match text.split_once(CWD_MARK) {
+                Some((before, folder)) => {
+                    if !before.is_empty() {
+                        send(ShellEvent::Line { error: false, text: before.to_string() });
+                    }
+                    final_cwd = Some(folder.trim().to_string()).filter(|folder| !folder.is_empty());
+                }
+                None => send(ShellEvent::Line { error: false, text }),
+            }
+        }
     }
+    if let Some(errors) = errors {
+        let _ = errors.join();
+    }
+    let code = child.wait().ok().and_then(|status| status.code());
+    send(ShellEvent::Finished { cwd: final_cwd, code });
+}
+
+/// The shell process for one command. PowerShell 7 (`pwsh`) when installed, else Windows
+/// PowerShell; `sh` elsewhere. The script goes in encoded, so quotes in it need no escaping.
+fn shell_command(cwd: &str, command: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let script = format!(
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\
+             $OutputEncoding = [System.Text.Encoding]::UTF8\n\
+             Set-Location -LiteralPath '{folder}'\n\
+             try {{\n{command}\n}} finally {{\n[Console]::Out.WriteLine('{mark}' + (Get-Location).ProviderPath)\n}}",
+            folder = cwd.replace('\'', "''"),
+            mark = CWD_MARK,
+        );
+        let mut process = std::process::Command::new(powershell_program());
+        process
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"])
+            .arg(encode_powershell(&script))
+            .current_dir(cwd)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .creation_flags(CREATE_NO_WINDOW);
+        process
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = std::process::Command::new("sh");
+        process
+            .arg("-c")
+            .arg(format!("cd -- \"$1\" || exit; eval \"$2\"; status=$?; printf '{CWD_MARK}%s\\n' \"$PWD\"; exit $status"))
+            .arg("sh")
+            .arg(cwd)
+            .arg(command)
+            .current_dir(cwd)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        process
+    }
+}
+
+/// The shell commands run in, for the terminal's header.
+pub(crate) fn shell_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        powershell_program()
+    }
+    #[cfg(not(windows))]
+    {
+        "sh"
+    }
+}
+
+/// `pwsh` when it is on PATH, checked once.
+#[cfg(windows)]
+fn powershell_program() -> &'static str {
+    use std::sync::OnceLock;
+    static PROGRAM: OnceLock<&'static str> = OnceLock::new();
+    PROGRAM.get_or_init(|| {
+        let found = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|folder| folder.join("pwsh.exe").is_file())
+        });
+        if found { "pwsh" } else { "powershell" }
+    })
+}
+
+/// PowerShell's `-EncodedCommand`: base64 of the script in UTF-16LE.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn encode_powershell(script: &str) -> String {
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64(&bytes)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for (index, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if index <= chunk.len() {
+                out.push(ALPHABET[((n >> shift) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// End a running shell command and everything it started (git, a pager…).
+pub(crate) fn stop_shell(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .spawn();
+    }
+}
+
+/// Diff of one file between two versions, for the Compare window.
+pub(crate) fn compare_in_background(
+    repo: SharedRepository,
+    path: String,
+    left: String,
+    right: Option<String>,
+) -> impl Future<Output = Result<Patch, DomainError>> {
+    in_background(
+        move || repo.compare_file(&path, &left, right.as_deref()),
+        || Err(DomainError::Unknown("compare was interrupted".to_string())),
+    )
 }
 
 pub(crate) fn list_models_in_background(
@@ -280,6 +436,14 @@ pub(crate) fn edit_in_background(
         move || match &edit {
             WorktreeEdit::Stage(paths) => repo.stage_paths(paths),
             WorktreeEdit::Unstage(paths) => repo.unstage_paths(paths),
+            WorktreeEdit::Untrack { paths, ignore } => {
+                repo.untrack_paths(paths)?;
+                if ignore.is_empty() {
+                    Ok(())
+                } else {
+                    repo.append_gitignore(ignore)
+                }
+            }
             WorktreeEdit::Commit(message) => repo.commit(message),
         },
         || {
@@ -607,6 +771,63 @@ mod tests {
     use core_domain::{Branch, Commit, DomainError};
     use test_support::FakeGitRepository;
 
+    #[test]
+    fn base64_pads_like_the_standard_alphabet() {
+        assert_eq!(base64(b"Man"), "TWFu");
+        assert_eq!(base64(b"Ma"), "TWE=");
+        assert_eq!(base64(b"M"), "TQ==");
+        assert_eq!(base64(b""), "");
+    }
+
+    /// Every event of one command, in order.
+    fn run_to_end(cwd: &str, command: &str) -> Vec<ShellEvent> {
+        let (sender, mut receiver) = iced::futures::channel::mpsc::unbounded();
+        run_shell(cwd, command, sender);
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn a_shell_command_streams_its_lines_and_reports_where_cd_left_it() {
+        let root = std::env::temp_dir().join(format!("gitcthulhu-shell-{}", std::process::id()));
+        let inner = root.join("inner dir");
+        std::fs::create_dir_all(&inner).expect("folders");
+        let events = run_to_end(&inner.to_string_lossy(), "echo hello; cd ..");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(matches!(events.first(), Some(ShellEvent::Started(_))), "{events:?}");
+        assert!(
+            events.contains(&ShellEvent::Line { error: false, text: "hello".into() }),
+            "{events:?}"
+        );
+        let Some(ShellEvent::Finished { cwd: Some(cwd), .. }) = events.last() else {
+            panic!("no folder reported: {events:?}");
+        };
+        assert!(
+            core_domain::same_repository_path(cwd, &root.to_string_lossy()),
+            "{cwd} vs {}",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn standard_error_is_flagged() {
+        let folder = std::env::temp_dir();
+        let command = if cfg!(windows) {
+            "[Console]::Error.WriteLine('broken')"
+        } else {
+            "echo broken >&2"
+        };
+        let events = run_to_end(&folder.to_string_lossy(), command);
+        assert!(
+            events.contains(&ShellEvent::Line { error: true, text: "broken".into() }),
+            "{events:?}"
+        );
+    }
+
     fn commit(id: &str) -> Commit {
         Commit {
             id: id.to_string(),
@@ -715,6 +936,9 @@ mod tests {
         fn unstage_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
+        fn untrack_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
         fn commit(&self, _message: &str) -> Result<(), DomainError> {
             unreachable!("not used by load_repository")
         }
@@ -756,6 +980,9 @@ mod tests {
             unreachable!("not used by load_repository")
         }
         fn resolve_conflict(&self, _path: &str, _side: core_domain::ConflictSide) -> Result<(), DomainError> {
+            unreachable!("not used by load_repository")
+        }
+        fn compare_file(&self, _path: &str, _left: &str, _right: Option<&str>) -> Result<Patch, DomainError> {
             unreachable!("not used by load_repository")
         }
         fn stash_push_paths(&self, _message: &str, _paths: &[String]) -> Result<(), DomainError> {

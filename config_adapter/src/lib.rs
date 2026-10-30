@@ -1,7 +1,7 @@
 //! config_adapter
 //! Implements the ConfigStore port for persisting user-defined settings using confy.
 
-use core_domain::{AppSettings, ConfigStore, DomainError, WorktreeTabRetention};
+use core_domain::{AppSettings, ConfigStore, DomainError, HeaderMark, WorktreeTabRetention};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +27,16 @@ struct AppSettingsDto {
     /// Absent in settings written before the recent list existed.
     #[serde(default)]
     pub recent_repositories: Vec<String>,
+    /// Absent in settings written before the header mark could be chosen.
+    #[serde(default)]
+    pub header_mark: HeaderMark,
+    /// Absent in settings written before the Repositories column existed.
+    #[serde(default = "default_repositories_pinned")]
+    pub repositories_pinned: bool,
+}
+
+fn default_repositories_pinned() -> bool {
+    true
 }
 
 fn default_ui_font() -> String {
@@ -53,6 +63,8 @@ impl Default for AppSettingsDto {
             agent_model: default_agent_model(),
             worktree_tab_retention: WorktreeTabRetention::default(),
             recent_repositories: Vec::new(),
+            header_mark: HeaderMark::default(),
+            repositories_pinned: default_repositories_pinned(),
         }
     }
 }
@@ -69,6 +81,8 @@ impl From<AppSettingsDto> for AppSettings {
             agent_model: dto.agent_model,
             worktree_tab_retention: dto.worktree_tab_retention,
             recent_repositories: dto.recent_repositories,
+            header_mark: dto.header_mark,
+            repositories_pinned: dto.repositories_pinned,
         }
     }
 }
@@ -85,6 +99,8 @@ impl From<&AppSettings> for AppSettingsDto {
             agent_model: domain.agent_model.clone(),
             worktree_tab_retention: domain.worktree_tab_retention,
             recent_repositories: domain.recent_repositories.clone(),
+            header_mark: domain.header_mark,
+            repositories_pinned: domain.repositories_pinned,
         }
     }
 }

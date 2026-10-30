@@ -219,6 +219,33 @@ pub enum WorktreeTabRetention {
     PathOnly,
 }
 
+/// How the app name is drawn at the left of the header. Chosen under Appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderMark {
+    /// "Git" muted, "Cthulhu" in the accent colour.
+    #[default]
+    TwoTone,
+    /// An accent badge with a tentacle-ish "G", then the name.
+    Badge,
+    /// Spaced small capitals in a muted colour.
+    SmallCaps,
+    /// A shell prompt: `❯ gitcthulhu`.
+    Prompt,
+    /// The badge alone, no name.
+    BadgeOnly,
+}
+
+impl HeaderMark {
+    pub const ALL: [HeaderMark; 5] = [
+        HeaderMark::TwoTone,
+        HeaderMark::Badge,
+        HeaderMark::SmallCaps,
+        HeaderMark::Prompt,
+        HeaderMark::BadgeOnly,
+    ];
+}
+
 /// User-defined settings for the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
@@ -239,6 +266,10 @@ pub struct AppSettings {
     /// Repositories opened with Open… or from the command line, newest first.
     /// At most [`Self::MAX_RECENT_REPOSITORIES`]; linked worktree tabs are never added.
     pub recent_repositories: Vec<String>,
+    /// How the header draws the app name.
+    pub header_mark: HeaderMark,
+    /// The Repositories column stays open beside the Explorer (true) or folds to a rail.
+    pub repositories_pinned: bool,
 }
 
 impl AppSettings {
@@ -247,7 +278,7 @@ impl AppSettings {
     pub const MIN_UI_SIZE: u8 = 12;
     pub const MAX_UI_SIZE: u8 = 18;
     pub const DEFAULT_AGENT_MODEL: &'static str = "kilo-auto/free";
-    pub const MAX_RECENT_REPOSITORIES: usize = 12;
+    pub const MAX_RECENT_REPOSITORIES: usize = 24;
 
     /// Move `path` to the front of [`Self::recent_repositories`], dropping an earlier entry
     /// for the same folder and the oldest entries beyond the cap. Blank paths are ignored.
@@ -264,6 +295,14 @@ impl AppSettings {
         self.recent_repositories
             .truncate(Self::MAX_RECENT_REPOSITORIES);
         before != self.recent_repositories
+    }
+
+    /// Drop `path` from [`Self::recent_repositories`]. Returns true when it was there.
+    pub fn forget_recent(&mut self, path: &str) -> bool {
+        let before = self.recent_repositories.len();
+        self.recent_repositories
+            .retain(|known| !same_repository_path(known, path));
+        before != self.recent_repositories.len()
     }
 }
 
@@ -295,6 +334,8 @@ impl Default for AppSettings {
             agent_model: Self::DEFAULT_AGENT_MODEL.to_string(),
             recent_repositories: Vec::new(),
             worktree_tab_retention: WorktreeTabRetention::default(),
+            header_mark: HeaderMark::default(),
+            repositories_pinned: true,
         }
     }
 }
@@ -335,6 +376,16 @@ mod tests {
             settings.recent_repositories[0],
             format!("/r/{}", AppSettings::MAX_RECENT_REPOSITORIES + 2)
         );
+    }
+
+    #[test]
+    fn forget_recent_drops_the_folder_whatever_its_spelling() {
+        let mut settings = AppSettings::default();
+        settings.remember_recent("/r/a");
+        settings.remember_recent("/r/b");
+        assert!(settings.forget_recent("/r/a/"));
+        assert_eq!(settings.recent_repositories, vec!["/r/b"]);
+        assert!(!settings.forget_recent("/r/a"));
     }
 
     #[test]

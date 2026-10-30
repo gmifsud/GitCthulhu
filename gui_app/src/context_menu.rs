@@ -50,6 +50,8 @@ pub(crate) enum ContextActionKind {
     DiscardFiles(Vec<crate::changes::MarkedFile>),
     StashFiles(Vec<String>),
     IgnoreFiles(Vec<String>),
+    /// `git rm --cached` these paths (they stay on disk), then add `ignore` to `.gitignore`.
+    Untrack { paths: Vec<String>, ignore: Vec<String> },
     ResolveConflict { path: String, side: core_domain::ConflictSide },
     MarkResolved(String),
     /// Stage (or unstage when `unstage`) this path — a file or directory prefix.
@@ -321,8 +323,21 @@ fn selection_actions(files: &[crate::changes::MarkedFile], loading: bool) -> Vec
             idle,
             ContextActionKind::DiscardFiles(files.to_vec()),
         ),
-        action(format!("{}…", files_label("Stash", tracked.len())), idle && !tracked.is_empty(), ContextActionKind::StashFiles(tracked)),
+        action(format!("{}…", files_label("Stash", tracked.len())), idle && !tracked.is_empty(), ContextActionKind::StashFiles(tracked.clone())),
         action(files_label("Ignore", untracked.len()), idle && !untracked.is_empty(), ContextActionKind::IgnoreFiles(untracked)),
+        action(
+            format!("{} (keep on disk)", files_label("Untrack", tracked.len())),
+            idle && !tracked.is_empty(),
+            ContextActionKind::Untrack { paths: tracked.clone(), ignore: Vec::new() },
+        ),
+        action(
+            format!("{} and ignore", files_label("Untrack", tracked.len())),
+            idle && !tracked.is_empty(),
+            ContextActionKind::Untrack {
+                ignore: tracked.iter().map(|path| gitignore_pattern(path, false)).collect(),
+                paths: tracked,
+            },
+        ),
         action("Copy paths", true, ContextActionKind::CopyText { text: all.join("\n") }),
     ]
 }
@@ -408,6 +423,23 @@ fn change_path_actions(
             enabled: idle && place != FileDisposition::Untracked,
             kind: ContextActionKind::StashChange {
                 path: path.to_string(),
+            },
+        },
+        // Untracking needs something tracked: unversioned rows show it greyed out.
+        ContextAction {
+            label: if is_dir { "Untrack folder (keep on disk)" } else { "Untrack file (keep on disk)" }.into(),
+            enabled: idle && place != FileDisposition::Untracked,
+            kind: ContextActionKind::Untrack {
+                paths: vec![display.to_string()],
+                ignore: Vec::new(),
+            },
+        },
+        ContextAction {
+            label: if is_dir { "Untrack folder and ignore" } else { "Untrack file and ignore" }.into(),
+            enabled: idle && place != FileDisposition::Untracked,
+            kind: ContextActionKind::Untrack {
+                paths: vec![display.to_string()],
+                ignore: vec![gitignore_pattern(path, is_dir)],
             },
         },
         ContextAction {
@@ -588,20 +620,41 @@ mod tests {
     }
 
     #[test]
-    fn folder_menu_offers_stage_discard_ignore_stash_open() {
+    fn folder_menu_offers_stage_discard_ignore_stash_untrack_open() {
         let target = ContextTarget::ChangePath {
             path: "scripts".into(),
             place: FileDisposition::Unstaged,
             is_dir: true,
         };
         let actions = context_actions(&target, &[], &[], None, false);
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 7);
+        assert_eq!(actions[6].label, "Open folder", "open stays last");
         assert_eq!(actions[0].label, "Stage folder");
         assert!(actions[2].label.contains("scripts/"));
         assert!(matches!(
             &actions[2].kind,
             ContextActionKind::IgnoreChange { is_dir: true, .. }
         ));
+    }
+
+    #[test]
+    fn untrack_is_offered_for_tracked_rows_only() {
+        let row = |place| ContextTarget::ChangePath { path: "bin/".into(), place, is_dir: true };
+        let untrack = |actions: Vec<ContextAction>| {
+            actions
+                .into_iter()
+                .filter(|action| matches!(action.kind, ContextActionKind::Untrack { .. }))
+                .collect::<Vec<_>>()
+        };
+        let tracked = untrack(context_actions(&row(FileDisposition::Unstaged), &[], &[], None, false));
+        assert_eq!(tracked.len(), 2);
+        assert!(tracked.iter().all(|action| action.enabled));
+        assert!(matches!(
+            &tracked[1].kind,
+            ContextActionKind::Untrack { paths, ignore } if paths == &vec!["bin".to_string()] && ignore == &vec!["bin/".to_string()]
+        ));
+        let unversioned = untrack(context_actions(&row(FileDisposition::Untracked), &[], &[], None, false));
+        assert!(unversioned.iter().all(|action| !action.enabled));
     }
 
     #[test]

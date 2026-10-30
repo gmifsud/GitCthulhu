@@ -207,6 +207,13 @@ fn conflict_section<'a>(app: &'a GitApp, status: &core_domain::RepoStatus, token
             Space::with_width(Length::Fixed(INDENT)),
             glyph(Icon::File, reading.size, tokens.vcs_conflicted, &reading),
             container(label(path, tokens.vcs_conflicted, reading)).width(Length::Fill).clip(true),
+            super::chrome::accent_button(
+                "Resolve…",
+                Message::OpenCompare { path: Some(path.clone()), against: None },
+                !busy,
+                tokens,
+                reading,
+            ),
             super::chrome::command_button("Yours", side(ConflictSide::Yours), !busy, tokens, reading),
             super::chrome::command_button("Theirs", side(ConflictSide::Theirs), !busy, tokens, reading),
             super::chrome::command_button("Resolved", Message::MarkResolved(path.clone()), !busy, tokens, reading),

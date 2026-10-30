@@ -2,6 +2,8 @@ mod branch;
 mod branch_popup;
 mod changes;
 mod chrome;
+mod compare;
+mod repositories;
 mod files_nav;
 mod commands;
 mod confirm;
@@ -19,12 +21,13 @@ mod tabs;
 mod terminal;
 mod top_bar;
 mod welcome;
+pub(crate) mod wordmark;
 mod workspace;
 mod worktrees;
 
 use crate::app::{GitApp, Message};
 use crate::selection::visible_selection;
-use iced::widget::{column, container, opaque, stack, Space};
+use iced::widget::{column, container, opaque, row, stack, Space};
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use branch::branch_prompt;
@@ -41,6 +44,20 @@ use top_bar::top_bar;
 use welcome::welcome;
 use workspace::workspace;
 use worktrees::worktree_prompt;
+
+/// Width the Repositories column takes from the window, pinned or folded to its rail.
+pub(crate) fn repositories_width(pinned: bool) -> f32 {
+    if pinned {
+        repositories::COLUMN_WIDTH
+    } else {
+        repositories::RAIL_WIDTH
+    }
+}
+
+/// The checked-out branch's name, or "Detached HEAD".
+pub(crate) fn current_branch(branches: &[core_domain::Branch]) -> String {
+    refs::current_branch_name(branches)
+}
 
 impl GitApp {
     pub(crate) fn view(&self) -> Element<'_, Message> {
@@ -59,13 +76,23 @@ impl GitApp {
             &session.state.tags,
             session.state.current_status.as_ref(),
         );
+        // The Repositories column runs the full height between the header and the status bar,
+        // beside the tabs, the workspace and the terminal.
         let main = container(column![
             top_bar(self, tokens, reading),
             hairline(tokens),
-            tab_strip(self, tokens, reading),
-            operation::operation_banner(self, tokens, reading),
-            workspace(self, &selection, tokens, reading),
-            terminal_pane(self, tokens, reading),
+            row![
+                repositories::repositories_column(self, tokens, reading),
+                column![
+                    tab_strip(self, tokens, reading),
+                    operation::operation_banner(self, tokens, reading),
+                    workspace(self, &selection, tokens, reading),
+                    terminal_pane(self, tokens, reading),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .height(Length::Fill),
             status_bar(self, tokens, reading),
         ])
         .width(Length::Fill)
@@ -84,6 +111,10 @@ impl GitApp {
             opaque(dialog)
         } else if let Some(overlay) = palette_overlay(self, tokens, reading) {
             overlay
+        } else if let Some(overlay) =
+            repositories::repositories_flyout(self, top_bar::HEADER_HEIGHT, tokens, reading)
+        {
+            overlay
         } else if let Some(overlay) = branch_popup::branch_popup(self, tokens, reading) {
             overlay
         } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
@@ -96,6 +127,9 @@ impl GitApp {
 
     /// The modal dialog that is waiting for the user, if any.
     fn dialog(&self, tokens: DesignTokens, reading: Reading) -> Option<Element<'_, Message>> {
+        if let Some(state) = &self.compare {
+            return Some(compare::compare_window(self, state, tokens, reading));
+        }
         // Only show the detach dialog while we are waiting for the user (dirty worktree).
         // Clean detach sets confirm_detach then immediately runs the job and clears it.
         if let Some(commit_id) = &self.confirm_detach {

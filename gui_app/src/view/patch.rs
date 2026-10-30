@@ -41,16 +41,7 @@ pub(super) fn patch_pane<'a>(
         Some(crate::selection::Selection::File { place, .. }) => Some(*place),
         _ => None,
     };
-    let mut body = column![].width(Length::Fill);
-    for line in &layout.lines {
-        body = body.push(match line {
-            Line::File { path } => file_row(path, tokens, reading),
-            Line::Note { text } => note_row(text, NOTE_HEIGHT, tokens, reading),
-            Line::Hunk { path, index, header } => hunk_row(path, *index, header, hunk_place, busy, tokens, reading),
-            Line::Split { left, right } => split_row(left, right, tokens, reading),
-            Line::Unified { old, new, kind, text } => unified_row(*old, *new, *kind, text, tokens, reading),
-        });
-    }
+    let mut body = diff_rows(layout, hunk_place, busy, tokens, reading);
     if layout.hidden > 0 {
         body = body.push(
             container(
@@ -74,6 +65,28 @@ pub(super) fn patch_pane<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// The rows of a laid-out diff. `hunk_place` adds Stage / Discard hunk buttons for a
+/// working-tree file; `None` draws a read-only diff (commits, compare).
+pub(super) fn diff_rows<'a>(
+    layout: &diff_view::Layout,
+    hunk_place: Option<FileDisposition>,
+    busy: bool,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> iced::widget::Column<'a, Message> {
+    let mut body = column![].width(Length::Fill);
+    for line in &layout.lines {
+        body = body.push(match line {
+            Line::File { path } => file_row(path, tokens, reading),
+            Line::Note { text } => note_row(text, NOTE_HEIGHT, tokens, reading),
+            Line::Hunk { path, index, header } => hunk_row(path, *index, header, hunk_place, busy, tokens, reading),
+            Line::Split { left, right } => split_row(left, right, tokens, reading),
+            Line::Unified { old, new, kind, text } => unified_row(*old, *new, *kind, text, tokens, reading),
+        });
+    }
+    body
 }
 
 fn note_pane<'a>(value: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {

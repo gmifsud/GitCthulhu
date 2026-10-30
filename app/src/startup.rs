@@ -35,6 +35,23 @@ pub fn remember(store: &impl ConfigStore, path: &str) {
     let _ = store.save_settings(&settings);
 }
 
+/// Fold what the window may change into the settings on disk. Everything else on disk stays,
+/// so the remembered path written by [`remember`] is never overwritten by a stale window copy.
+///
+/// The window's recent list wins, so a repository forgotten in the Repositories column stays
+/// forgotten. The window adds every repository it opens to its own copy, so that copy is never
+/// behind the disk for longer than one open; the next save writes it whole again.
+pub fn merge_window_settings(stored: &mut AppSettings, incoming: AppSettings) {
+    stored.ui_font = incoming.ui_font;
+    stored.ui_size = incoming.ui_size;
+    stored.agent_token = incoming.agent_token;
+    stored.agent_model = incoming.agent_model;
+    stored.worktree_tab_retention = incoming.worktree_tab_retention;
+    stored.header_mark = incoming.header_mark;
+    stored.repositories_pinned = incoming.repositories_pinned;
+    stored.recent_repositories = incoming.recent_repositories;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +112,30 @@ mod tests {
             agent_model: AppSettings::DEFAULT_AGENT_MODEL.to_string(),
             worktree_tab_retention: Default::default(),
             recent_repositories: path.map(str::to_string).into_iter().collect(),
+            header_mark: Default::default(),
+            repositories_pinned: true,
         }
+    }
+
+    #[test]
+    fn a_window_save_keeps_the_remembered_path_and_takes_the_window_choices() {
+        let mut stored = settings_with(Some(r"D:\last"));
+        stored.recent_repositories = vec![r"D:\last".to_string(), r"D:\gone".to_string()];
+        let mut incoming = settings_with(Some(r"D:\stale"));
+        incoming.ui_size = AppSettings::MAX_UI_SIZE;
+        incoming.header_mark = core_domain::HeaderMark::Prompt;
+        incoming.repositories_pinned = false;
+        incoming.recent_repositories = vec![r"D:\last".to_string()];
+        incoming.theme = "Ignored".to_string();
+
+        merge_window_settings(&mut stored, incoming);
+
+        assert_eq!(stored.last_repo_path.as_deref(), Some(r"D:\last"));
+        assert_eq!(stored.theme, "DeepFocus");
+        assert_eq!(stored.ui_size, AppSettings::MAX_UI_SIZE);
+        assert_eq!(stored.header_mark, core_domain::HeaderMark::Prompt);
+        assert!(!stored.repositories_pinned);
+        assert_eq!(stored.recent_repositories, vec![r"D:\last".to_string()]);
     }
 
     #[test]
