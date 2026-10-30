@@ -1,6 +1,6 @@
 use super::{
-    AppSettings, Branch, Commit, DagNode, DomainError, FileDisposition, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag, Worktree,
+    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, Patch,
+    RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
 /// The GitRepository port.
@@ -39,12 +39,18 @@ pub trait GitRepository {
     fn cherry_pick(&self, commit_id: &str) -> Result<(), DomainError>;
     /// `git reset --soft`, `--mixed`, or `--hard` to a hex object id.
     fn reset(&self, commit_id: &str, mode: ResetMode) -> Result<(), DomainError>;
-    /// `git merge --no-ff -- <name>`. Records a merge commit even when a fast-forward is possible.
-    fn merge_branch(&self, name: &str) -> Result<(), DomainError>;
+    /// `git merge [--no-ff] -- <name>`. With `no_ff` a merge commit is recorded even when a
+    /// fast-forward is possible. A conflict leaves the merge in progress
+    /// ([`RepoStatus::operation`]) and returns git's message.
+    fn merge_branch(&self, name: &str, no_ff: bool) -> Result<(), DomainError>;
     /// `git rebase <name>`. Replays the current branch onto that tip.
     fn rebase_onto(&self, name: &str) -> Result<(), DomainError>;
     fn stage_paths(&self, paths: &[String]) -> Result<(), DomainError>;
     fn unstage_paths(&self, paths: &[String]) -> Result<(), DomainError>;
+    /// `git rm --cached -r -- <paths>`: stop tracking, keep the files on disk. The next commit
+    /// records the removal and the files show as unversioned. Git refuses a path whose staged
+    /// content differs from both HEAD and the file, so no staged work is lost.
+    fn untrack_paths(&self, paths: &[String]) -> Result<(), DomainError>;
     fn commit(&self, message: &str) -> Result<(), DomainError>;
     /// `git fetch` of the default remote, using the repository's own credential helper and SSH config.
     fn fetch(&self) -> Result<(), DomainError>;
@@ -67,8 +73,8 @@ pub trait GitRepository {
         hunk: &Hunk,
         place: FileDisposition,
     ) -> Result<(), DomainError>;
-    /// `git stash push`. A blank message keeps git's own subject. Untracked files stay put.
-    fn stash_push(&self, message: &str) -> Result<(), DomainError>;
+    /// `git stash push [--include-untracked]`. A blank message keeps git's own subject.
+    fn stash_push(&self, message: &str, include_untracked: bool) -> Result<(), DomainError>;
     /// `git stash push [-- <paths>…]`. Empty `paths` matches [`Self::stash_push`].
     fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), DomainError>;
     /// Append `patterns` to `.gitignore` (creating the file when missing). Patterns are relative.
@@ -79,6 +85,17 @@ pub trait GitRepository {
     fn stash_pop(&self, index: usize) -> Result<(), DomainError>;
     /// `git stash drop stash@{index}`. The saved change is discarded.
     fn stash_drop(&self, index: usize) -> Result<(), DomainError>;
+    /// `git merge --abort`, `git rebase --abort`… Restores the state before the operation.
+    fn abort_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
+    /// Finish the operation once every conflict is resolved and staged: the merge commit, or
+    /// `--continue` for a rebase, cherry-pick or revert. Git's prepared message is kept.
+    fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
+    /// Keep one side of a conflicted file (`git checkout --ours|--theirs`) and stage it.
+    fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError>;
+    /// Diff of one path between two versions, both in working-tree form. `left` is a revision
+    /// (branch, tag, commit, or `:2` / `:3` for the yours / theirs stage of a conflict);
+    /// `right` is another, or `None` for the file on disk. A side without the file reads as empty.
+    fn compare_file(&self, path: &str, left: &str, right: Option<&str>) -> Result<Patch, DomainError>;
 }
 
 pub trait CredentialStore {
@@ -108,6 +125,15 @@ pub trait ConfigStore {
     fn watch_settings<F>(&self, callback: F) -> Result<(), DomainError>
     where
         F: Fn(AppSettings) + Send + 'static;
+}
+
+/// Port for each repository's activity log, kept between runs.
+pub trait ActivityStore {
+    /// The newest `limit` records of the repository at `repository`, oldest first.
+    /// A repository with no log yet has none.
+    fn load_activity(&self, repository: &str, limit: usize) -> Result<Vec<ActivityRecord>, DomainError>;
+    fn append_activity(&self, repository: &str, record: &ActivityRecord) -> Result<(), DomainError>;
+    fn clear_activity(&self, repository: &str) -> Result<(), DomainError>;
 }
 
 /// Port for DAG caching.

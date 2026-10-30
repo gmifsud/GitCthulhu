@@ -1,12 +1,16 @@
 //! gui_app — iced interface.
 //! Adapters are wired by the `app` crate. This crate does not name them.
 
+mod activity;
 mod app;
 mod appearance;
 mod changes;
 mod commit_graph;
+mod compare;
 mod context_menu;
+mod icons;
 mod dates;
+mod diff_view;
 mod jobs;
 mod layout;
 mod log_filter;
@@ -49,6 +53,9 @@ pub type RepositoryCloner = Arc<dyn Fn(&str, &str) -> Result<String, DomainError
 /// The composition root merges those fields into the settings already on disk.
 pub type SettingsSaver = Arc<dyn Fn(AppSettings) + Send + Sync>;
 
+/// Keeps each repository's activity log between runs. Built by the composition root.
+pub type ActivityKeeper = Arc<dyn core_domain::ActivityStore + Send + Sync>;
+
 /// Model ids from the gateway, with the reply that produced them.
 /// The argument is the saved token, which may be empty.
 pub type ModelLister = Arc<dyn Fn(String) -> ModelList + Send + Sync>;
@@ -70,11 +77,13 @@ pub fn run(
     save_settings: SettingsSaver,
     list_models: ModelLister,
     suggest_commit: CommitSuggester,
+    activity: ActivityKeeper,
 ) -> iced::Result {
     iced::application("GitCthulhu", GitApp::update, GitApp::view)
         .theme(|_| Theme::Dark)
         .window(repository_window())
         .subscription(GitApp::subscription)
+        .font(icons::FONT_BYTES)
         .run_with(move || {
             (
                 {
@@ -90,6 +99,7 @@ pub fn run(
                     );
                     app.list_models = Arc::clone(&list_models);
                     app.suggest_commit = Arc::clone(&suggest_commit);
+                    app.activity_store = Arc::clone(&activity);
                     app
                 },
                 Task::done(Message::RefreshRepository),
@@ -108,11 +118,13 @@ pub fn run_welcome(
     save_settings: SettingsSaver,
     list_models: ModelLister,
     suggest_commit: CommitSuggester,
+    activity: ActivityKeeper,
 ) -> iced::Result {
     iced::application("GitCthulhu", GitApp::update, GitApp::view)
         .theme(|_| Theme::Dark)
         .window(repository_window())
         .subscription(GitApp::subscription)
+        .font(icons::FONT_BYTES)
         .run_with(move || {
             (
                 {
@@ -126,6 +138,7 @@ pub fn run_welcome(
                     );
                     app.list_models = list_models;
                     app.suggest_commit = suggest_commit;
+                    app.activity_store = activity;
                     app
                 },
                 Task::none(),

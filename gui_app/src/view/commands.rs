@@ -8,6 +8,7 @@ use crate::app::{GitApp, Message};
 use crate::changes::marked_paths;
 use crate::jobs::WorktreeEdit;
 use crate::selection::{ribbon_commands, RibbonCommand, RibbonItem, Selection};
+use crate::icons::Icon;
 use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::Element;
@@ -76,29 +77,29 @@ pub(super) fn placed_commands(
         .collect()
 }
 
-/// Segoe UI Symbol marks for ribbon commands (recognisable at small size).
-fn command_mark(command: RibbonCommand) -> &'static str {
+/// Icon for each ribbon command.
+fn command_mark(command: RibbonCommand) -> Icon {
     match command {
-        RibbonCommand::Checkout => "⤵",
-        RibbonCommand::Fetch => "↓",
-        RibbonCommand::Pull => "⬇",
-        RibbonCommand::Push => "⬆",
-        RibbonCommand::Refresh => "↻",
-        RibbonCommand::Stage => "+",
-        RibbonCommand::Unstage => "−",
-        RibbonCommand::Discard => "⌫",
-        RibbonCommand::Commit => "✓",
-        RibbonCommand::Stash => "≡",
-        RibbonCommand::Apply => "⤵",
-        RibbonCommand::Pop => "↥",
-        RibbonCommand::Drop => "×",
-        RibbonCommand::CreateBranch => "+",
-        RibbonCommand::RenameBranch => "✎",
-        RibbonCommand::DeleteBranch => "×",
-        RibbonCommand::Merge => "⑂",
-        RibbonCommand::Rebase => "⤴",
-        RibbonCommand::CherryPick => "✂",
-        RibbonCommand::Reset => "⟲",
+        RibbonCommand::Checkout => Icon::SwitchBranch,
+        RibbonCommand::Fetch => Icon::Fetch,
+        RibbonCommand::Pull => Icon::Pull,
+        RibbonCommand::Push => Icon::Push,
+        RibbonCommand::Refresh => Icon::Refresh,
+        RibbonCommand::Stage => Icon::Add,
+        RibbonCommand::Unstage => Icon::Remove,
+        RibbonCommand::Discard => Icon::Discard,
+        RibbonCommand::Commit => Icon::Check,
+        RibbonCommand::Stash => Icon::Stash,
+        RibbonCommand::Apply => Icon::StashApply,
+        RibbonCommand::Pop => Icon::StashPop,
+        RibbonCommand::Drop => Icon::Trash,
+        RibbonCommand::CreateBranch => Icon::Add,
+        RibbonCommand::RenameBranch => Icon::Edit,
+        RibbonCommand::DeleteBranch => Icon::Trash,
+        RibbonCommand::Merge => Icon::Merge,
+        RibbonCommand::Rebase => Icon::Compare,
+        RibbonCommand::CherryPick => Icon::Commit,
+        RibbonCommand::Reset => Icon::Discard,
     }
 }
 
@@ -145,7 +146,8 @@ pub(super) fn labelled_command_buttons(
         .map(|item| {
             let enabled = item.enabled && !app.session().state.loading;
             labelled_button(
-                format!("{} {}", command_mark(item.command), item.label),
+                command_mark(item.command),
+                item.label.to_string(),
                 command_message(item.command, selection, app),
                 enabled,
                 item.primary,

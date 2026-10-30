@@ -31,6 +31,14 @@ pub(crate) fn run_git_stdout(repo_path: &str, args: &[&str]) -> Result<String, D
     }
 }
 
+/// Run git and hand back its raw output whatever the exit code. For commands whose exit code
+/// is not a failure signal (`diff --no-index` exits 1 when files differ) or whose stdout is bytes.
+pub(crate) fn git_output(repo_path: &str, args: &[&str]) -> Result<std::process::Output, DomainError> {
+    git_command(repo_path, args)
+        .output()
+        .map_err(|error| DomainError::Unknown(format!("could not run {GIT_EXECUTABLE}: {error}")))
+}
+
 fn git_program(repo_path: &str, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(GIT_EXECUTABLE);
     command

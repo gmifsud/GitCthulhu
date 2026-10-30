@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Represents a Git commit.
@@ -116,6 +117,68 @@ pub enum ResetMode {
     Hard,
 }
 
+/// How a changed path differs, as `git status` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Conflicted,
+    Untracked,
+}
+
+/// The kind of each staged and unstaged path in a [`RepoStatus`].
+///
+/// A staged or unstaged path with no entry reads as [`ChangeKind::Modified`], so an adapter
+/// that does not classify changes still reports something true. Untracked paths need no entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangeKinds {
+    pub staged: BTreeMap<String, ChangeKind>,
+    pub unstaged: BTreeMap<String, ChangeKind>,
+}
+
+impl ChangeKinds {
+    pub fn of(&self, place: FileDisposition, path: &str) -> ChangeKind {
+        let kinds = match place {
+            FileDisposition::Staged => &self.staged,
+            FileDisposition::Unstaged => &self.unstaged,
+            FileDisposition::Untracked => return ChangeKind::Untracked,
+        };
+        kinds.get(path).copied().unwrap_or(ChangeKind::Modified)
+    }
+}
+
+/// A git operation stopped half-way, waiting for the user (usually on conflicts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl RepoOperation {
+    /// "merge", "rebase"… for messages.
+    pub fn noun(self) -> &'static str {
+        match self {
+            RepoOperation::Merge => "merge",
+            RepoOperation::Rebase => "rebase",
+            RepoOperation::CherryPick => "cherry-pick",
+            RepoOperation::Revert => "revert",
+        }
+    }
+}
+
+/// Which side of a conflict to keep for a whole file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictSide {
+    /// The branch you are on (`--ours`).
+    Yours,
+    /// The branch being merged in, or the commit being replayed (`--theirs`).
+    Theirs,
+}
+
 /// Represents the status of the working directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoStatus {
@@ -126,6 +189,12 @@ pub struct RepoStatus {
     pub tracking: Option<TrackingStatus>,
     /// Peeled `HEAD` commit id when born; `None` when unborn. Used for focus-current when detached.
     pub head_commit_id: Option<String>,
+    /// Added, modified, deleted… for each staged and unstaged path.
+    pub kinds: ChangeKinds,
+    /// The merge, rebase, cherry-pick or revert in progress, if any.
+    pub operation: Option<RepoOperation>,
+    /// Paths with unresolved conflicts. They are in no other list.
+    pub conflicted_files: Vec<String>,
 }
 
 /// Domain errors that can occur during Git operations.
@@ -150,6 +219,33 @@ pub enum WorktreeTabRetention {
     PathOnly,
 }
 
+/// How the app name is drawn at the left of the header. Chosen under Appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderMark {
+    /// "Git" muted, "Cthulhu" in the accent colour.
+    #[default]
+    TwoTone,
+    /// An accent badge with a tentacle-ish "G", then the name.
+    Badge,
+    /// Spaced small capitals in a muted colour.
+    SmallCaps,
+    /// A shell prompt: `❯ gitcthulhu`.
+    Prompt,
+    /// The badge alone, no name.
+    BadgeOnly,
+}
+
+impl HeaderMark {
+    pub const ALL: [HeaderMark; 5] = [
+        HeaderMark::TwoTone,
+        HeaderMark::Badge,
+        HeaderMark::SmallCaps,
+        HeaderMark::Prompt,
+        HeaderMark::BadgeOnly,
+    ];
+}
+
 /// User-defined settings for the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
@@ -170,6 +266,10 @@ pub struct AppSettings {
     /// Repositories opened with Open… or from the command line, newest first.
     /// At most [`Self::MAX_RECENT_REPOSITORIES`]; linked worktree tabs are never added.
     pub recent_repositories: Vec<String>,
+    /// How the header draws the app name.
+    pub header_mark: HeaderMark,
+    /// The Repositories column stays open beside the Explorer (true) or folds to a rail.
+    pub repositories_pinned: bool,
 }
 
 impl AppSettings {
@@ -178,7 +278,7 @@ impl AppSettings {
     pub const MIN_UI_SIZE: u8 = 12;
     pub const MAX_UI_SIZE: u8 = 18;
     pub const DEFAULT_AGENT_MODEL: &'static str = "kilo-auto/free";
-    pub const MAX_RECENT_REPOSITORIES: usize = 12;
+    pub const MAX_RECENT_REPOSITORIES: usize = 24;
 
     /// Move `path` to the front of [`Self::recent_repositories`], dropping an earlier entry
     /// for the same folder and the oldest entries beyond the cap. Blank paths are ignored.
@@ -196,22 +296,64 @@ impl AppSettings {
             .truncate(Self::MAX_RECENT_REPOSITORIES);
         before != self.recent_repositories
     }
+
+    /// Drop `path` from [`Self::recent_repositories`]. Returns true when it was there.
+    pub fn forget_recent(&mut self, path: &str) -> bool {
+        let before = self.recent_repositories.len();
+        self.recent_repositories
+            .retain(|known| !same_repository_path(known, path));
+        before != self.recent_repositories.len()
+    }
 }
 
 /// True when two remembered paths name the same folder. Separators and a trailing
 /// separator are ignored; case is ignored on Windows only, matching its filesystem.
 pub fn same_repository_path(left: &str, right: &str) -> bool {
-    fn key(path: &str) -> String {
-        let unified = path.trim().replace('\\', "/");
-        let trimmed = unified.trim_end_matches('/');
-        let kept = if trimmed.is_empty() { unified.as_str() } else { trimmed };
-        if cfg!(windows) {
-            kept.to_lowercase()
-        } else {
-            kept.to_string()
-        }
+    repository_key(left) == repository_key(right)
+}
+
+/// One spelling per folder: forward slashes, no trailing slash, lower case on Windows.
+/// Two paths with the same key are the same repository.
+pub fn repository_key(path: &str) -> String {
+    let unified = path.trim().replace('\\', "/");
+    let trimmed = unified.trim_end_matches('/');
+    let kept = if trimmed.is_empty() { unified.as_str() } else { trimmed };
+    if cfg!(windows) {
+        kept.to_lowercase()
+    } else {
+        kept.to_string()
     }
-    key(left) == key(right)
+}
+
+/// How a recorded action ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "message")]
+pub enum ActivityOutcome {
+    Succeeded,
+    /// Git's (or the shell's) own message.
+    Failed(String),
+    /// The user stopped it.
+    Stopped,
+}
+
+/// One finished action in a repository's activity log: a push, a stash, a terminal command…
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityRecord {
+    /// When it started, in Unix seconds (UTC).
+    pub started: i64,
+    pub duration_ms: u64,
+    /// What happened, in a word or two: "Push", "Stash pop".
+    pub title: String,
+    /// What it acted on: a branch, a file count, a stash message. May be empty.
+    #[serde(default)]
+    pub detail: String,
+    /// The git command (or terminal line) it amounts to. May be empty.
+    #[serde(default)]
+    pub command: String,
+    /// The worktree folder it ran in. Empty when it is the repository's own folder.
+    #[serde(default)]
+    pub worktree: String,
+    pub outcome: ActivityOutcome,
 }
 
 impl Default for AppSettings {
@@ -226,6 +368,8 @@ impl Default for AppSettings {
             agent_model: Self::DEFAULT_AGENT_MODEL.to_string(),
             recent_repositories: Vec::new(),
             worktree_tab_retention: WorktreeTabRetention::default(),
+            header_mark: HeaderMark::default(),
+            repositories_pinned: true,
         }
     }
 }
@@ -266,6 +410,16 @@ mod tests {
             settings.recent_repositories[0],
             format!("/r/{}", AppSettings::MAX_RECENT_REPOSITORIES + 2)
         );
+    }
+
+    #[test]
+    fn forget_recent_drops_the_folder_whatever_its_spelling() {
+        let mut settings = AppSettings::default();
+        settings.remember_recent("/r/a");
+        settings.remember_recent("/r/b");
+        assert!(settings.forget_recent("/r/a/"));
+        assert_eq!(settings.recent_repositories, vec!["/r/b"]);
+        assert!(!settings.forget_recent("/r/a"));
     }
 
     #[test]

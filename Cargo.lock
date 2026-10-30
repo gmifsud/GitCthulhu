@@ -779,6 +779,7 @@ dependencies = [
  "core_domain",
  "notify",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

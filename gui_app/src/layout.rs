@@ -18,6 +18,19 @@ pub(crate) const LOG_MIDDLE_RATIO: f32 = 0.64;
 /// Diff's share of Diff|Inspector when Columns places them side by side.
 pub(crate) const COLUMNS_MIDDLE_RATIO: f32 = 0.50;
 
+/// Explorer width before the user drags it. JetBrains keeps tool windows at a pixel width,
+/// so narrowing the window narrows the log, not the tree.
+pub(crate) const FILES_PX: f32 = 280.0;
+
+/// The Files split ratio that keeps the Explorer `px` wide in a window `width` wide, within
+/// the same bounds a drag is held to.
+pub(crate) fn files_ratio_for(px: f32, width: f32) -> f32 {
+    if width <= 0.0 {
+        return FILES_RATIO;
+    }
+    (px / width).clamp(MIN_FILES_RATIO, MAX_FILES_RATIO)
+}
+
 /// Floor for the left staging ratio (avoids crushing Stage).
 pub(crate) const MIN_FILES_RATIO: f32 = 0.16;
 pub(crate) const MAX_FILES_RATIO: f32 = 0.36;
@@ -332,5 +345,18 @@ fn panes_under(node: &Node, state: &State<WorkspacePane>) -> Vec<WorkspacePane> 
             panes
         }
         Node::Pane(pane) => state.get(*pane).copied().into_iter().collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_explorer_keeps_its_pixel_width_within_the_drag_bounds() {
+        assert_eq!(files_ratio_for(280.0, 1120.0), 0.25);
+        assert_eq!(files_ratio_for(280.0, 400.0), MAX_FILES_RATIO);
+        assert_eq!(files_ratio_for(280.0, 4000.0), MIN_FILES_RATIO);
+        assert_eq!(files_ratio_for(280.0, 0.0), FILES_RATIO);
     }
 }

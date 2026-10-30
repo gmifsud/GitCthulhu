@@ -6,7 +6,8 @@ use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, horizontal_space, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{fold_mark, glyph, Reading};
+use super::chrome::{glyph, Reading};
+use crate::icons::Icon;
 
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const STATUS_BAR_EXPANDED: f32 = 72.0;
@@ -42,12 +43,7 @@ pub(super) fn status_bar<'a>(
     if let Some(error) = &app.error {
         bar = bar.push(error_cluster(error, app.error_expanded, quiet, tokens, reading));
     } else {
-        bar = bar.push(status_text(
-            app.activity_label().to_string(),
-            quiet,
-            tokens,
-            reading,
-        ));
+        bar = bar.push(activity_status(app, quiet, tokens, reading));
     }
 
     bar = bar.push(horizontal_space());
@@ -128,7 +124,7 @@ fn error_cluster<'a>(
         }),
         row![
             glyph(
-                fold_mark(!expanded),
+                Icon::fold(expanded),
                 quiet,
                 tokens.text_muted,
                 &reading,
@@ -143,7 +139,7 @@ fn error_cluster<'a>(
         .spacing(4)
         .align_y(Alignment::Center),
         button(
-            glyph("×", quiet, tokens.text_muted, &reading),
+            glyph(Icon::Close, quiet, tokens.text_muted, &reading),
         )
         .padding([0, 4])
         .on_press(Message::ClearError)
@@ -164,6 +160,74 @@ fn error_cluster<'a>(
     .spacing(8)
     .align_y(Alignment::Start)
     .width(Length::Fill)
+    .into()
+}
+
+/// What the window is doing: the running action and how long it has run, else the last
+/// result for a few seconds, else the plain state ("Ready", "Loading…"). A click opens the
+/// Activity tab with the full log.
+fn activity_status<'a>(app: &'a GitApp, quiet: f32, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let shown = if let Some(entry) = app.activity.running() {
+        let seconds = entry.running.as_ref().map_or(0, |(_, began)| began.elapsed().as_secs());
+        Some((
+            Icon::Refresh,
+            tokens.accent_primary,
+            format!("{} {seconds} s", crate::activity::running_label(&entry.record)),
+        ))
+    } else {
+        app.activity.recent_result().map(|entry| {
+            let record = &entry.record;
+            let what = if record.detail.is_empty() {
+                record.title.clone()
+            } else {
+                format!("{}: {}", record.title, record.detail)
+            };
+            match &record.outcome {
+                core_domain::ActivityOutcome::Succeeded => (
+                    Icon::Check,
+                    tokens.added,
+                    format!("{what} · done in {}", crate::activity::duration_label(record.duration_ms)),
+                ),
+                core_domain::ActivityOutcome::Failed(message) => {
+                    (Icon::Close, tokens.removed, format!("{what} · failed: {}", error_summary(message)))
+                }
+                core_domain::ActivityOutcome::Stopped => (Icon::Stop, tokens.text_muted, format!("{what} · stopped")),
+            }
+        })
+    };
+    let Some((icon, ink, label)) = shown else {
+        return button(status_text(app.activity_label().to_string(), quiet, tokens, reading))
+            .padding(0)
+            .on_press(Message::ShowActivity)
+            .style(move |_theme, _status| iced::widget::button::Style::default())
+            .into();
+    };
+    button(
+        row![
+            glyph(icon, quiet, ink, &reading),
+            text(label)
+                .font(reading.font)
+                .size(quiet)
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style { color: Some(ink) }),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([0, 4])
+    .on_press(Message::ShowActivity)
+    .style(move |_theme, status| {
+        let hot = matches!(status, Status::Hovered | Status::Pressed);
+        iced::widget::button::Style {
+            background: Some(Background::Color(if hot { tokens.border } else { Color::TRANSPARENT })),
+            text_color: ink,
+            border: Border {
+                radius: 3.0.into(),
+                ..Border::default()
+            },
+            shadow: Shadow::default(),
+        }
+    })
     .into()
 }
 
@@ -260,6 +324,9 @@ mod tests {
                 untracked_files: vec![],
                 tracking: None,
                 head_commit_id: None,
+                kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
             })),
             "No upstream"
         );
@@ -274,6 +341,9 @@ mod tests {
                     behind: 0,
                 }),
                 head_commit_id: None,
+                kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
             })),
             "origin/dev ↑1"
         );

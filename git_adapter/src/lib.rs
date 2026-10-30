@@ -14,13 +14,13 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus,
-    ResetMode, Stash, Tag, Worktree,
+    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, Patch,
+    RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
 use gix::refs::TargetRef;
-use status::{record_change, staged_paths, tracking_status, unborn_worktree_changes};
+use status::{record_change, staged_changes, tracking_status, unborn_worktree_changes};
 use worktree::{parse_worktree_porcelain, require_worktree_path};
 
 pub(crate) fn unknown(error: impl Display) -> DomainError {
@@ -145,12 +145,19 @@ impl GitRepository for GitoxideAdapter {
                 .ok()
                 .and_then(|head| head.id().map(|id| id.to_string()))
         };
+        let (staged, conflicted_files) = staged_changes(&repo, head_is_unborn)?;
         let mut status = RepoStatus {
-            staged_files: staged_paths(&repo, head_is_unborn)?,
+            operation: operation_of(repo.state()),
+            conflicted_files,
+            staged_files: staged.keys().cloned().collect(),
             unstaged_files: vec![],
             untracked_files: vec![],
             tracking: tracking_status(&self.repo_path)?,
             head_commit_id,
+            kinds: core_domain::ChangeKinds {
+                staged,
+                ..Default::default()
+            },
         };
 
         // Index ↔ worktree: modified/removed tracked files and untracked files, one path each.
@@ -408,10 +415,16 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["reset", flag, commit_id])
     }
 
-    fn merge_branch(&self, name: &str) -> Result<(), DomainError> {
+    fn merge_branch(&self, name: &str, no_ff: bool) -> Result<(), DomainError> {
         self.open_repo()?;
         require_branch_name(name)?;
-        run_git(&self.repo_path, &["merge", "--no-ff", "--", name])
+        let mut args = vec!["merge"];
+        if no_ff {
+            args.push("--no-ff");
+        }
+        // No editor: git's prepared "Merge branch …" message is kept.
+        args.extend(["--no-edit", "--", name]);
+        run_git(&self.repo_path, &args)
     }
 
     fn rebase_onto(&self, name: &str) -> Result<(), DomainError> {
@@ -428,6 +441,15 @@ impl GitRepository for GitoxideAdapter {
     fn unstage_paths(&self, paths: &[String]) -> Result<(), DomainError> {
         self.open_repo()?;
         run_git_paths(&self.repo_path, &["restore", "--staged"], paths)
+    }
+
+    fn untrack_paths(&self, paths: &[String]) -> Result<(), DomainError> {
+        self.open_repo()?;
+        for path in paths {
+            require_safe_path(path)?;
+        }
+        // No --force: git keeps a staged version that differs from both HEAD and the disk.
+        run_git_paths(&self.repo_path, &["rm", "--cached", "-r", "--quiet"], paths)
     }
 
     /// Commit the index with `git commit -m`.
@@ -572,28 +594,78 @@ impl GitRepository for GitoxideAdapter {
         stash::parse_stash_list(&text)
     }
 
-    fn stash_push(&self, message: &str) -> Result<(), DomainError> {
-        self.stash_push_paths(message, &[])
+    fn stash_push(&self, message: &str, include_untracked: bool) -> Result<(), DomainError> {
+        self.stash(message, &[], include_untracked)
     }
 
     fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), DomainError> {
+        self.stash(message, paths, false)
+    }
+
+    fn abort_operation(&self, operation: RepoOperation) -> Result<(), DomainError> {
         self.open_repo()?;
-        if message.contains('\0') {
+        run_git(&self.repo_path, &[operation_command(operation), "--abort"])
+    }
+
+    fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError> {
+        self.open_repo()?;
+        // `true` as the editor keeps git's prepared message without opening anything.
+        let quiet = ["-c", "core.editor=true", "-c", "sequence.editor=true"];
+        match operation {
+            RepoOperation::Merge => run_git(&self.repo_path, &[quiet[0], quiet[1], "commit", "--no-edit"]),
+            other => run_git(
+                &self.repo_path,
+                &[quiet[0], quiet[1], quiet[2], quiet[3], operation_command(other), "--continue"],
+            ),
+        }
+    }
+
+    fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError> {
+        self.open_repo()?;
+        let flag = match side {
+            ConflictSide::Yours => "--ours",
+            ConflictSide::Theirs => "--theirs",
+        };
+        let paths = [path.to_string()];
+        run_git_paths(&self.repo_path, &["checkout", flag], &paths)?;
+        run_git_paths(&self.repo_path, &["add"], &paths)
+    }
+
+    fn compare_file(&self, path: &str, left: &str, right: Option<&str>) -> Result<Patch, DomainError> {
+        self.open_repo()?;
+        require_safe_path(path)?;
+        let left_bytes = self.version_bytes(path, Some(left))?;
+        let right_bytes = self.version_bytes(path, right)?;
+        let scratch = CompareScratch::new()?;
+        let left_file = scratch.write("left", &left_bytes)?;
+        let right_file = scratch.write("right", &right_bytes)?;
+        let output = command::git_output(
+            &self.repo_path,
+            &[
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--unified=3",
+                "--",
+                &left_file,
+                &right_file,
+            ],
+        )?;
+        // 0: same, 1: different. Anything else is git refusing.
+        if !matches!(output.status.code(), Some(0) | Some(1)) {
             return Err(DomainError::Unknown(
-                "stash message contains a null byte".to_string(),
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ));
         }
-        let message = message.trim();
-        let mut args: Vec<&str> = vec!["stash", "push"];
-        if !message.is_empty() {
-            args.push("-m");
-            args.push(message);
-        }
-        if paths.is_empty() {
-            run_git(&self.repo_path, &args)
-        } else {
-            run_git_paths(&self.repo_path, &args, paths)
-        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut patch = parse_patches(&text).into_iter().next().unwrap_or(Patch {
+            path: path.to_string(),
+            hunks: Vec::new(),
+            binary: false,
+        });
+        patch.path = path.to_string();
+        Ok(patch)
     }
 
     fn append_gitignore(&self, patterns: &[String]) -> Result<(), DomainError> {
@@ -679,6 +751,89 @@ fn repository_name(url: &str) -> Result<String, DomainError> {
     }
 }
 
+impl GitoxideAdapter {
+    /// One side of a compare in working-tree form: the file on disk when `revision` is `None`,
+    /// else `<revision>:<path>` through the checkout filters (so CRLF matches the disk).
+    /// A revision that exists but lacks the file, or a missing file on disk, reads as empty.
+    fn version_bytes(&self, path: &str, revision: Option<&str>) -> Result<Vec<u8>, DomainError> {
+        let Some(revision) = revision else {
+            let full = std::path::Path::new(&self.repo_path).join(path);
+            return match std::fs::read(&full) {
+                Ok(bytes) => Ok(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(error) => Err(DomainError::Unknown(format!("could not read {path}: {error}"))),
+            };
+        };
+        require_compare_revision(revision)?;
+        // `HEAD:a.txt`, or `:2:a.txt` for an index stage.
+        let spec = format!("{revision}:{path}");
+        let output = command::git_output(&self.repo_path, &["cat-file", "--filters", &spec])?;
+        if output.status.success() {
+            return Ok(output.stdout);
+        }
+        // Tell "no such file at that revision" (empty side) from "no such revision" (error).
+        let known = revision.starts_with(':')
+            || command::git_output(
+                &self.repo_path,
+                &["rev-parse", "--verify", "--quiet", &format!("{revision}^{{commit}}")],
+            )?
+            .status
+            .success();
+        if known {
+            Ok(Vec::new())
+        } else {
+            Err(DomainError::Unknown(format!("unknown revision: {revision}")))
+        }
+    }
+}
+
+/// A revision to compare against: a ref, a commit, or an index stage (`:1`, `:2`, `:3`).
+/// Never option-like, never a range, never with whitespace or NUL.
+fn require_compare_revision(revision: &str) -> Result<(), DomainError> {
+    let stage = matches!(revision, ":1" | ":2" | ":3");
+    let bad = revision.is_empty()
+        || revision.starts_with('-')
+        || revision.contains(['\0', '\n', '\r', ' ', '\t'])
+        || revision.contains("..")
+        || (revision.contains(':') && !stage);
+    if bad {
+        Err(DomainError::Unknown(format!("invalid revision: {revision:?}")))
+    } else {
+        Ok(())
+    }
+}
+
+/// Two temporary files for `git diff --no-index`, removed when dropped.
+struct CompareScratch {
+    folder: std::path::PathBuf,
+}
+
+impl CompareScratch {
+    fn new() -> Result<Self, DomainError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let folder = std::env::temp_dir().join(format!(
+            "gitcthulhu-compare-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&folder).map_err(unknown)?;
+        Ok(Self { folder })
+    }
+
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<String, DomainError> {
+        let file = self.folder.join(name);
+        std::fs::write(&file, bytes).map_err(unknown)?;
+        Ok(file.to_string_lossy().into_owned())
+    }
+}
+
+impl Drop for CompareScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.folder);
+    }
+}
+
 fn is_hex_revision(commit_id: &str) -> bool {
     let length = commit_id.len();
     (4..=40).contains(&length) && commit_id.chars().all(|c| c.is_ascii_hexdigit())
@@ -756,5 +911,55 @@ fn tracked_at_head(repo_path: &str, path: &str) -> Result<bool, DomainError> {
             Ok(false)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// The git subcommand that owns `operation`'s `--abort` and `--continue`.
+fn operation_command(operation: RepoOperation) -> &'static str {
+    match operation {
+        RepoOperation::Merge => "merge",
+        RepoOperation::Rebase => "rebase",
+        RepoOperation::CherryPick => "cherry-pick",
+        RepoOperation::Revert => "revert",
+    }
+}
+
+/// The operation `state` records as in progress, in the port's terms.
+fn operation_of(state: Option<gix::state::InProgress>) -> Option<RepoOperation> {
+    use gix::state::InProgress;
+    match state? {
+        InProgress::Merge => Some(RepoOperation::Merge),
+        InProgress::Rebase | InProgress::RebaseInteractive | InProgress::ApplyMailboxRebase => {
+            Some(RepoOperation::Rebase)
+        }
+        InProgress::CherryPick | InProgress::CherryPickSequence => Some(RepoOperation::CherryPick),
+        InProgress::Revert | InProgress::RevertSequence => Some(RepoOperation::Revert),
+        InProgress::ApplyMailbox | InProgress::Bisect => None,
+    }
+}
+
+impl GitoxideAdapter {
+    /// `git stash push [-u] [-m <message>] [-- <paths>…]`.
+    fn stash(&self, message: &str, paths: &[String], include_untracked: bool) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if message.contains('\0') {
+            return Err(DomainError::Unknown(
+                "stash message contains a null byte".to_string(),
+            ));
+        }
+        let message = message.trim();
+        let mut args: Vec<&str> = vec!["stash", "push"];
+        if include_untracked {
+            args.push("--include-untracked");
+        }
+        if !message.is_empty() {
+            args.push("-m");
+            args.push(message);
+        }
+        if paths.is_empty() {
+            run_git(&self.repo_path, &args)
+        } else {
+            run_git_paths(&self.repo_path, &args, paths)
+        }
     }
 }

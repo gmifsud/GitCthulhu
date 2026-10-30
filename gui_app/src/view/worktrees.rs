@@ -4,6 +4,7 @@
 
 use crate::app::{GitApp, Message, WorktreePrompt};
 use crate::session::{basename, same_path};
+use crate::icons::Icon;
 use crate::theme::DesignTokens;
 use core_domain::Worktree;
 use iced::widget::button::Status;
@@ -22,8 +23,6 @@ use super::chrome::{
 const WORKTREES_TITLE: &str = "Worktrees";
 #[allow(dead_code)]
 const LIST_MAX_HEIGHT: f32 = 160.0;
-#[allow(dead_code)]
-const OPEN_MARK: &str = "●";
 const DETACHED: &str = "(detached)";
 
 /// Formerly the left-rail Worktrees block. The Explorer accordion owns that
@@ -40,7 +39,7 @@ pub(super) fn worktrees_section<'a>(
         pane_title(title, tokens, reading),
         horizontal_space(),
         icon_button(
-            "+",
+            Icon::Add,
             "New worktree",
             "worktree-new",
             app.tip_ready("worktree-new"),
@@ -133,7 +132,7 @@ fn worktree_row<'a>(
     }
 
     let marker: Element<'a, Message> = glyph(
-        OPEN_MARK,
+        Icon::CircleFilled,
         (reading.size - 4.0).max(7.0),
         if open {
             tokens.accent_primary
@@ -194,7 +193,7 @@ fn worktree_row<'a>(
     row![
         body,
         icon_button(
-            "×",
+            Icon::Close,
             "Remove worktree",
             remove_key,
             tip_ready,

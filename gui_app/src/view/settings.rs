@@ -22,6 +22,24 @@ impl std::fmt::Display for RetentionChoice {
         })
     }
 }
+/// Wraps [`core_domain::HeaderMark`] so the pick list shows readable names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkChoice(core_domain::HeaderMark);
+
+const MARK_CHOICES: [MarkChoice; 5] = [
+    MarkChoice(core_domain::HeaderMark::ALL[0]),
+    MarkChoice(core_domain::HeaderMark::ALL[1]),
+    MarkChoice(core_domain::HeaderMark::ALL[2]),
+    MarkChoice(core_domain::HeaderMark::ALL[3]),
+    MarkChoice(core_domain::HeaderMark::ALL[4]),
+];
+
+impl std::fmt::Display for MarkChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(super::wordmark::mark_label(self.0))
+    }
+}
+
 use iced::widget::{column, container, pick_list, row, slider, text, text_input};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
@@ -81,6 +99,18 @@ pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Elem
         ]
         .spacing(12)
         .align_y(Alignment::Center),
+        text("Header mark")
+            .font(reading.font)
+            .size(reading.size)
+            .style(move |_| text::Style {
+                color: Some(tokens.text_secondary),
+            }),
+        pick_list(
+            MARK_CHOICES,
+            Some(MarkChoice(settings.header_mark)),
+            |choice| Message::HeaderMarkChosen(choice.0),
+        )
+        .width(Length::Fill),
         text("Agents and Models")
             .font(reading.font)
             .size(reading.size)
@@ -93,7 +123,7 @@ pub(super) fn settings_dialog<'a>(app: &'a GitApp, tokens: DesignTokens) -> Elem
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
-        text("From kilo.ai → API keys. Used for ✦ commit suggestions.")
+        text("From kilo.ai → API keys. Used by Suggest commit message.")
             .font(reading.font)
             .size((reading.size - 2.0).max(11.0))
             .style(move |_| text::Style {

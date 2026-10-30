@@ -28,15 +28,20 @@ pub struct FakeGitRepository {
     pub cherry_pick_result: Result<(), DomainError>,
     pub reset_result: Result<(), DomainError>,
     pub merge_result: Result<(), DomainError>,
+    pub abort_result: Result<(), DomainError>,
+    pub continue_result: Result<(), DomainError>,
+    pub resolve_result: Result<(), DomainError>,
     pub rebase_result: Result<(), DomainError>,
     pub stage_result: Result<(), DomainError>,
     pub unstage_result: Result<(), DomainError>,
+    pub untrack_result: Result<(), DomainError>,
     pub commit_result: Result<(), DomainError>,
     pub fetch_result: Result<(), DomainError>,
     pub push_result: Result<(), DomainError>,
     pub pull_result: Result<(), DomainError>,
     pub commit_patch_result: Result<Vec<Patch>, DomainError>,
     pub file_patch_result: Result<Patch, DomainError>,
+    pub compare_result: Result<Patch, DomainError>,
     pub discard_result: Result<(), DomainError>,
     pub stage_hunk_result: Result<(), DomainError>,
     pub discard_hunk_result: Result<(), DomainError>,
@@ -56,6 +61,9 @@ impl FakeGitRepository {
                 untracked_files: vec![],
                 tracking: None,
                 head_commit_id: None,
+                kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
             }),
             log_result: Ok(vec![]),
             branches_result: Ok(vec![]),
@@ -71,15 +79,24 @@ impl FakeGitRepository {
             cherry_pick_result: Ok(()),
             reset_result: Ok(()),
             merge_result: Ok(()),
+            abort_result: Ok(()),
+            continue_result: Ok(()),
+            resolve_result: Ok(()),
             rebase_result: Ok(()),
             stage_result: Ok(()),
             unstage_result: Ok(()),
+            untrack_result: Ok(()),
             commit_result: Ok(()),
             fetch_result: Ok(()),
             push_result: Ok(()),
             pull_result: Ok(()),
             commit_patch_result: Ok(vec![]),
             file_patch_result: Ok(Patch {
+                path: String::new(),
+                hunks: vec![],
+                binary: false,
+            }),
+            compare_result: Ok(Patch {
                 path: String::new(),
                 hunks: vec![],
                 binary: false,
@@ -162,7 +179,7 @@ impl GitRepository for FakeGitRepository {
         self.reset_result.clone()
     }
 
-    fn merge_branch(&self, _name: &str) -> Result<(), DomainError> {
+    fn merge_branch(&self, _name: &str, _no_ff: bool) -> Result<(), DomainError> {
         self.merge_result.clone()
     }
 
@@ -176,6 +193,10 @@ impl GitRepository for FakeGitRepository {
 
     fn unstage_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
         self.unstage_result.clone()
+    }
+
+    fn untrack_paths(&self, _paths: &[String]) -> Result<(), DomainError> {
+        self.untrack_result.clone()
     }
 
     fn commit(&self, _message: &str) -> Result<(), DomainError> {
@@ -219,7 +240,7 @@ impl GitRepository for FakeGitRepository {
         self.discard_hunk_result.clone()
     }
 
-    fn stash_push(&self, _message: &str) -> Result<(), DomainError> {
+    fn stash_push(&self, _message: &str, _include_untracked: bool) -> Result<(), DomainError> {
         self.stash_push_result.clone()
     }
 
@@ -241,5 +262,24 @@ impl GitRepository for FakeGitRepository {
 
     fn stash_drop(&self, _index: usize) -> Result<(), DomainError> {
         self.stash_drop_result.clone()
+    }
+
+    fn abort_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {
+        self.abort_result.clone()
+    }
+
+    fn continue_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {
+        self.continue_result.clone()
+    }
+
+    fn resolve_conflict(&self, _path: &str, _side: core_domain::ConflictSide) -> Result<(), DomainError> {
+        self.resolve_result.clone()
+    }
+
+    fn compare_file(&self, path: &str, _left: &str, _right: Option<&str>) -> Result<Patch, DomainError> {
+        self.compare_result.clone().map(|mut patch| {
+            patch.path = path.to_string();
+            patch
+        })
     }
 }
