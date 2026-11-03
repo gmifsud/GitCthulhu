@@ -1,13 +1,11 @@
 use crate::app::{GitApp, Message};
 use crate::palette::REPOSITORY_SCOPE;
-use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, horizontal_space, row, text};
+use iced::widget::{column, container, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::chrome::{branch_chip, one_line, quiet_button, Reading};
-use super::commands::{can_commit, can_stash, command_buttons, placed_commands, CommandPlace};
 use super::refs::current_branch_name;
 
 /// Identity row: app mark, repository name and folder, then app-level commands.
@@ -97,50 +95,115 @@ fn title_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Ele
 
 fn branch_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let branch_name = current_branch_name(&app.session().state.branches);
-    let branch_selection = Selection::Branch {
-        name: branch_name.clone(),
-        current: true,
-    };
     let summary = crate::tracking::tracking_summary(app.session().state.current_status.as_ref());
-    let top_commands = placed_commands(
-        &branch_selection,
-        can_commit(app),
-        can_stash(app),
-        CommandPlace::TopBar,
-    );
 
-    let mut bar = row![
-        branch_chip(
-            branch_name,
-            Message::ToggleBranchList,
-            !app.session().state.loading,
-            app.files_rail_open && !app.session().explorer_collapsed.local,
-            tokens,
-            reading,
-        ),
-        tracking(summary, tokens, reading),
-        horizontal_space(),
+    // Three slots: the two sides share the spare width equally, so the sync group sits on the
+    // window's centre line whatever the branch name or path. Each side clips rather than push.
+    let left = container(
+        row![
+            branch_chip(
+                branch_name,
+                Message::ToggleBranchList,
+                !app.session().state.loading,
+                app.files_rail_open && !app.session().explorer_collapsed.local,
+                tokens,
+                reading,
+            ),
+            tracking(summary, tokens, reading),
+        ]
+        .spacing(COMMAND_SPACING)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .clip(true);
+    // The compare / conflict window: the selected change against HEAD, or yours against
+    // theirs when the file is conflicted.
+    let right = container(
+        row![
+            super::chrome::labelled_button(
+                crate::icons::Icon::Compare,
+                "Compare".to_string(),
+                Message::OpenCompare { path: None, against: None },
+                !app.session().state.loading,
+                false,
+                tokens,
+                reading,
+            ),
+            hunk_segment(app.hunk_mode, tokens),
+            layout_segment(app.layout, tokens),
+        ]
+        .spacing(COMMAND_SPACING)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Right)
+    .clip(true);
+
+    row![left, sync_group(app, tokens, reading), right]
+        .spacing(COMMAND_SPACING)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Fetch, Pull ↓n, Push ↑n and Stash (n files), fed by the same tracking state as the
+/// branch line. A disabled button explains itself on hover.
+fn sync_group<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let session = app.session();
+    let status = session.state.current_status.as_ref();
+    let running = running_in(app).or(session.state.loading.then_some("Refresh"));
+    let [fetch, pull, push] = crate::tracking::sync_buttons(status, running);
+    let stash = crate::tracking::stash_button(status, running);
+    row![
+        sync_button(crate::icons::Icon::Fetch, fetch, Message::Fetch, tokens, reading),
+        sync_button(crate::icons::Icon::Pull, pull, Message::Pull, tokens, reading),
+        sync_button(crate::icons::Icon::Push, push, Message::Push, tokens, reading),
+        sync_button(crate::icons::Icon::Stash, stash, Message::StashPush, tokens, reading),
     ]
     .spacing(COMMAND_SPACING)
     .align_y(Alignment::Center)
-    .width(Length::Fill);
-    for button in command_buttons(&top_commands, &branch_selection, app, tokens, reading) {
-        bar = bar.push(button);
+    .into()
+}
+
+/// The git action running in the active tab's worktree, by title ("Fetch", "Pull"…).
+fn running_in(app: &GitApp) -> Option<&str> {
+    let entry = app.activity.running()?;
+    match &entry.running {
+        Some((crate::activity::Lane::Worktree(path), _)) if *path == app.session().path => {
+            Some(entry.record.title.as_str())
+        }
+        _ => None,
     }
-    // The compare / conflict window: the selected change against HEAD, or yours against
-    // theirs when the file is conflicted.
-    bar = bar.push(super::chrome::labelled_button(
-        crate::icons::Icon::Compare,
-        "Compare".to_string(),
-        Message::OpenCompare { path: None, against: None },
-        !app.session().state.loading,
-        false,
-        tokens,
-        reading,
-    ));
-    bar.push(hunk_segment(app.hunk_mode, tokens))
-        .push(layout_segment(app.layout, tokens))
-        .into()
+}
+
+fn sync_button<'a>(
+    icon: crate::icons::Icon,
+    button: crate::tracking::SyncButton,
+    message: Message,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let drawn = super::chrome::labelled_button(icon, button.label, message, button.enabled, false, tokens, reading);
+    match button.reason {
+        Some(reason) if !button.enabled => iced::widget::tooltip(
+            drawn,
+            container(text(reason).font(reading.font).size((reading.size - 1.0).max(11.0)))
+                .padding([4, 8])
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(Background::Color(tokens.bg_raised)),
+                    text_color: Some(tokens.text_primary),
+                    border: Border {
+                        color: tokens.border,
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    shadow: Shadow::default(),
+                }),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into(),
+        _ => drawn,
+    }
 }
 
 /// A thin upright rule between the mark and the repository.

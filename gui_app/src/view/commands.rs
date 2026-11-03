@@ -13,7 +13,7 @@ use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::Element;
 
-use super::chrome::{icon_button, labelled_button, Reading};
+use super::chrome::{labelled_button, Reading};
 
 /// Where a command is drawn. The rules stay in `ribbon_commands`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,35 +101,6 @@ fn command_mark(command: RibbonCommand) -> Icon {
         RibbonCommand::CherryPick => Icon::Commit,
         RibbonCommand::Reset => Icon::Discard,
     }
-}
-
-pub(super) fn command_buttons(
-    items: &[RibbonItem],
-    selection: &Selection,
-    app: &GitApp,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Vec<Element<'static, Message>> {
-    items
-        .iter()
-        .map(|item| {
-            let enabled = item.enabled && !app.session().state.loading;
-            let message = command_message(item.command, selection, app);
-            let tip_key = format!("cmd-{:?}", item.command);
-            let tip_ready = app.tip_ready(&tip_key);
-            icon_button(
-                command_mark(item.command),
-                item.label,
-                tip_key,
-                tip_ready,
-                message,
-                enabled,
-                item.primary,
-                tokens,
-                reading,
-            )
-        })
-        .collect()
 }
 
 /// The same commands as text buttons, "mark Label", for the Inspector head: a word says

@@ -268,7 +268,18 @@ fn branch_tree_row<'a>(
             } || session.branch_filter.as_deref() == Some(name.as_str());
             let ink = if current { tokens.accent_primary } else { tokens.text_secondary };
             let mark = if remote { Icon::Cloud } else if in_worktree { Icon::Worktree } else { Icon::Branch };
-            let mut content = row![label_text(label, ink, reading)].spacing(6).align_y(Alignment::Center);
+            // The name takes the spare width and clips, so a long name never squeezes the
+            // ahead/behind badge onto a second line.
+            let name_cell = one_line(
+                text(label.to_string())
+                    .font(reading.font)
+                    .size(reading.size)
+                    .wrapping(Wrapping::None)
+                    .style(move |_| iced::widget::text::Style { color: Some(ink) }),
+                reading.size,
+                Length::Fill,
+            );
+            let mut content = row![name_cell].spacing(6).align_y(Alignment::Center);
             if let Some(branch) = branch {
                 content = content.push(tracking_badges(branch.ahead, branch.behind, tokens, reading));
             }
@@ -469,7 +480,7 @@ fn tracking_badges<'a>(
     let mut badges = row![].spacing(4).align_y(Alignment::Center);
     if ahead > 0 {
         badges = badges.push(
-            text(format!("+{ahead}"))
+            text(format!("↑{ahead}"))
                 .font(reading.font)
                 .size(size)
                 .wrapping(Wrapping::None)
@@ -480,7 +491,7 @@ fn tracking_badges<'a>(
     }
     if behind > 0 {
         badges = badges.push(
-            text(format!("-{behind}"))
+            text(format!("↓{behind}"))
                 .font(reading.font)
                 .size(size)
                 .wrapping(Wrapping::None)
