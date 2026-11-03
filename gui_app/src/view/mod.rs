@@ -12,6 +12,7 @@ mod context_overlay;
 mod explorer;
 mod filter_bar;
 mod history;
+mod opening;
 mod operation;
 mod palette;
 mod patch;
@@ -87,6 +88,7 @@ impl GitApp {
                 column![
                     tab_strip(self, tokens, reading),
                     operation::operation_banner(self, tokens, reading),
+                    opening::open_banner(self, tokens, reading),
                     workspace(self, &selection, tokens, reading),
                     terminal_pane(self, tokens, reading),
                 ]

@@ -56,6 +56,7 @@ pub(super) fn welcome<'a>(
     ]
     .spacing(20)
     .padding(40);
+    welcome = welcome.push(super::opening::open_banner(app, tokens, reading));
     if !app.settings.recent_repositories.is_empty() {
         welcome = welcome.push(recent_list(app, tokens, reading));
     }

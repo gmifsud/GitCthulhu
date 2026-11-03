@@ -16,7 +16,7 @@ use crate::jobs::{
     discard_hunk_in_background, discard_paths_in_background,
     edit_in_background, error_message, fetch_in_background, history_in_background,
     init_in_background, list_models_in_background, load_patch_in_background,
-    load_repository_in_background, open_repository_in_background, pull_in_background,
+    load_repository_in_background, open_repository_in_background, open_worktree_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
     compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
     stop_shell, suggest_commit_in_background, worktrees_in_background, BranchAction,
@@ -26,7 +26,7 @@ use crate::compare::{CompareSide, CompareState};
 use crate::terminal::{ConsoleChange, LineKind};
 use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
-use crate::session::{apply_retention, same_path, WorktreeSession, DIFF_LINES_PER_PAGE};
+use crate::session::{apply_retention, same_path, SessionKey, WorktreeSession, DIFF_LINES_PER_PAGE};
 use crate::theme::DesignTokens;
 use crate::{
     RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver, WorktreeOpener,
@@ -117,6 +117,10 @@ pub(crate) struct GitApp {
     pub(crate) settings: AppSettings,
     /// True while a welcome-screen open/init/clone is in flight (no session yet).
     pub(crate) opening: bool,
+    /// The open in progress, for the loading state. Set with `opening`.
+    pub(crate) open_progress: Option<crate::opening::OpenProgress>,
+    /// The last open that failed, with Retry and diagnostics. The workspace on screen is untouched.
+    pub(crate) open_failure: Option<crate::opening::OpenFailure>,
     pub(crate) panes: pane_grid::State<WorkspacePane>,
     pub(crate) layout: LayoutPreset,
     ratios: [layout::LayoutRatios; LayoutPreset::COUNT],
@@ -205,19 +209,19 @@ pub(crate) enum Message {
     /// Reload the active session (toolbar, shortcut, welcome-screen open).
     RefreshRepository,
     /// Reload the session at this path. Background finishes use this, never the pathless form.
-    RefreshSession(String),
+    RefreshSession(SessionKey),
     CheckoutBranch(String),
     CommitMessageChanged(String),
     EditWorktree(WorktreeEdit),
-    RepositoryLoaded(String, Vec<ViewEvent>),
-    CheckoutFinished(String, Result<(), DomainError>),
+    RepositoryLoaded(SessionKey, Vec<ViewEvent>),
+    CheckoutFinished(SessionKey, Result<(), DomainError>),
     Fetch,
-    FetchFinished(String, Result<(), DomainError>),
+    FetchFinished(SessionKey, Result<(), DomainError>),
     Push,
-    PushFinished(String, Result<(), DomainError>),
+    PushFinished(SessionKey, Result<(), DomainError>),
     Pull,
-    PullFinished(String, Result<(), DomainError>),
-    WorktreeEditFinished(String, WorktreeEdit, Result<(), DomainError>),
+    PullFinished(SessionKey, Result<(), DomainError>),
+    WorktreeEditFinished(SessionKey, WorktreeEdit, Result<(), DomainError>),
     /// Show the native folder dialog.
     ChooseRepositoryFolder,
     PaneResized(pane_grid::ResizeEvent),
@@ -289,7 +293,13 @@ pub(crate) enum Message {
     /// Replace the current adapter with the repository at this path.
     OpenRepository(String),
     /// Result of [`Message::OpenRepository`] after the opener finishes off-thread.
-    RepositoryOpened(String, Result<OpenedRepository, DomainError>),
+    RepositoryOpened(String, Result<crate::opening::OpenedWorkspace, crate::opening::OpenFailure>),
+    /// Open the path of the last failed open again.
+    RetryOpen,
+    /// Hide the failed-open banner.
+    DismissOpenFailure,
+    /// Put the failed open's diagnostics on the clipboard.
+    CopyOpenDiagnostics,
     /// Select the row the ribbon describes.
     Select(Selection),
     OpenSettings,
@@ -299,7 +309,7 @@ pub(crate) enum Message {
     AgentModelsLoaded(crate::ModelList),
     SuggestCommit,
     /// The session path is captured when the suggestion is spawned.
-    CommitSuggested(String, crate::CommitSuggestion),
+    CommitSuggested(SessionKey, crate::CommitSuggestion),
     ToggleTerminal,
     TerminalEdited(text_editor::Action),
     ClearTerminal,
@@ -368,7 +378,7 @@ pub(crate) enum Message {
     /// The user picked a worktree tab retention mode in Settings.
     WorktreeRetentionChosen(WorktreeTabRetention),
     PatchLoaded {
-        path: String,
+        session: SessionKey,
         generation: u64,
         result: Result<Vec<Patch>, DomainError>,
     },
@@ -381,9 +391,9 @@ pub(crate) enum Message {
     AskDiscard,
     CancelDiscard,
     ConfirmDiscard,
-    DiscardFinished(String, Result<(), DomainError>),
+    DiscardFinished(SessionKey, Result<(), DomainError>),
     /// Finished appending patterns to `.gitignore`.
-    IgnoreFinished(String, Result<(), DomainError>),
+    IgnoreFinished(SessionKey, Result<(), DomainError>),
     StageHunk {
         path: String,
         index: usize,
@@ -392,7 +402,7 @@ pub(crate) enum Message {
         path: String,
         index: usize,
     },
-    HunkFinished(String, Result<(), DomainError>),
+    HunkFinished(SessionKey, Result<(), DomainError>),
     ChooseInitFolder,
     InitFolderChosen(Option<String>),
     InitRepository(String),
@@ -424,7 +434,7 @@ pub(crate) enum Message {
     AskDropStash,
     CancelDropStash,
     ConfirmDropStash,
-    StashFinished(String, Result<(), DomainError>),
+    StashFinished(SessionKey, Result<(), DomainError>),
     AskCreateBranch,
     /// Open the New Branch dialog at any ref or commit (context menus).
     AskCreateBranchFrom(String),
@@ -435,7 +445,7 @@ pub(crate) enum Message {
     BranchNameChanged(String),
     ConfirmBranch,
     CancelBranch,
-    BranchFinished(String, Result<(), DomainError>),
+    BranchFinished(SessionKey, Result<(), DomainError>),
     AskCherryPick,
     AskReset,
     AskMerge,
@@ -445,7 +455,7 @@ pub(crate) enum Message {
     ConfirmReset(ResetMode),
     ConfirmMerge,
     ConfirmRebase,
-    HistoryFinished(String, Result<(), DomainError>),
+    HistoryFinished(SessionKey, Result<(), DomainError>),
     /// Focus the tab at this index.
     SelectWorktreeTab(usize),
     /// A graph WIP row was pressed: activate that session, then show its working tree.
@@ -459,7 +469,7 @@ pub(crate) enum Message {
     /// A worktree adapter built off-thread by the `WorktreeOpener`.
     WorktreeOpened(String, Result<OpenedRepository, DomainError>),
     /// The path is the session that asked, so a result for a closed tab is dropped.
-    WorktreesLoaded(String, Result<Vec<Worktree>, DomainError>),
+    WorktreesLoaded(SessionKey, Result<Vec<Worktree>, DomainError>),
     AskCreateWorktree,
     /// Prefill the create dialog from a context-menu target.
     AskCreateWorktreeFrom {
@@ -513,13 +523,13 @@ pub(crate) enum Message {
     IconTipTick,
     /// `git worktree add` finished. The first path is the session that ran it.
     WorktreeCreated {
-        session: String,
+        session: SessionKey,
         path: String,
         result: Result<(), DomainError>,
     },
     /// `git worktree remove` finished. The first path is the session that ran it.
     WorktreeRemoved {
-        session: String,
+        session: SessionKey,
         path: String,
         result: Result<(), DomainError>,
     },
@@ -575,7 +585,7 @@ fn finished_outcome(message: &Message) -> Option<(crate::activity::Lane, core_do
         | Message::StashFinished(path, result)
         | Message::BranchFinished(path, result)
         | Message::HistoryFinished(path, result)
-        | Message::WorktreeEditFinished(path, _, result) => (Lane::Worktree(path.clone()), result),
+        | Message::WorktreeEditFinished(path, _, result) => (Lane::Worktree(path.path.clone()), result),
         Message::WorktreeCreated { result, .. } | Message::WorktreeRemoved { result, .. } => (Lane::Worktrees, result),
         _ => return None,
     };
@@ -703,6 +713,8 @@ impl GitApp {
             ref_filter: String::new(),
             settings,
             opening: false,
+            open_progress: None,
+            open_failure: None,
             panes,
             layout,
             ratios,
@@ -783,10 +795,10 @@ impl GitApp {
         self.sessions.get_mut(self.active)
     }
 
-    /// The session whose path matches, used to route background finishes. An unknown path
-    /// (a closed or foreign tab) resolves to `None` so the finish is dropped.
-    fn session_mut_by_path(&mut self, path: &str) -> Option<&mut WorktreeSession> {
-        self.sessions.iter_mut().find(|session| session.path == path)
+    /// The session that started a background job. Matched by identity, so a result for a
+    /// closed tab, or for an earlier opening of the same folder, resolves to `None` and is dropped.
+    fn session_mut_for(&mut self, key: &SessionKey) -> Option<&mut WorktreeSession> {
+        self.sessions.iter_mut().find(|session| session.id == key.id)
     }
 
     /// Switch to another tab, applying the retention policy to the session left behind.
@@ -807,6 +819,24 @@ impl GitApp {
         self.branch_list_open = false;
         self.context_menu = None;
         self.confirm_detach = None;
+    }
+
+    #[cfg(test)]
+    fn active_key(&self) -> SessionKey {
+        self.active_session().map(WorktreeSession::key).expect("an open session")
+    }
+
+    /// The open session for `path`, or a key that matches no session (a closed tab).
+    #[cfg(test)]
+    fn key_of(&self, path: &str) -> SessionKey {
+        self.sessions
+            .iter()
+            .find(|session| session.path == path)
+            .map(WorktreeSession::key)
+            .unwrap_or(SessionKey {
+                id: crate::session::SessionId::NONE,
+                path: path.to_string(),
+            })
     }
 
     #[cfg(test)]
@@ -949,13 +979,13 @@ impl GitApp {
         let repo = session.adapter.clone();
         session.patch_generation = session.patch_generation.wrapping_add(1);
         let generation = session.patch_generation;
-        let path = session.path.clone();
+        let key = session.key();
         session.patches.clear();
         session.patch_error = None;
         session.patch_pending = true;
         Task::perform(load_patch_in_background(repo, query), move |result| {
             Message::PatchLoaded {
-                path: path.clone(),
+                session: key.clone(),
                 generation,
                 result,
             }
@@ -1021,9 +1051,9 @@ impl GitApp {
             self.error = Some("Choose a model under Settings.".to_string());
             return Task::none();
         }
-        let Some((repo, path)) = self
+        let Some((repo, key)) = self
             .active_session()
-            .map(|session| (session.adapter.clone(), session.path.clone()))
+            .map(|session| (session.adapter.clone(), session.key()))
         else {
             return Task::none();
         };
@@ -1033,7 +1063,7 @@ impl GitApp {
         let suggest = std::sync::Arc::clone(&self.suggest_commit);
         Task::perform(
             suggest_commit_in_background(repo, files, token, model, suggest),
-            move |result| Message::CommitSuggested(path.clone(), result),
+            move |result| Message::CommitSuggested(key.clone(), result),
         )
     }
 
@@ -1164,7 +1194,7 @@ impl GitApp {
             Message::RefreshSession(path) => self.begin_refresh_for(&path, true),
             Message::RepositoryLoaded(path, events) => {
                 let mut saw_error = None;
-                let Some(session) = self.session_mut_by_path(&path) else {
+                let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
                 };
                 for event in events {
@@ -1178,7 +1208,7 @@ impl GitApp {
                 if let Some(message) = saw_error {
                     self.error.get_or_insert(message);
                 }
-                if self.session().path == path {
+                if self.session().id == path.id {
                     self.start_patch()
                 } else {
                     Task::none()
@@ -1397,10 +1427,10 @@ impl GitApp {
             Message::StageMarked => self.edit_marked(true),
             Message::UnstageMarked => self.edit_marked(false),
             Message::CheckoutBranch(branch) => {
-                let Some(path) = self.active_session().map(|session| session.path.clone()) else {
+                let Some(key) = self.active_session().map(WorktreeSession::key) else {
                     return Task::none();
                 };
-                self.checkout_for(&path, branch)
+                self.checkout_for(&key, branch)
             }
             Message::CheckoutFinished(path, result) => {
                 // A checkout moves this worktree's branch, which the explorer lists.
@@ -1420,12 +1450,13 @@ impl GitApp {
                     return Task::none();
                 }
                 let repo = session.adapter.clone();
-                let path = session.path.clone();
+                let key = session.key();
+                let path = key.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
                 self.begin_activity(&path, crate::activity::Action::new("Fetch", "default remote", "git fetch"));
                 Task::perform(fetch_in_background(repo), move |result| {
-                    Message::FetchFinished(path.clone(), result)
+                    Message::FetchFinished(key.clone(), result)
                 })
             }
             Message::FetchFinished(path, result) => self.finish_reload(&path, result),
@@ -1437,13 +1468,14 @@ impl GitApp {
                     return Task::none();
                 }
                 let repo = session.adapter.clone();
-                let path = session.path.clone();
+                let key = session.key();
+                let path = key.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
                 let branch = crate::view::current_branch(&self.session().state.branches);
                 self.begin_activity(&path, crate::activity::Action::new("Push", branch, "git push"));
                 Task::perform(push_in_background(repo), move |result| {
-                    Message::PushFinished(path.clone(), result)
+                    Message::PushFinished(key.clone(), result)
                 })
             }
             Message::PushFinished(path, result) => self.finish_reload(&path, result),
@@ -1455,7 +1487,8 @@ impl GitApp {
                     return Task::none();
                 }
                 let repo = session.adapter.clone();
-                let path = session.path.clone();
+                let key = session.key();
+                let path = key.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
                 let branch = crate::view::current_branch(&self.session().state.branches);
@@ -1464,7 +1497,7 @@ impl GitApp {
                     crate::activity::Action::new("Pull", branch, "git pull --no-rebase --ff-only"),
                 );
                 Task::perform(pull_in_background(repo), move |result| {
-                    Message::PullFinished(path.clone(), result)
+                    Message::PullFinished(key.clone(), result)
                 })
             }
             Message::PullFinished(path, result) => self.finish_reload(&path, result),
@@ -1487,17 +1520,18 @@ impl GitApp {
                     }
                 }
                 let repo = session.adapter.clone();
-                let path = session.path.clone();
+                let key = session.key();
+                let path = key.path.clone();
                 self.session_mut().state.loading = true;
                 self.error = None;
                 self.begin_activity(&path, crate::activity::edit_action(&edit));
                 let report = edit.clone();
                 Task::perform(edit_in_background(repo, edit), move |result| {
-                    Message::WorktreeEditFinished(path.clone(), report.clone(), result)
+                    Message::WorktreeEditFinished(key.clone(), report.clone(), result)
                 })
             }
             Message::WorktreeEditFinished(path, edit, result) => {
-                let Some(session) = self.session_mut_by_path(&path) else {
+                let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
                 };
                 session.state.loading = false;
@@ -1670,14 +1704,19 @@ impl GitApp {
                     return Task::none();
                 }
                 self.opening = true;
+                self.open_progress = Some(crate::opening::OpenProgress::new(path.clone()));
+                self.open_failure = None;
                 self.error = None;
                 let open = Arc::clone(&self.open_repository);
                 Task::perform(
                     open_repository_in_background(open, path),
-                    |(path, result)| Message::RepositoryOpened(path, result.map(OpenedRepository)),
+                    |(path, result)| Message::RepositoryOpened(path, result),
                 )
             }
-            Message::RepositoryOpened(path, Ok(OpenedRepository(repo))) => {
+            Message::RepositoryOpened(path, Ok(opened)) => {
+                // Everything that could fail has run: the adapter opened and its status read.
+                // Only now is the workspace on screen replaced.
+                let crate::opening::OpenedWorkspace { repo, events } = opened;
                 let open_repository = Arc::clone(&self.open_repository);
                 let open_worktree = Arc::clone(&self.open_worktree);
                 let initialise = Arc::clone(&self.initialise);
@@ -1711,13 +1750,32 @@ impl GitApp {
                 self.activity_store = activity_store;
                 self.activity_requested = activity_requested;
                 self.bottom_tab = bottom_tab;
-                Task::done(Message::RefreshRepository)
+                let key = self.session().key();
+                let loaded = self.update(Message::RepositoryLoaded(key, events));
+                Task::batch([loaded, self.load_catalogue()])
             }
-            Message::RepositoryOpened(_, Err(error)) => {
+            Message::RepositoryOpened(_, Err(mut failure)) => {
                 self.opening = false;
-                self.error = Some(error_message(&error));
+                self.open_progress = None;
+                failure.last_completed = self.activity.last_finished_title();
+                self.open_failure = Some(failure);
                 Task::none()
             }
+            Message::RetryOpen => match self.open_failure.as_ref() {
+                Some(failure) => {
+                    let path = failure.path.clone();
+                    self.update(Message::OpenRepository(path))
+                }
+                None => Task::none(),
+            },
+            Message::DismissOpenFailure => {
+                self.open_failure = None;
+                Task::none()
+            }
+            Message::CopyOpenDiagnostics => match self.open_failure.as_ref() {
+                Some(failure) => iced::clipboard::write(failure.diagnostics()),
+                None => Task::none(),
+            },
             Message::ChooseInitFolder => {
                 if self.opening {
                     return Task::none();
@@ -1859,12 +1917,12 @@ impl GitApp {
                 self.agent_busy = false;
                 let change = self.console.record(result.exchange);
                 self.mirror_console(change);
-                if self.session_mut_by_path(&path).is_none() {
+                if self.session_mut_for(&path).is_none() {
                     return Task::none();
                 }
                 match result.subject {
                     Ok(subject) => {
-                        if let Some(session) = self.session_mut_by_path(&path) {
+                        if let Some(session) = self.session_mut_for(&path) {
                             session.commit_message = subject;
                         }
                     }
@@ -2096,11 +2154,11 @@ impl GitApp {
                 self.persist_settings(self.settings.clone())
             }
             Message::PatchLoaded {
-                path,
+                session: path,
                 generation,
                 result,
             } => {
-                let Some(session) = self.session_mut_by_path(&path) else {
+                let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
                 };
                 if generation != session.patch_generation {
@@ -2154,7 +2212,8 @@ impl GitApp {
                     return Task::none();
                 }
                 let repo = session.adapter.clone();
-                let session_path = session.path.clone();
+                let session_key = session.key();
+                let session_path = session_key.path.clone();
                 self.confirm_discard = None;
                 self.session_mut().state.loading = true;
                 self.error = None;
@@ -2168,7 +2227,7 @@ impl GitApp {
                 );
                 Task::perform(
                     discard_paths_in_background(repo, files),
-                    move |result| Message::DiscardFinished(session_path.clone(), result),
+                    move |result| Message::DiscardFinished(session_key.clone(), result),
                 )
             }
             Message::DiscardFinished(path, result) => self.finish_reload(&path, result),
@@ -2320,7 +2379,7 @@ impl GitApp {
             Message::BranchFinished(path, result) => {
                 // An unknown path (closed or foreign tab) is dropped whole: no checkout,
                 // no error, no refresh.
-                let Some(session) = self.session_mut_by_path(&path) else {
+                let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
                 };
                 session.state.loading = false;
@@ -2349,7 +2408,7 @@ impl GitApp {
             Message::ConfirmMerge => self.confirm_merge(),
             Message::ConfirmRebase => self.confirm_rebase(),
             Message::HistoryFinished(path, result) => {
-                let Some(session) = self.session_mut_by_path(&path) else {
+                let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
                 };
                 session.state.loading = false;
@@ -2396,7 +2455,7 @@ impl GitApp {
             Message::WorktreeOpened(path, result) => self.worktree_opened(path, result),
             Message::WorktreesLoaded(path, result) => {
                 // A result for a closed tab or a replaced repository is dropped.
-                if self.session_mut_by_path(&path).is_none() {
+                if self.session_mut_for(&path).is_none() {
                     return Task::none();
                 }
                 match result {
@@ -2600,7 +2659,7 @@ impl GitApp {
                         let reload = self.load_catalogue_for(&session);
                         // Open the new tab only when the session that asked is still here;
                         // otherwise the repository was replaced and the path is foreign.
-                        if self.sessions.iter().any(|open| open.path == session) {
+                        if self.sessions.iter().any(|open| open.id == session.id) {
                             Task::batch([reload, Task::done(Message::OpenWorktree(path))])
                         } else {
                             reload
@@ -2697,21 +2756,21 @@ impl GitApp {
 
     /// Reload the catalogue through the active session.
     fn load_catalogue(&mut self) -> Task<Message> {
-        let Some(path) = self.active_session().map(|session| session.path.clone()) else {
+        let Some(key) = self.active_session().map(WorktreeSession::key) else {
             return Task::none();
         };
-        self.load_catalogue_for(&path)
+        self.load_catalogue_for(&key)
     }
 
     /// Reload the catalogue through the session at `path`. An unknown path is dropped.
-    fn load_catalogue_for(&mut self, path: &str) -> Task<Message> {
-        let Some(session) = self.session_mut_by_path(path) else {
+    fn load_catalogue_for(&mut self, key: &SessionKey) -> Task<Message> {
+        let Some(session) = self.session_mut_for(key) else {
             return Task::none();
         };
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
         Task::perform(worktrees_in_background(repo), move |result| {
-            Message::WorktreesLoaded(path.clone(), result)
+            Message::WorktreesLoaded(key.clone(), result)
         })
     }
 
@@ -2733,7 +2792,7 @@ impl GitApp {
         self.error = None;
         let open = Arc::clone(&self.open_worktree);
         Task::perform(
-            open_repository_in_background(open, path),
+            open_worktree_in_background(open, path),
             |(path, result)| Message::WorktreeOpened(path, result.map(OpenedRepository)),
         )
     }
@@ -2772,13 +2831,11 @@ impl GitApp {
                     self.activate(index);
                     return Task::none();
                 }
-                self.sessions.push(WorktreeSession::new(
-                    path.clone(),
-                    repo,
-                    self.settings.clone(),
-                ));
+                let session = WorktreeSession::new(path, repo, self.settings.clone());
+                let key = session.key();
+                self.sessions.push(session);
                 self.activate(self.sessions.len() - 1);
-                Task::done(Message::RefreshSession(path))
+                Task::done(Message::RefreshSession(key))
             }
             Err(error) => {
                 self.error = Some(error_message(&error));
@@ -2845,14 +2902,14 @@ impl GitApp {
         }
         let Some((repo, session)) = self
             .active_session()
-            .map(|session| (session.adapter.clone(), session.path.clone()))
+            .map(|session| (session.adapter.clone(), session.key()))
         else {
             return Task::none();
         };
         self.worktree_busy = true;
         self.error = None;
         self.begin_activity_in(
-            &session,
+            &session.path,
             crate::activity::Lane::Worktrees,
             crate::activity::Action::new(
                 "Add worktree",
@@ -2907,7 +2964,8 @@ impl GitApp {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
+        let path = key.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
         let short = commit_id.get(..8).unwrap_or(&commit_id).to_string();
@@ -2918,7 +2976,7 @@ impl GitApp {
         use crate::jobs::checkout_detached_in_background;
         Task::perform(
             checkout_detached_in_background(repo, commit_id),
-            move |result| Message::CheckoutFinished(path.clone(), result),
+            move |result| Message::CheckoutFinished(key.clone(), result),
         )
     }
 
@@ -2948,14 +3006,14 @@ impl GitApp {
             .enumerate()
             .filter(|(_, session)| !same_path(&session.path, &path))
             .min_by_key(|(index, _)| usize::from(*index != active))
-            .map(|(_, session)| (session.adapter.clone(), session.path.clone()));
+            .map(|(_, session)| (session.adapter.clone(), session.key()));
         let Some((repo, session)) = runner else {
             return Task::none();
         };
         self.worktree_busy = true;
         self.error = None;
         self.begin_activity_in(
-            &session,
+            &session.path,
             crate::activity::Lane::Worktrees,
             crate::activity::Action::new(
                 "Remove worktree",
@@ -2976,13 +3034,13 @@ impl GitApp {
 
     /// Stop the session's spinner, then reload on success or surface git's message.
     /// A finish for a closed or unknown path is dropped.
-    fn finish_reload(&mut self, path: &str, result: Result<(), DomainError>) -> Task<Message> {
-        let Some(session) = self.session_mut_by_path(path) else {
+    fn finish_reload(&mut self, key: &SessionKey, result: Result<(), DomainError>) -> Task<Message> {
+        let Some(session) = self.session_mut_for(key) else {
             return Task::none();
         };
         session.state.loading = false;
         match result {
-            Ok(()) => Task::done(Message::RefreshSession(path.to_string())),
+            Ok(()) => Task::done(Message::RefreshSession(key.clone())),
             Err(error) => {
                 self.error = Some(error_message(&error));
                 Task::none()
@@ -2992,41 +3050,42 @@ impl GitApp {
 
     /// Reload the active session. UI-triggered refresh only.
     fn begin_refresh(&mut self, clear_error: bool) -> Task<Message> {
-        let Some(path) = self.active_session().map(|session| session.path.clone()) else {
+        let Some(key) = self.active_session().map(WorktreeSession::key) else {
             return Task::none();
         };
-        self.begin_refresh_for(&path, clear_error)
+        self.begin_refresh_for(&key, clear_error)
     }
 
     /// Reload the session at `path`, whichever tab is active. An unknown path is dropped.
-    fn begin_refresh_for(&mut self, path: &str, clear_error: bool) -> Task<Message> {
-        let Some(session) = self.session_mut_by_path(path) else {
+    fn begin_refresh_for(&mut self, key: &SessionKey, clear_error: bool) -> Task<Message> {
+        let Some(session) = self.session_mut_for(key) else {
             return Task::none();
         };
         if session.state.loading {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
         session.state.loading = true;
         if clear_error {
             self.error = None;
         }
         Task::perform(load_repository_in_background(repo), move |events| {
-            Message::RepositoryLoaded(path.clone(), events)
+            Message::RepositoryLoaded(key.clone(), events)
         })
     }
 
     /// Check out `branch` in the session at `path`, whichever tab is active.
-    fn checkout_for(&mut self, path: &str, branch: String) -> Task<Message> {
-        let Some(session) = self.session_mut_by_path(path) else {
+    fn checkout_for(&mut self, key: &SessionKey, branch: String) -> Task<Message> {
+        let Some(session) = self.session_mut_for(key) else {
             return Task::none();
         };
         if session.state.loading {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
+        let path = key.path.clone();
         session.state.loading = true;
         session.selection = Some(Selection::Branch {
             name: branch.clone(),
@@ -3038,7 +3097,7 @@ impl GitApp {
             crate::activity::Action::new("Checkout", branch.clone(), format!("git checkout {branch}")),
         );
         Task::perform(checkout_in_background(repo, branch), move |result| {
-            Message::CheckoutFinished(path.clone(), result)
+            Message::CheckoutFinished(key.clone(), result)
         })
     }
 
@@ -3293,7 +3352,7 @@ impl GitApp {
                     .sessions
                     .iter()
                     .find(|session| folder_is_inside(&folder, &session.path))
-                    .map(|session| session.path.clone());
+                    .map(WorktreeSession::key);
                 let focus = Task::batch([focus_shell(), saved]);
                 match refresh {
                     Some(path) => Task::batch([focus, self.update(Message::RefreshSession(path))]),
@@ -3490,7 +3549,8 @@ impl GitApp {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
+        let path = key.path.clone();
         let session = self.session_mut();
         session.pending_checkout = match &action {
             BranchAction::Create { name, .. } if checkout => Some(name.clone()),
@@ -3504,7 +3564,7 @@ impl GitApp {
         self.error = None;
         self.begin_activity(&path, crate::activity::branch_action(&action));
         Task::perform(branch_in_background(repo, action), move |result| {
-            Message::BranchFinished(path.clone(), result)
+            Message::BranchFinished(key.clone(), result)
         })
     }
 
@@ -3639,7 +3699,8 @@ impl GitApp {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
+        let path = key.path.clone();
         self.history_prompt = None;
         self.branch_prompt = None;
         self.confirm_discard = None;
@@ -3648,7 +3709,7 @@ impl GitApp {
         self.error = None;
         self.begin_activity(&path, crate::activity::history_action(&action));
         Task::perform(history_in_background(repo, action), move |result| {
-            Message::HistoryFinished(path.clone(), result)
+            Message::HistoryFinished(key.clone(), result)
         })
     }
 
@@ -3683,7 +3744,8 @@ impl GitApp {
         }
         let patterns: Vec<String> = paths.iter().map(|path| gitignore_pattern(path, false)).collect();
         let repo = session.adapter.clone();
-        let session_path = session.path.clone();
+        let session_key = session.key();
+        let session_path = session_key.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
         self.begin_activity(
@@ -3691,7 +3753,7 @@ impl GitApp {
             crate::activity::Action::new("Ignore", patterns.join(", "), "append to .gitignore"),
         );
         Task::perform(append_gitignore_in_background(repo, patterns), move |result| {
-            Message::IgnoreFinished(session_path.clone(), result)
+            Message::IgnoreFinished(session_key.clone(), result)
         })
     }
 
@@ -3704,7 +3766,8 @@ impl GitApp {
         }
         let pattern = gitignore_pattern(&path, is_dir);
         let repo = session.adapter.clone();
-        let session_path = session.path.clone();
+        let session_key = session.key();
+        let session_path = session_key.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
         self.begin_activity(
@@ -3713,7 +3776,7 @@ impl GitApp {
         );
         Task::perform(
             append_gitignore_in_background(repo, vec![pattern]),
-            move |result| Message::IgnoreFinished(session_path.clone(), result),
+            move |result| Message::IgnoreFinished(session_key.clone(), result),
         )
     }
 
@@ -3868,14 +3931,15 @@ impl GitApp {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let path = session.path.clone();
+        let key = session.key();
+        let path = key.path.clone();
         self.confirm_drop = None;
         self.confirm_discard = None;
         self.session_mut().state.loading = true;
         self.error = None;
         self.begin_activity(&path, crate::activity::stash_action(&action));
         Task::perform(stash_in_background(repo, action), move |result| {
-            Message::StashFinished(path.clone(), result)
+            Message::StashFinished(key.clone(), result)
         })
     }
 
@@ -3899,7 +3963,8 @@ impl GitApp {
             return Task::none();
         }
         let repo = session.adapter.clone();
-        let session_path = session.path.clone();
+        let session_key = session.key();
+        let session_path = session_key.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
         self.begin_activity(
@@ -3911,14 +3976,14 @@ impl GitApp {
             },
         );
         if stage {
-            let finish_path = session_path.clone();
+            let finish_key = session_key.clone();
             Task::perform(stage_hunk_in_background(repo, path, hunk), move |result| {
-                Message::HunkFinished(finish_path.clone(), result)
+                Message::HunkFinished(finish_key.clone(), result)
             })
         } else {
             Task::perform(
                 discard_hunk_in_background(repo, path, hunk, place),
-                move |result| Message::HunkFinished(session_path.clone(), result),
+                move |result| Message::HunkFinished(session_key.clone(), result),
             )
         }
     }
@@ -3960,7 +4025,10 @@ impl GitApp {
             );
         }
         // Keep the running time counting and let a finished result fade out of the status bar.
-        if self.activity.running().is_some() || self.activity.recent_result().is_some() {
+        if self.activity.running().is_some()
+            || self.activity.recent_result().is_some()
+            || self.open_progress.is_some()
+        {
             subscriptions.push(
                 iced::time::every(iced::time::Duration::from_millis(500)).map(|_| Message::ActivityTick),
             );
@@ -4339,7 +4407,7 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(populated_repo()));
         let _ = app.update(Message::RefreshRepository);
         let _ = app.update(Message::RepositoryLoaded(
-            app.active_path(),
+            app.active_key(),
             load_repository(&populated_repo()),
         ));
         assert!(!app.session_mut().state.loading);
@@ -4361,6 +4429,115 @@ mod tests {
     #[test]
     fn welcome_has_no_repository() {
         assert!(GitApp::welcome().sessions.is_empty());
+    }
+
+    /// A successful background open of `repo`, with the first load it would have read.
+    fn opened(repo: SharedRepository) -> crate::opening::OpenedWorkspace {
+        let events = load_repository(repo.as_ref());
+        crate::opening::OpenedWorkspace { repo, events }
+    }
+
+    fn open_failure(path: &str, message: &str) -> crate::opening::OpenFailure {
+        crate::opening::OpenFailure::new(
+            path,
+            crate::opening::OpenStage::Opening,
+            &DomainError::Unknown(message.to_string()),
+            std::time::Duration::from_millis(5),
+        )
+    }
+
+    #[test]
+    fn delayed_results_from_an_obsolete_session_are_dropped_after_reopening_the_same_folder() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let obsolete = app.active_key();
+        let _ = app.update(Message::RepositoryOpened(
+            obsolete.path.clone(),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
+        ));
+        assert_ne!(app.active_key().id, obsolete.id, "a reopen is a new session");
+        assert_eq!(app.active_key().path, obsolete.path);
+        app.session_mut().commit_message = "draft".to_string();
+        app.session_mut().state.loading = true;
+        let commits = app.session().state.commits.len();
+
+        let _ = app.update(Message::RepositoryLoaded(
+            obsolete.clone(),
+            load_repository(&populated_repo()),
+        ));
+        let _ = app.update(Message::CheckoutFinished(
+            obsolete,
+            Err(DomainError::Unknown("stale".to_string())),
+        ));
+
+        assert_eq!(app.session().state.commits.len(), commits);
+        assert!(app.session().state.loading, "the new session's own job is still running");
+        assert_eq!(app.session().commit_message, "draft");
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn a_patch_for_a_closed_tab_never_reaches_a_tab_reopened_on_the_same_folder() {
+        let mut app = two_session_app();
+        let closed = app.key_of(SECOND);
+        let _ = app.update(Message::CloseWorktreeTab(1));
+        app.sessions.push(WorktreeSession::new(
+            SECOND.to_string(),
+            Arc::new(populated_repo()),
+            AppSettings::default(),
+        ));
+        app.sessions[1].patch_pending = true;
+        let generation = app.sessions[1].patch_generation;
+
+        let _ = app.update(Message::PatchLoaded {
+            session: closed,
+            generation,
+            result: Err(DomainError::Unknown("stale".to_string())),
+        });
+
+        assert!(app.sessions[1].patch_pending);
+        assert_eq!(app.sessions[1].patch_error, None);
+    }
+
+    #[test]
+    fn a_failed_open_keeps_the_workspace_and_offers_retry() {
+        let mut app = GitApp::with_repo(Arc::new(populated_repo()));
+        app.session_mut().commit_message = "draft".to_string();
+        let kept = app.active_key();
+
+        let _ = app.update(Message::OpenRepository("D:/other".to_string()));
+        assert!(app.opening);
+        assert_eq!(app.open_progress.as_ref().map(|p| p.path.as_str()), Some("D:/other"));
+        let _ = app.update(Message::RepositoryOpened(
+            "D:/other".to_string(),
+            Err(open_failure("D:/other", "not a git repository")),
+        ));
+
+        assert_eq!(app.active_key(), kept);
+        assert_eq!(app.session().commit_message, "draft");
+        assert!(!app.opening);
+        assert!(app.open_progress.is_none());
+        let failure = app.open_failure.as_ref().expect("failure banner");
+        assert!(failure.diagnostics().contains("Repository: D:/other"));
+
+        let _ = app.update(Message::RetryOpen);
+        assert!(app.opening);
+        assert!(app.open_failure.is_none());
+        assert_eq!(app.open_progress.as_ref().map(|p| p.path.as_str()), Some("D:/other"));
+    }
+
+    #[test]
+    fn a_successful_open_arrives_already_loaded() {
+        let mut app = GitApp::welcome();
+        app.opening = true;
+
+        let _ = app.update(Message::RepositoryOpened(
+            "D:/repo".to_string(),
+            Ok(opened(Arc::new(populated_repo()))),
+        ));
+
+        assert_eq!(app.session().state.commits.len(), 2);
+        assert!(app.open_progress.is_none());
+        assert!(app.open_failure.is_none());
     }
 
     #[test]
@@ -4389,7 +4566,7 @@ mod tests {
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\repo".to_string(),
-            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
         ));
 
         assert!(!app.sessions.is_empty());
@@ -4408,7 +4585,7 @@ mod tests {
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\repo".to_string(),
-            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
         ));
 
         let listed = (app.list_models)(String::new());
@@ -4854,7 +5031,7 @@ mod tests {
         assert!(app.session_mut().state.loading);
         assert_eq!(app.session().pending_checkout.as_deref(), Some("topic"));
 
-        let _ = app.update(Message::BranchFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::BranchFinished(app.active_key(), Ok(())));
         assert!(app.session().pending_checkout.is_none());
         assert!(app.session_mut().state.loading);
         assert_eq!(
@@ -4951,12 +5128,14 @@ mod tests {
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\repo".to_string(),
-            Err(DomainError::Unknown("cannot open that folder".into())),
+            Err(open_failure("D:/repo", "cannot open that folder")),
         ));
 
         assert!(app.sessions.is_empty());
         assert!(!app.opening);
-        assert_eq!(app.error.as_deref(), Some("cannot open that folder"));
+        assert!(app.open_progress.is_none());
+        let failure = app.open_failure.as_ref().expect("banner");
+        assert!(failure.summary().contains("cannot open that folder"));
     }
 
     #[test]
@@ -5039,7 +5218,7 @@ mod tests {
             ..FakeGitRepository::ok()
         };
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        let _ = app.update(Message::RepositoryLoaded(app.active_path(), load_repository(&missing)));
+        let _ = app.update(Message::RepositoryLoaded(app.active_key(), load_repository(&missing)));
         assert_eq!(app.error.as_deref(), Some("Not a Git repository."));
     }
 
@@ -5072,7 +5251,7 @@ mod tests {
     fn successful_checkout_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
-        let _ = app.update(Message::CheckoutFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::CheckoutFinished(app.active_key(), Ok(())));
         assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
@@ -5082,7 +5261,7 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
         let reason = "error: Your local changes would be overwritten by checkout".to_string();
-        let _ = app.update(Message::CheckoutFinished(app.active_path(), Err(DomainError::Unknown(
+        let _ = app.update(Message::CheckoutFinished(app.active_key(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
         assert!(!app.session_mut().state.loading);
@@ -5118,7 +5297,7 @@ mod tests {
     fn successful_fetch_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
-        let _ = app.update(Message::FetchFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::FetchFinished(app.active_key(), Ok(())));
         assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
@@ -5128,7 +5307,7 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
         let reason = "fatal: No remote repository specified.".to_string();
-        let _ = app.update(Message::FetchFinished(app.active_path(), Err(DomainError::Unknown(
+        let _ = app.update(Message::FetchFinished(app.active_key(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
         assert!(!app.session_mut().state.loading);
@@ -5164,7 +5343,7 @@ mod tests {
     fn successful_push_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
-        let _ = app.update(Message::PushFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::PushFinished(app.active_key(), Ok(())));
         assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
@@ -5174,7 +5353,7 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
         let reason = "fatal: The current branch main has no upstream branch.".to_string();
-        let _ = app.update(Message::PushFinished(app.active_path(), Err(DomainError::Unknown(
+        let _ = app.update(Message::PushFinished(app.active_key(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
         assert!(!app.session_mut().state.loading);
@@ -5210,7 +5389,7 @@ mod tests {
     fn successful_pull_stops_loading_without_an_error() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
-        let _ = app.update(Message::PullFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::PullFinished(app.active_key(), Ok(())));
         assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
     }
@@ -5220,7 +5399,7 @@ mod tests {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
         let reason = "fatal: Not possible to fast-forward, aborting.".to_string();
-        let _ = app.update(Message::PullFinished(app.active_path(), Err(DomainError::Unknown(
+        let _ = app.update(Message::PullFinished(app.active_key(), Err(DomainError::Unknown(
             reason.clone(),
         ))));
         assert!(!app.session_mut().state.loading);
@@ -5275,7 +5454,7 @@ mod tests {
         app.session_mut().state.loading = true;
         app.session_mut().commit_message = "record the change".to_string();
         let _ = app.update(Message::WorktreeEditFinished(
-            app.active_path(),
+            app.active_key(),
             WorktreeEdit::Commit("record the change".to_string()),
             Ok(()),
         ));
@@ -5290,7 +5469,7 @@ mod tests {
         app.session_mut().state.loading = true;
         app.session_mut().commit_message = "still drafting".to_string();
         let _ = app.update(Message::WorktreeEditFinished(
-            app.active_path(),
+            app.active_key(),
             WorktreeEdit::Stage(vec!["a.txt".to_string()]),
             Ok(()),
         ));
@@ -5304,7 +5483,7 @@ mod tests {
         app.session_mut().state.loading = true;
         let reason = "error: hook declined to update".to_string();
         let _ = app.update(Message::WorktreeEditFinished(
-            app.active_path(),
+            app.active_key(),
             WorktreeEdit::Commit("record the change".to_string()),
             Err(DomainError::Unknown(reason.clone())),
         ));
@@ -5355,7 +5534,7 @@ mod tests {
         assert!(app.sessions.is_empty());
         let _ = app.update(Message::RepositoryOpened(
             r"D:\fresh".to_string(),
-            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
         ));
         assert!(!app.sessions.is_empty());
         assert_eq!(app.error, None);
@@ -5395,7 +5574,7 @@ mod tests {
         assert!(app.opening);
         let _ = app.update(Message::RepositoryOpened(
             r"D:\parent\repo".to_string(),
-            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
         ));
         assert!(!app.sessions.is_empty());
         assert_eq!(app.session().path, r"D:\parent\repo");
@@ -5639,7 +5818,7 @@ mod tests {
             name: "gone".to_string(),
             commit_id: "abc1234".to_string(),
         });
-        let _ = app.update(Message::RepositoryLoaded(app.active_path(), load_repository(
+        let _ = app.update(Message::RepositoryLoaded(app.active_key(), load_repository(
             &FakeGitRepository::ok(),
         )));
         assert!(app.session_mut().selection.is_none());
@@ -5728,7 +5907,7 @@ mod tests {
     fn a_failed_history_command_keeps_git_message_and_reloads() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         app.session_mut().state.loading = true;
-        let _ = app.update(Message::HistoryFinished(app.active_path(), Err(DomainError::Unknown(
+        let _ = app.update(Message::HistoryFinished(app.active_key(), Err(DomainError::Unknown(
             "conflict in a.txt".to_string(),
         ))));
         assert_eq!(app.error.as_deref(), Some("conflict in a.txt"));
@@ -5741,7 +5920,7 @@ mod tests {
         app.session_mut().state.loading = true;
 
         // A finish routed to a closed or foreign tab must not touch the active session.
-        let _ = app.update(Message::CheckoutFinished(r"D:\other".to_string(), Ok(())));
+        let _ = app.update(Message::CheckoutFinished(app.key_of(r"D:\other"), Ok(())));
 
         assert!(app.session().state.loading);
         assert_eq!(app.sessions.len(), 1);
@@ -5769,7 +5948,7 @@ mod tests {
         app.sessions[0].state.loading = true;
         app.sessions[1].state.loading = true;
 
-        let _ = app.update(Message::CheckoutFinished(SECOND.to_string(), Ok(())));
+        let _ = app.update(Message::CheckoutFinished(app.key_of(SECOND), Ok(())));
 
         assert!(app.sessions[0].state.loading);
         assert!(!app.sessions[1].state.loading);
@@ -5780,7 +5959,7 @@ mod tests {
     fn refresh_session_reloads_the_named_session_not_the_active_one() {
         let mut app = two_session_app();
 
-        let _ = app.update(Message::RefreshSession(SECOND.to_string()));
+        let _ = app.update(Message::RefreshSession(app.key_of(SECOND)));
 
         assert!(!app.sessions[0].state.loading);
         assert!(app.sessions[1].state.loading);
@@ -5790,7 +5969,7 @@ mod tests {
     fn refresh_session_for_an_unknown_path_is_dropped() {
         let mut app = two_session_app();
 
-        let _ = app.update(Message::RefreshSession(r"D:\gone".to_string()));
+        let _ = app.update(Message::RefreshSession(app.key_of(r"D:\gone")));
 
         assert!(app.sessions.iter().all(|session| !session.state.loading));
     }
@@ -5803,7 +5982,7 @@ mod tests {
         app.sessions[1].state.loading = true;
 
         let _ = app.update(Message::WorktreeEditFinished(
-            SECOND.to_string(),
+            app.key_of(SECOND),
             WorktreeEdit::Commit("record the change".to_string()),
             Ok(()),
         ));
@@ -5818,7 +5997,7 @@ mod tests {
         let mut app = two_session_app();
 
         let _ = app.update(Message::RepositoryLoaded(
-            SECOND.to_string(),
+            app.key_of(SECOND),
             load_repository(&populated_repo()),
         ));
 
@@ -5837,7 +6016,7 @@ mod tests {
         };
 
         let _ = app.update(Message::PatchLoaded {
-            path: SECOND.to_string(),
+            session: app.key_of(SECOND),
             generation: app.sessions[1].patch_generation,
             result: Ok(vec![patch]),
         });
@@ -5853,7 +6032,7 @@ mod tests {
         app.sessions[1].pending_checkout = Some("topic".to_string());
         app.sessions[1].state.loading = true;
 
-        let _ = app.update(Message::BranchFinished(SECOND.to_string(), Ok(())));
+        let _ = app.update(Message::BranchFinished(app.key_of(SECOND), Ok(())));
 
         assert!(app.sessions[0].selection.is_none());
         assert!(!app.sessions[0].state.loading);
@@ -5875,7 +6054,7 @@ mod tests {
         app.sessions[1].state.loading = true;
 
         // A different session finishing a branch job must not consume session 1's pending.
-        let _ = app.update(Message::BranchFinished(FIRST.to_string(), Ok(())));
+        let _ = app.update(Message::BranchFinished(app.key_of(FIRST), Ok(())));
 
         assert_eq!(app.sessions[1].pending_checkout.as_deref(), Some("topic"));
         assert!(app.sessions[1].selection.is_none());
@@ -5888,7 +6067,7 @@ mod tests {
             app.sessions[0].pending_checkout = Some("topic".to_string());
             app.sessions[0].state.loading = true;
 
-            let _ = app.update(Message::BranchFinished(r"D:\gone".to_string(), result));
+            let _ = app.update(Message::BranchFinished(app.key_of(r"D:\gone"), result));
 
             assert_eq!(app.sessions[0].pending_checkout.as_deref(), Some("topic"));
             assert!(app.sessions[0].state.loading);
@@ -5903,7 +6082,7 @@ mod tests {
         let mut app = two_session_app();
         app.sessions[1].state.loading = true;
 
-        let _ = app.update(Message::HistoryFinished(SECOND.to_string(), Ok(())));
+        let _ = app.update(Message::HistoryFinished(app.key_of(SECOND), Ok(())));
 
         assert!(!app.sessions[0].state.loading);
         assert!(app.sessions[1].state.loading);
@@ -5915,7 +6094,7 @@ mod tests {
             let mut app = two_session_app();
             app.sessions[0].state.loading = true;
 
-            let _ = app.update(Message::HistoryFinished(r"D:\gone".to_string(), result));
+            let _ = app.update(Message::HistoryFinished(app.key_of(r"D:\gone"), result));
 
             assert!(app.sessions[0].state.loading);
             assert!(!app.sessions[1].state.loading);
@@ -5930,7 +6109,7 @@ mod tests {
         app.sessions[0].commit_message = "mine".to_string();
 
         let _ = app.update(Message::CommitSuggested(
-            SECOND.to_string(),
+            app.key_of(SECOND),
             crate::CommitSuggestion {
                 subject: Ok("add the thing".to_string()),
                 exchange: crate::ProviderExchange::kilo("add the thing"),
@@ -5949,7 +6128,7 @@ mod tests {
         app.sessions[0].commit_message = "mine".to_string();
 
         let _ = app.update(Message::CommitSuggested(
-            r"D:\gone".to_string(),
+            app.key_of(r"D:\gone"),
             crate::CommitSuggestion {
                 subject: Ok("add the thing".to_string()),
                 exchange: crate::ProviderExchange::kilo("add the thing"),
@@ -6251,7 +6430,7 @@ mod tests {
 
         let _ = app.update(Message::RepositoryOpened(
             SECOND.to_string(),
-            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
         ));
 
         assert!(Arc::ptr_eq(&before, &app.open_worktree));
@@ -6263,13 +6442,13 @@ mod tests {
         let list = vec![linked(FIRST, "main", true)];
 
         let _ = app.update(Message::WorktreesLoaded(
-            r"D:\gone".to_string(),
+            app.key_of(r"D:\gone"),
             Ok(list.clone()),
         ));
         assert!(app.worktree_catalogue.is_empty());
 
         let _ = app.update(Message::WorktreesLoaded(
-            SECOND.to_string(),
+            app.key_of(SECOND),
             Ok(list.clone()),
         ));
         assert_eq!(app.worktree_catalogue, list);
@@ -6281,7 +6460,7 @@ mod tests {
         let mut app = catalogued_app();
 
         let _ = app.update(Message::WorktreesLoaded(
-            FIRST.to_string(),
+            app.key_of(FIRST),
             Err(DomainError::Unknown("git is missing".to_string())),
         ));
 
@@ -6371,7 +6550,7 @@ mod tests {
         app.worktree_busy = true;
 
         let _ = app.update(Message::WorktreeRemoved {
-            session: FIRST.to_string(),
+            session: app.key_of(FIRST),
             path: "D:/second".to_string(),
             result: Ok(()),
         });
@@ -6393,7 +6572,7 @@ mod tests {
         app.worktree_busy = true;
 
         let _ = app.update(Message::WorktreeRemoved {
-            session: FIRST.to_string(),
+            session: app.key_of(FIRST),
             path: SECOND.to_string(),
             result: Err(DomainError::Unknown("contains modified files".to_string())),
         });
@@ -6438,7 +6617,7 @@ mod tests {
         app.worktree_busy = true;
 
         let _ = app.update(Message::WorktreeCreated {
-            session: r"D:\gone".to_string(),
+            session: app.key_of(r"D:\gone"),
             path: THIRD.to_string(),
             result: Ok(()),
         });
@@ -6455,7 +6634,7 @@ mod tests {
         app.worktree_busy = true;
 
         let _ = app.update(Message::WorktreeCreated {
-            session: FIRST.to_string(),
+            session: app.key_of(FIRST),
             path: THIRD.to_string(),
             result: Err(DomainError::Unknown("already exists".to_string())),
         });
@@ -6663,7 +6842,7 @@ mod tests {
         app.settings.recent_repositories = vec![r"D:\old".to_string()];
         let _ = app.update(Message::RepositoryOpened(
             r"D:\new".to_string(),
-            Ok(OpenedRepository(std::sync::Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(std::sync::Arc::new(FakeGitRepository::ok()))),
         ));
         assert_eq!(
             app.settings.recent_repositories,
@@ -6841,7 +7020,7 @@ mod tests {
         assert_eq!(running.record.command, "git push");
 
         let _ = app.update(Message::PushFinished(
-            app.active_path(),
+            app.active_key(),
             Err(DomainError::Unknown("! [rejected] development -> development (fetch first)".into())),
         ));
         assert!(app.activity.running().is_none());
@@ -6851,7 +7030,7 @@ mod tests {
         assert_eq!(app.activity.fresh_failures(&repository), 1);
 
         let _ = app.update(Message::Fetch);
-        let _ = app.update(Message::FetchFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::FetchFinished(app.active_key(), Ok(())));
         let entries = app.activity.for_repository(&repository);
         assert_eq!(entries[0].record.title, "Fetch", "newest first");
         assert_eq!(entries[0].record.outcome, core_domain::ActivityOutcome::Succeeded);
@@ -6862,10 +7041,10 @@ mod tests {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         let repository = app.repository_root().expect("open");
         let _ = app.update(Message::StashPop(1));
-        let _ = app.update(Message::StashFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::StashFinished(app.active_key(), Ok(())));
         let _ = app.update(Message::EditWorktree(WorktreeEdit::Untrack { paths: vec!["bin".into()], ignore: vec!["bin/".into()] }));
         let _ = app.update(Message::WorktreeEditFinished(
-            app.active_path(),
+            app.active_key(),
             WorktreeEdit::Untrack { paths: vec!["bin".into()], ignore: vec!["bin/".into()] },
             Ok(()),
         ));
@@ -6906,7 +7085,7 @@ mod tests {
 
         let _ = app.update(Message::RepositoryOpened(
             r"D:\other".to_string(),
-            Ok(OpenedRepository(Arc::new(FakeGitRepository::ok()))),
+            Ok(opened(Arc::new(FakeGitRepository::ok()))),
         ));
         assert_eq!(app.repository_root().as_deref(), Some(r"D:\other"));
         assert!(app.activity.for_repository(r"D:\other").is_empty(), "a fresh repository has its own log");
@@ -6921,7 +7100,7 @@ mod tests {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         let repository = app.repository_root().expect("open");
         let _ = app.update(Message::Fetch);
-        let _ = app.update(Message::FetchFinished(app.active_path(), Ok(())));
+        let _ = app.update(Message::FetchFinished(app.active_key(), Ok(())));
         let _ = app.update(Message::ClearActivity);
         assert!(app.activity.for_repository(&repository).is_empty());
     }

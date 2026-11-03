@@ -1701,3 +1701,110 @@ fn a_stash_can_take_untracked_files() {
     assert_eq!(adapter.stashes().expect("stashes").len(), 1);
 }
 
+
+// ── Opening: the reads the window does first, on awkward repositories ─────────
+
+/// Discover, then every read the window's first load makes. Panics with the failing read.
+fn open_like_the_window(path: &str) -> GitoxideAdapter {
+    let adapter = GitoxideAdapter::discover(path).expect("discover");
+    adapter.status().expect("status");
+    adapter.log(Some(50)).expect("log");
+    adapter.branches().expect("branches");
+    adapter.stashes().expect("stashes");
+    adapter.tags().expect("tags");
+    adapter
+}
+
+#[test]
+fn opening_an_empty_unborn_repository_reads_cleanly() {
+    let fixture = TestRepo::new();
+    let adapter = open_like_the_window(fixture.workdir().to_str().expect("utf-8"));
+    let status = adapter.status().expect("status");
+    assert_eq!(status.tracking, None);
+    assert!(adapter.log(None).expect("log").is_empty());
+}
+
+#[test]
+fn opening_a_detached_head_reads_cleanly_with_no_upstream() {
+    let fixture = TestRepo::new();
+    let base = fixture.commit("base", &[("a.txt", "a\n")], 0);
+    fixture.reference("HEAD", base);
+    let adapter = open_like_the_window(fixture.workdir().to_str().expect("utf-8"));
+    assert_eq!(adapter.status().expect("status").tracking, None);
+}
+
+#[test]
+fn opening_a_branch_without_an_upstream_reports_none_not_zero() {
+    let fixture = TestRepo::new();
+    fixture.commit("base", &[("a.txt", "a\n")], 0);
+    let adapter = open_like_the_window(fixture.workdir().to_str().expect("utf-8"));
+    assert_eq!(adapter.status().expect("status").tracking, None);
+}
+
+#[test]
+fn opening_a_linked_worktree_reads_its_own_branch() {
+    let fixture = TestRepo::with_feature_branch();
+    let parent = tempfile::tempdir().expect("temp dir");
+    let path = linked_path(&parent, "linked");
+    fixture
+        .adapter()
+        .add_worktree(&path, "feature", false, None)
+        .expect("add worktree");
+
+    let adapter = open_like_the_window(&path);
+    let branches = adapter.branches().expect("branches");
+    let head = branches.iter().find(|branch| branch.is_head).expect("a head branch");
+    assert_eq!(head.name, "feature");
+}
+
+#[test]
+fn opening_a_removed_worktree_folder_fails_without_panicking() {
+    let fixture = TestRepo::with_feature_branch();
+    let parent = tempfile::tempdir().expect("temp dir");
+    let path = linked_path(&parent, "gone");
+    fixture
+        .adapter()
+        .add_worktree(&path, "feature", false, None)
+        .expect("add worktree");
+    std::fs::remove_dir_all(&path).expect("remove the worktree folder");
+
+    assert!(GitoxideAdapter::discover(&path).is_err());
+    // The main worktree still lists it (git calls it prunable) instead of failing.
+    let list = fixture.adapter().worktrees().expect("list after removal");
+    assert!(!list.is_empty());
+}
+
+#[test]
+fn opening_a_repository_under_a_non_ascii_path_reads_cleanly() {
+    let parent = tempfile::tempdir().expect("temp dir");
+    let folder = parent.path().join("répo-日本-ü");
+    std::fs::create_dir(&folder).expect("create non-ASCII folder");
+    git_in(&folder, &["init", "-q"]);
+    std::fs::write(folder.join("fïle.txt"), "a\n").expect("write file");
+    git_in(&folder, &["add", "-A"]);
+    git_in(&folder, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"]);
+    std::fs::write(folder.join("ñew.txt"), "b\n").expect("write untracked");
+
+    let adapter = open_like_the_window(folder.to_str().expect("utf-8"));
+    assert_eq!(adapter.log(None).expect("log").len(), 1);
+    assert_eq!(adapter.status().expect("status").untracked_files.len(), 1);
+}
+
+#[test]
+fn init_fails_for_a_missing_folder_and_for_an_existing_repository() {
+    let parent = tempfile::tempdir().expect("temp dir");
+    let missing = parent.path().join("missing");
+    assert!(GitoxideAdapter::init(missing.to_str().expect("utf-8")).is_err());
+
+    let fixture = TestRepo::new();
+    assert!(GitoxideAdapter::init(fixture.workdir().to_str().expect("utf-8")).is_err());
+}
+
+#[test]
+fn discover_of_a_plain_folder_is_not_found() {
+    let parent = tempfile::tempdir().expect("temp dir");
+    assert!(matches!(
+        GitoxideAdapter::discover(parent.path().to_str().expect("utf-8")),
+        Err(DomainError::RepositoryNotFound)
+    ));
+}

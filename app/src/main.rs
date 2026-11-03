@@ -2,6 +2,7 @@
 //! Constructs adapters and injects them into the pure `gui_app` library.
 //! This is the ONLY place in the application that imports `git_adapter` directly.
 
+mod crash_report;
 mod kilo;
 mod startup;
 
@@ -29,13 +30,16 @@ fn cloner() -> gui_app::RepositoryCloner {
 /// Opens a linked worktree into a tab. Deliberately takes no store: a tab must never
 /// overwrite last_repo_path, which stays the repository the user chose with Open….
 fn worktree_opener() -> gui_app::WorktreeOpener {
-    Arc::new(|path| Ok(Arc::new(GitoxideAdapter::new(path))))
+    Arc::new(|path| Ok(Arc::new(GitoxideAdapter::discover(path)?)))
 }
 
 fn opener(store: Arc<ConfyConfigStore>) -> gui_app::RepositoryOpener {
     Arc::new(move |path| {
+        // Validate first: a folder that is not a repository must not become the one
+        // reopened at launch, nor join the recent list.
+        let adapter = GitoxideAdapter::discover(path)?;
         remember(store.as_ref(), path);
-        Ok(Arc::new(GitoxideAdapter::new(path)))
+        Ok(Arc::new(adapter))
     })
 }
 
@@ -51,6 +55,7 @@ fn save_appearance(store: Arc<ConfyConfigStore>) -> gui_app::SettingsSaver {
 }
 
 fn main() -> iced::Result {
+    crash_report::install(APP_NAME);
     let store = Arc::new(ConfyConfigStore::new(APP_NAME));
     let open = opener(Arc::clone(&store));
     let open_worktree = worktree_opener();

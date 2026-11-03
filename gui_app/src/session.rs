@@ -30,6 +30,33 @@ pub(crate) fn same_path(a: &str, b: &str) -> bool {
     normal(a) == normal(b)
 }
 
+/// Next session number. Process-wide, because opening a repository rebuilds `GitApp` and a
+/// counter kept there would start again and hand an old number to a new session.
+static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Names one session for its whole life. Never reused, so a result for a session that has
+/// closed — even one reopened on the same folder — cannot reach its successor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SessionId(u64);
+
+impl SessionId {
+    fn next() -> Self {
+        Self(NEXT_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Matches no session: for tests and for work not started by one.
+    #[cfg(test)]
+    pub(crate) const NONE: Self = Self(0);
+}
+
+/// What a background job remembers about the session that started it: who (to route the
+/// result) and where (for the activity log and messages).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionKey {
+    pub(crate) id: SessionId,
+    pub(crate) path: String,
+}
+
 /// Last folder name of a path, for tab and explorer labels. Falls back to the whole path.
 pub(crate) fn basename(path: &str) -> &str {
     let trimmed = path.trim_end_matches(['/', '\\']);
@@ -66,6 +93,8 @@ pub(crate) struct ExplorerCollapsed {
 
 /// Everything bound to one open worktree path.
 pub(crate) struct WorktreeSession {
+    /// This session's identity; background results are routed by it, never by path alone.
+    pub(crate) id: SessionId,
     /// Absolute working directory this session opened.
     pub(crate) path: String,
     pub(crate) adapter: SharedRepository,
@@ -111,6 +140,7 @@ impl WorktreeSession {
         let mut state = AppState::new();
         state.apply_event(ViewEvent::SettingsUpdated(settings));
         Self {
+            id: SessionId::next(),
             path,
             adapter,
             state,
@@ -133,6 +163,14 @@ impl WorktreeSession {
             author_filter: None,
             diff_change: None,
             selection_anchor: None,
+        }
+    }
+
+    /// Identity plus path, for a job this session starts.
+    pub(crate) fn key(&self) -> SessionKey {
+        SessionKey {
+            id: self.id,
+            path: self.path.clone(),
         }
     }
 
