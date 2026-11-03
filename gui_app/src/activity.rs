@@ -164,6 +164,15 @@ impl ActivityLog {
             .find(|entry| entry.finished_at.is_some_and(|at| at.elapsed() < RESULT_SHOWN_FOR))
     }
 
+    /// Title of the newest entry that has finished, for diagnostics.
+    pub(crate) fn last_finished_title(&self) -> Option<String> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| !entry.is_running())
+            .map(|entry| entry.record.title.clone())
+    }
+
     /// Failures in a repository since it was opened this run (saved ones are history).
     pub(crate) fn fresh_failures(&self, repository: &str) -> usize {
         let key = repository_key(repository);

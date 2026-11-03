@@ -506,11 +506,39 @@ pub(crate) fn choose_repository_folder(
     )
 }
 
+/// Open and read a repository off-thread. The window swaps workspaces only on `Ok`.
 pub(crate) fn open_repository_in_background(
     open: crate::RepositoryOpener,
     path: String,
-) -> impl Future<Output = (String, Result<SharedRepository, DomainError>)> {
+) -> impl Future<Output = (String, Result<crate::opening::OpenedWorkspace, crate::opening::OpenFailure>)> {
     // The interrupted fallback echoes the requested path, like the success path.
+    let echoed = path.clone();
+    let started = std::time::Instant::now();
+    in_background(
+        move || {
+            let result = crate::opening::open_and_read(&open, &path);
+            (path, result)
+        },
+        move || {
+            let error = DomainError::Unknown(
+                "the open stopped unexpectedly (an internal error); see the crash report".to_string(),
+            );
+            let failure = crate::opening::OpenFailure::new(
+                &echoed,
+                crate::opening::OpenStage::Opening,
+                &error,
+                started.elapsed(),
+            );
+            (echoed, Err(failure))
+        },
+    )
+}
+
+/// Build a worktree tab's adapter off-thread. Its first load runs as a normal refresh.
+pub(crate) fn open_worktree_in_background(
+    open: crate::WorktreeOpener,
+    path: String,
+) -> impl Future<Output = (String, Result<SharedRepository, DomainError>)> {
     let echoed = path.clone();
     in_background(
         move || {
@@ -520,9 +548,7 @@ pub(crate) fn open_repository_in_background(
         move || {
             (
                 echoed,
-                Err(DomainError::Unknown(
-                    "repository open was interrupted".to_string(),
-                )),
+                Err(DomainError::Unknown("worktree open was interrupted".to_string())),
             )
         },
     )

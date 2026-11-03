@@ -14,6 +14,7 @@ mod diff_view;
 mod jobs;
 mod layout;
 mod log_filter;
+mod opening;
 mod palette;
 mod reachability;
 mod ref_tree;
@@ -25,6 +26,7 @@ mod theme;
 mod tracking;
 mod view;
 
+pub use opening::redact as redact_credentials;
 pub use terminal::{CommitSuggestion, ModelList, ProviderExchange};
 
 use std::sync::Arc;

@@ -24,5 +24,8 @@ opt-level = 3
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# Unwind, not abort: background git work runs on worker threads (`gui_app::jobs::in_background`),
+# and a worker that panics must end as an error for that one job, not take the window down.
+# A panic on the UI thread still ends the program; the crash-report hook in `app` records it.
+panic = "unwind"
 strip = true

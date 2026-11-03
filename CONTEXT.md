@@ -10,6 +10,8 @@ Desktop Git client. The window is iced. Git work goes through a port; one adapte
 
 **Composition root.** The `app` crate. The only module that constructs `GitoxideAdapter` and `ConfyConfigStore`, and passes the repository port into `gui_app::run`. `gui_app` does not depend on `git_adapter` or `config_adapter`.
 
+**Opening a repository.** Open…, a recent repository, Init and Clone all end in one background open: the opener validates the folder (`discover`) and only then remembers it, and the first load (status, history, branches, stashes, tags) runs on the same worker. The workspace on screen is replaced only after that succeeds. While it runs a banner under the tabs (and on the welcome screen) says "Opening name… n s"; if it fails, the banner names the stage that failed (opening or reading) with Retry, Copy diagnostics and Dismiss, and the open tabs, drafts and selection are untouched. Diagnostics hold the version, stage, path, duration, the last completed operation and git's message, with URL credentials removed. A panic writes a crash report under `%LOCALAPPDATA%\git_cthulhu\crashes` (the program still ends; nothing is caught). Release builds unwind, so a worker thread that panics ends its one job with an error instead of closing the window.
+
 **Welcome screen.** `GitApp` with no adapter. Shown when there is no command-line path and no remembered repository that can still be opened. Open Repository asks for a folder, then the composition root's opener builds the port and stores that path.
 
 **Repository view.** `GitApp` holding one or more sessions, each with an `Arc<dyn GitRepository + Send + Sync>`. Shown when a path was passed on the command line, after Open Repository succeeds, or when the remembered folder is still a repository. Loads status, the newest 50 commits from every local branch, and branches as soon as the window has a repository.
@@ -26,7 +28,7 @@ Open a repository from the command line or from the welcome screen's folder dial
 
 ## Worktree sessions
 
-**Session.** `WorktreeSession` in `gui_app`. One open worktree path with its own `GitRepository` port and its own `AppState` (status, commits, branches, stashes, tags) plus its UI state: selection, commit message, marked files, and the loaded diff. `GitApp` holds a list of sessions and the index of the active one. Switching tabs moves that index; it does not reload. A background job names the session path it started on, and its result is dropped if that tab has since closed.
+**Session.** `WorktreeSession` in `gui_app`. One open worktree path with its own `GitRepository` port and its own `AppState` (status, commits, branches, stashes, tags) plus its UI state: selection, commit message, marked files, and the loaded diff. `GitApp` holds a list of sessions and the index of the active one. Switching tabs moves that index; it does not reload. Each session has a `SessionId` that is never reused in the process. A background job carries the `SessionKey` (id and path) of the session that started it, and its result is dropped unless that same session is still open, so a tab closed and reopened on the same folder, or a repository opened again, never receives an older session's result.
 
 **Tab strip.** Sits under the top bar, one tab per open session. Click to switch, close a tab with its close control (the last tab stays, and so does a tab with a job running). A `+` control opens a picker over the catalogue.
 
