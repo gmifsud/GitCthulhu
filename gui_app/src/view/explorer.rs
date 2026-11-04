@@ -7,7 +7,7 @@ use crate::app::{GitApp, Message};
 use crate::context_menu::ContextTarget;
 use crate::ref_tree::{ref_rows, RefRow};
 use crate::selection::Selection;
-use crate::session::{basename, same_path, ExplorerSection};
+use crate::session::{same_path, ExplorerSection};
 use crate::theme::DesignTokens;
 use core_domain::{Branch, Worktree};
 use iced::widget::button::Status;
@@ -368,15 +368,18 @@ fn hint_row<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> 
         .into()
 }
 
-/// One line per worktree: folder name, its branch, main/locked tags. Click opens its tab;
+/// One line per worktree: folder name, its branch, main/locked tags. A click inspects it
+/// (the active tab and the terminal stay where they are), a double-click opens its tab;
 /// right-click offers open, new, folder, copy and remove.
 fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let open = app.sessions.iter().any(|session| same_path(&session.path, &entry.path));
     let active = app.sessions.get(app.active).is_some_and(|session| same_path(&session.path, &entry.path));
+    let inspected = app.inspected_path().is_some_and(|path| same_path(path, &entry.path));
     let branch = if entry.branch.is_empty() { DETACHED.to_string() } else { entry.branch.clone() };
     let (ahead, behind) = tracking_for_worktree(app, entry);
     let mut content = row![
-        label_text(basename(&entry.path), if open { tokens.text_primary } else { tokens.text_secondary }, reading),
+        // Two worktrees in folders of the same name read apart (`a/wt`, `b/wt`).
+        label_text(&app.worktree_folder(&entry.path), if open { tokens.text_primary } else { tokens.text_secondary }, reading),
         label_text(&branch, tokens.accent_primary, reading),
     ]
     .spacing(6)
@@ -398,8 +401,8 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
             &reading,
         )),
         content.into(),
-        active,
-        Message::OpenWorktree(entry.path.clone()),
+        active || inspected,
+        Message::WorktreeClicked(entry.path.clone()),
         Some(ContextTarget::Worktree {
             path: entry.path.clone(),
             branch: entry.branch.clone(),

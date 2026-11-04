@@ -25,6 +25,7 @@ mod terminal;
 mod theme;
 mod tracking;
 mod view;
+mod wip;
 
 pub use opening::redact as redact_credentials;
 pub use terminal::{CommitSuggestion, ModelList, ProviderExchange};

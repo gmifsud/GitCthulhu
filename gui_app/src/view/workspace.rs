@@ -13,6 +13,7 @@ use super::filter_bar::filter_bar;
 use super::explorer::explorer_pane;
 use super::files_nav::files_navigator;
 use super::history::history_pane;
+use super::inspect::inspected_worktree;
 use super::patch::patch_pane;
 
 const PANE_SPACING: f32 = 4.0;
@@ -112,6 +113,11 @@ fn inspector<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let _ = layout;
+    // Another worktree under inspection replaces the head and its commands: nothing here
+    // may act on the active tab while it shows a different worktree.
+    if let Some(path) = app.inspected_path() {
+        return inspected_worktree(app, path, selection, tokens, reading);
+    }
     column![
         inspector_head(app, selection, tokens, reading),
         files_navigator(app, selection, tokens, reading),

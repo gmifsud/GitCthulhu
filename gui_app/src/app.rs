@@ -16,7 +16,8 @@ use crate::jobs::{
     discard_hunk_in_background, discard_paths_in_background,
     edit_in_background, error_message, fetch_in_background, history_in_background,
     init_in_background, list_models_in_background, load_patch_in_background,
-    load_repository_in_background, open_repository_in_background, open_worktree_in_background, pull_in_background,
+    load_repository_in_background, open_repository_in_background, open_worktree_in_background,
+    probe_worktree_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
     compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
     stop_shell, suggest_commit_in_background, worktrees_in_background, BranchAction,
@@ -28,6 +29,7 @@ use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
 use crate::session::{apply_retention, same_path, SessionKey, WorktreeSession, DIFF_LINES_PER_PAGE};
 use crate::theme::DesignTokens;
+use crate::wip::{InspectTarget, WipRow, WorktreeProbe};
 use crate::{
     RepositoryCloner, RepositoryInitialiser, RepositoryOpener, SettingsSaver, WorktreeOpener,
 };
@@ -90,6 +92,14 @@ pub(crate) struct GitApp {
     /// Every worktree of the open repository, from `git worktree list`.
     pub(crate) worktree_catalogue: Vec<Worktree>,
     pub(crate) catalogue_error: Option<String>,
+    /// Worktrees without a tab, read through a transient adapter for their Working changes row.
+    pub(crate) worktree_probes: Vec<WorktreeProbe>,
+    /// Numbers each probe so a read that lands after a newer one is dropped.
+    probe_generation: u64,
+    /// A worktree shown in the Inspector without activating it. `None` shows the active tab.
+    pub(crate) inspect: Option<InspectTarget>,
+    /// The last WIP or worktree row click, to recognise a double-click (open in a tab).
+    last_worktree_click: Option<(String, std::time::Instant)>,
     /// The `+` picker under the tab strip is showing the worktrees that are not open yet.
     pub(crate) tab_picker_open: bool,
     /// A create or remove prompt waiting for the user to confirm.
@@ -458,8 +468,15 @@ pub(crate) enum Message {
     HistoryFinished(SessionKey, Result<(), DomainError>),
     /// Focus the tab at this index.
     SelectWorktreeTab(usize),
-    /// A graph WIP row was pressed: activate that session, then show its working tree.
-    ShowSessionWorkingTree(usize),
+    /// A WIP row or Explorer worktree row was pressed: inspect it, or on a double-click
+    /// open it in a tab.
+    WorktreeClicked(String),
+    /// Show this worktree in the Inspector without activating it (Quick open, single click).
+    InspectWorktree(String),
+    /// Leave inspection: the Inspector shows the active tab again.
+    ClearInspect,
+    /// A worktree without a tab was read: its path, the read's generation, its status.
+    WorktreeProbed(String, u64, Result<core_domain::RepoStatus, DomainError>),
     /// Close the tab at this index. The worktree on disk is left alone.
     CloseWorktreeTab(usize),
     /// Show or hide the `+` picker of worktrees that are not open yet.
@@ -700,6 +717,10 @@ impl GitApp {
             active: 0,
             worktree_catalogue: Vec::new(),
             catalogue_error: None,
+            worktree_probes: Vec::new(),
+            probe_generation: 0,
+            inspect: None,
+            last_worktree_click: None,
             tab_picker_open: false,
             worktree_prompt: None,
             worktree_busy: false,
@@ -809,6 +830,7 @@ impl GitApp {
         let mode = self.settings.worktree_tab_retention;
         apply_retention(&mut self.sessions[self.active], mode);
         self.active = index;
+        self.inspect = None;
         self.reset_transient_ui();
     }
 
@@ -1424,6 +1446,10 @@ impl GitApp {
                 self.palette = None;
                 self.update(next)
             }
+            // Ctrl+S would act on the active tab while the Inspector shows another worktree.
+            Message::StageMarked | Message::UnstageMarked if self.inspected_path().is_some() => {
+                Task::none()
+            }
             Message::StageMarked => self.edit_marked(true),
             Message::UnstageMarked => self.edit_marked(false),
             Message::CheckoutBranch(branch) => {
@@ -1665,6 +1691,7 @@ impl GitApp {
                 self.update(Message::OpenContextMenu { target })
             }
             Message::ShowWorkingTree => {
+                self.inspect = None;
                 let Some(session) = self.active_session_mut() else {
                     return Task::none();
                 };
@@ -1849,6 +1876,7 @@ impl GitApp {
                 Task::none()
             }
             Message::Select(selection) => {
+                self.inspect = None;
                 self.branch_list_open = false;
                 self.confirm_discard = None;
                 self.confirm_drop = None;
@@ -2426,12 +2454,26 @@ impl GitApp {
                 self.tab_picker_open = false;
                 Task::none()
             }
-            Message::ShowSessionWorkingTree(index) => {
-                if index >= self.sessions.len() {
-                    return Task::none();
+            Message::WorktreeClicked(path) => {
+                let now = std::time::Instant::now();
+                let double = self.last_worktree_click.as_ref().is_some_and(|(last, at)| {
+                    same_path(last, &path) && now.duration_since(*at) <= DOUBLE_CLICK
+                });
+                if double {
+                    self.last_worktree_click = None;
+                    return self.update(Message::OpenWorktree(path));
                 }
-                self.activate(index);
-                self.update(Message::ShowWorkingTree)
+                self.last_worktree_click = Some((path.clone(), now));
+                self.inspect_worktree(path)
+            }
+            Message::InspectWorktree(path) => self.inspect_worktree(path),
+            Message::ClearInspect => {
+                self.inspect = None;
+                Task::none()
+            }
+            Message::WorktreeProbed(path, generation, result) => {
+                self.worktree_probed(path, generation, result);
+                Task::none()
             }
             Message::CloseWorktreeTab(index) => {
                 // The last tab stays, and so does a tab with a job running: its finish
@@ -2445,7 +2487,8 @@ impl GitApp {
                     return Task::none();
                 }
                 self.drop_session(index);
-                Task::none()
+                // The worktree has no tab now: read it like any other.
+                self.probe_unopened_worktrees()
             }
             Message::ToggleTabPicker => {
                 self.tab_picker_open = !self.tab_picker_open;
@@ -2462,6 +2505,7 @@ impl GitApp {
                     Ok(list) => {
                         self.worktree_catalogue = list;
                         self.catalogue_error = None;
+                        return self.probe_unopened_worktrees();
                     }
                     // Keep the last good catalogue; the explorer shows why it is stale.
                     Err(error) => self.catalogue_error = Some(error_message(&error)),
@@ -2797,6 +2841,236 @@ impl GitApp {
         )
     }
 
+    /// Read every catalogued worktree that has no tab, each through its own transient
+    /// adapter. Probes for worktrees that left the catalogue or gained a tab are dropped.
+    fn probe_unopened_worktrees(&mut self) -> Task<Message> {
+        let unopened: Vec<String> = self
+            .worktree_catalogue
+            .iter()
+            .filter(|entry| !self.sessions.iter().any(|session| same_path(&session.path, &entry.path)))
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.worktree_probes
+            .retain(|probe| unopened.iter().any(|path| same_path(path, &probe.path)));
+        let mut reads = Vec::new();
+        for path in unopened {
+            self.probe_generation += 1;
+            let generation = self.probe_generation;
+            match self.worktree_probes.iter_mut().find(|probe| same_path(&probe.path, &path)) {
+                // Keep the last status on screen until the new read lands.
+                Some(probe) => probe.generation = generation,
+                None => self.worktree_probes.push(WorktreeProbe {
+                    path: path.clone(),
+                    generation,
+                    status: None,
+                    error: None,
+                }),
+            }
+            let open = Arc::clone(&self.open_worktree);
+            reads.push(Task::perform(
+                probe_worktree_in_background(open, path, generation),
+                |(path, generation, result)| Message::WorktreeProbed(path, generation, result),
+            ));
+        }
+        Task::batch(reads)
+    }
+
+    /// Store a probe's result unless a newer read was started or the worktree has gone.
+    fn worktree_probed(
+        &mut self,
+        path: String,
+        generation: u64,
+        result: Result<core_domain::RepoStatus, DomainError>,
+    ) {
+        let Some(probe) = self
+            .worktree_probes
+            .iter_mut()
+            .find(|probe| same_path(&probe.path, &path) && probe.generation == generation)
+        else {
+            return;
+        };
+        match result {
+            Ok(status) => {
+                probe.status = Some(status);
+                probe.error = None;
+            }
+            // A worktree removed on disk, or one git can no longer read: no row, no panic.
+            Err(error) => {
+                probe.status = None;
+                probe.error = Some(error_message(&error));
+            }
+        }
+    }
+
+    /// Status of a worktree from its tab, else from its probe.
+    pub(crate) fn worktree_status(&self, path: &str) -> Option<&core_domain::RepoStatus> {
+        match self.sessions.iter().find(|session| same_path(&session.path, path)) {
+            Some(session) => session.state.current_status.as_ref(),
+            None => self
+                .worktree_probes
+                .iter()
+                .find(|probe| same_path(&probe.path, path))
+                .and_then(|probe| probe.status.as_ref()),
+        }
+    }
+
+    /// Branch checked out at `path`: its tab's HEAD branch, else the catalogue's entry.
+    /// `None` when detached.
+    pub(crate) fn worktree_branch(&self, path: &str) -> Option<String> {
+        self.sessions
+            .iter()
+            .find(|session| same_path(&session.path, path))
+            .and_then(|session| {
+                session
+                    .state
+                    .branches
+                    .iter()
+                    .find(|branch| branch.is_head && !branch.is_remote)
+                    .map(|branch| branch.name.clone())
+            })
+            .or_else(|| {
+                self.worktree_catalogue
+                    .iter()
+                    .find(|entry| same_path(&entry.path, path))
+                    .map(|entry| entry.branch.clone())
+            })
+            .filter(|name| !name.is_empty())
+    }
+
+    /// Commit at `path`'s HEAD: its status when read, else its branch tip in the active tab.
+    pub(crate) fn worktree_tip(&self, path: &str) -> Option<String> {
+        self.worktree_status(path)
+            .and_then(|status| status.head_commit_id.clone())
+            .or_else(|| {
+                let branch = self.worktree_branch(path)?;
+                self.active_session()?
+                    .local_branch(&branch)
+                    .map(|branch| branch.tip.clone())
+            })
+    }
+
+    /// Every worktree path the window knows, for folder labels: the catalogue, then any tab
+    /// it does not list.
+    fn known_worktree_paths(&self) -> Vec<&str> {
+        let mut paths: Vec<&str> =
+            self.worktree_catalogue.iter().map(|entry| entry.path.as_str()).collect();
+        for session in &self.sessions {
+            if !paths.iter().any(|path| same_path(path, &session.path)) {
+                paths.push(session.path.as_str());
+            }
+        }
+        paths
+    }
+
+    /// Folder name of a worktree, told apart from its namesakes by parent folders.
+    pub(crate) fn worktree_folder(&self, path: &str) -> String {
+        crate::wip::folder_label(&self.known_worktree_paths(), path)
+    }
+
+    /// "WIP · branch · folder" for a worktree.
+    pub(crate) fn worktree_label(&self, path: &str) -> String {
+        crate::wip::wip_label(self.worktree_branch(path).as_deref(), &self.worktree_folder(path))
+    }
+
+    /// Working changes rows, dirty worktrees only: open tabs in tab order, then worktrees
+    /// without a tab in catalogue order.
+    pub(crate) fn wip_rows(&self) -> Vec<WipRow> {
+        let inspected = self.inspected_path();
+        let mut paths: Vec<(String, Option<usize>)> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| (session.path.clone(), Some(index)))
+            .collect();
+        for probe in &self.worktree_probes {
+            if !paths.iter().any(|(path, _)| same_path(path, &probe.path)) {
+                paths.push((probe.path.clone(), None));
+            }
+        }
+        paths
+            .into_iter()
+            .filter_map(|(path, session)| {
+                let status = self.worktree_status(&path)?;
+                if !crate::wip::is_dirty(status) {
+                    return None;
+                }
+                let active = session == Some(self.active);
+                let head = status.head_commit_id.as_deref().map(|id| {
+                    let subject = self
+                        .active_session()
+                        .and_then(|tab| tab.state.commits.iter().find(|commit| commit.id == id))
+                        .and_then(|commit| commit.message.lines().next())
+                        .unwrap_or_default();
+                    (id, subject)
+                });
+                let branch = self.worktree_branch(&path);
+                Some(WipRow {
+                    label: self.worktree_label(&path),
+                    tooltip: crate::wip::wip_tooltip(&path, branch.as_deref(), head, active),
+                    changes: crate::wip::change_count(status),
+                    inspected: inspected.is_some_and(|target| same_path(target, &path)),
+                    active,
+                    session,
+                    path,
+                })
+            })
+            .collect()
+    }
+
+    /// Show `path` in the Inspector without moving `active`, the terminal or the mutation
+    /// target: its changes when dirty, else its branch tip. The active tab's own row shows
+    /// its working tree, as before.
+    fn inspect_worktree(&mut self, path: String) -> Task<Message> {
+        self.tab_picker_open = false;
+        let Some(active) = self.active_session() else {
+            return Task::none();
+        };
+        if same_path(&active.path, &path) {
+            return self.update(Message::ShowWorkingTree);
+        }
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| same_path(&session.path, &path))
+            .map(|session| session.id);
+        let catalogued = self.worktree_catalogue.iter().any(|entry| same_path(&entry.path, &path));
+        if session.is_none() && !catalogued {
+            return Task::none();
+        }
+        let dirty = self.worktree_status(&path).is_some_and(crate::wip::is_dirty);
+        // A clean worktree shows its tip as a commit of the active tab: the repository and
+        // its history are shared. Selecting it ends any earlier inspection first.
+        let shown = match (dirty, self.worktree_tip(&path)) {
+            (false, Some(id)) => self.update(Message::Select(Selection::Commit { id })),
+            _ => Task::none(),
+        };
+        let selection_at = self.active_session().and_then(|tab| tab.selection.clone());
+        self.inspect = Some(InspectTarget {
+            worktree_path: path,
+            session,
+            selection_at,
+        });
+        shown
+    }
+
+    /// The inspected worktree's path while inspection is live: another worktree than the
+    /// active one, still open or catalogued, and the active tab's selection unchanged since.
+    pub(crate) fn inspected_path(&self) -> Option<&str> {
+        let target = self.inspect.as_ref()?;
+        let active = self.active_session()?;
+        if same_path(&active.path, &target.worktree_path) || active.selection != target.selection_at {
+            return None;
+        }
+        let present = match target.session {
+            Some(id) => self.sessions.iter().any(|session| session.id == id),
+            None => self
+                .worktree_catalogue
+                .iter()
+                .any(|entry| same_path(&entry.path, &target.worktree_path)),
+        };
+        present.then_some(target.worktree_path.as_str())
+    }
+
     fn worktree_opened(
         &mut self,
         path: String,
@@ -2831,6 +3105,8 @@ impl GitApp {
                     self.activate(index);
                     return Task::none();
                 }
+                // Its tab reads it from now on.
+                self.worktree_probes.retain(|probe| !same_path(&probe.path, &path));
                 let session = WorktreeSession::new(path, repo, self.settings.clone());
                 let key = session.key();
                 self.sessions.push(session);
@@ -4306,7 +4582,8 @@ fn palette_message(target: crate::palette::PaletteTarget) -> Message {
         }
         PaletteTarget::Commit { id } => Message::Select(Selection::Commit { id }),
         PaletteTarget::File { path, place } => Message::FocusFile { path, place },
-        PaletteTarget::Worktree { path } => Message::OpenWorktree(path),
+        // Same rule as a single click: inspect, never activate.
+        PaletteTarget::Worktree { path } => Message::InspectWorktree(path),
         PaletteTarget::Repository { path } => Message::OpenRepository(path),
     }
 }
@@ -6661,27 +6938,270 @@ mod tests {
         assert!(!app.tab_picker_open);
     }
 
-    #[test]
-    fn a_wip_row_activates_its_session_and_shows_its_working_tree() {
-        let mut app = two_session_app();
+    fn dirty_status(head: Option<&str>) -> core_domain::RepoStatus {
+        core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["notes.md".to_string()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: head.map(str::to_string),
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        }
+    }
 
-        let _ = app.update(Message::ShowSessionWorkingTree(1));
+    /// Hand the app its catalogue as a load would, and return the probe generation per path.
+    fn load_catalogue_list(app: &mut GitApp, list: Vec<Worktree>) -> Vec<(String, u64)> {
+        let key = app.active_key();
+        let _ = app.update(Message::WorktreesLoaded(key, Ok(list)));
+        app.worktree_probes
+            .iter()
+            .map(|probe| (probe.path.clone(), probe.generation))
+            .collect()
+    }
 
-        assert_eq!(app.active, 1);
-        assert!(matches!(
-            app.session().selection,
-            Some(Selection::Branch { current: true, .. })
-        ));
+    fn generation_of(probes: &[(String, u64)], path: &str) -> u64 {
+        probes.iter().find(|(at, _)| at == path).map(|(_, generation)| *generation).expect("probed")
     }
 
     #[test]
-    fn a_wip_row_for_a_missing_session_changes_nothing() {
-        let mut app = two_session_app();
+    fn a_single_click_on_a_wip_row_inspects_without_activating() {
+        let mut app = catalogued_app();
+        app.sessions[1].state.current_status = Some(dirty_status(None));
+        let second = app.sessions[1].id;
+        let cwd = app.shell_cwd.clone();
 
-        let _ = app.update(Message::ShowSessionWorkingTree(7));
+        let _ = app.update(Message::WorktreeClicked(SECOND.to_string()));
+
+        assert_eq!(app.active, 0, "the active tab stays");
+        assert_eq!(app.active_path(), FIRST, "the mutation target stays");
+        assert_eq!(app.shell_cwd, cwd, "the terminal folder stays");
+        assert_eq!(app.inspected_path(), Some(SECOND));
+        assert_eq!(app.inspect.as_ref().and_then(|target| target.session), Some(second));
+        let rows = app.wip_rows();
+        let row = rows.iter().find(|row| row.path == SECOND).expect("a WIP row");
+        assert!(row.inspected && !row.active);
+    }
+
+    #[test]
+    fn staging_is_refused_while_another_worktree_is_inspected() {
+        let mut app = catalogued_app();
+        app.sessions[1].state.current_status = Some(dirty_status(None));
+        app.sessions[0].state.current_status = Some(dirty_status(None));
+        app.sessions[0].marked_files = vec![MarkedFile {
+            path: "notes.md".into(),
+            place: FileDisposition::Unstaged,
+        }];
+        let _ = app.update(Message::WorktreeClicked(SECOND.to_string()));
+
+        let _ = app.update(Message::StageMarked);
+
+        assert!(!app.sessions[0].state.loading, "no edit started on the active tab");
+        assert!(!app.sessions[1].state.loading, "nor on the inspected one");
+    }
+
+    #[test]
+    fn a_double_click_on_a_wip_row_opens_it() {
+        let mut app = catalogued_app();
+        app.sessions[1].state.current_status = Some(dirty_status(None));
+
+        let _ = app.update(Message::WorktreeClicked(SECOND.to_string()));
+        let _ = app.update(Message::WorktreeClicked(SECOND.to_string()));
+
+        assert_eq!(app.active, 1);
+        assert_eq!(app.inspected_path(), None, "activation ends inspection");
+    }
+
+    #[test]
+    fn clicking_the_active_worktree_shows_its_working_tree() {
+        let mut app = catalogued_app();
+
+        let _ = app.update(Message::WorktreeClicked(FIRST.to_string()));
 
         assert_eq!(app.active, 0);
-        assert!(app.session().selection.is_none());
+        assert_eq!(app.inspected_path(), None);
+        assert!(matches!(app.session().selection, Some(Selection::Branch { current: true, .. })));
+    }
+
+    #[test]
+    fn inspecting_a_clean_worktree_selects_its_branch_tip_without_activating() {
+        let mut app = catalogued_app();
+        app.sessions[0].state.branches = vec![
+            core_domain::Branch { name: "main".into(), is_remote: false, is_head: true, tip: "aaaa".into(), ahead: 0, behind: 0 },
+            core_domain::Branch { name: "other".into(), is_remote: false, is_head: false, tip: "cccc".into(), ahead: 0, behind: 0 },
+        ];
+
+        let _ = app.update(Message::WorktreeClicked(THIRD.to_string()));
+
+        assert_eq!(app.active, 0);
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "cccc".into() }));
+        assert_eq!(app.inspected_path(), Some(THIRD));
+        assert_eq!(app.inspect.as_ref().and_then(|target| target.session), None);
+    }
+
+    #[test]
+    fn choosing_anything_else_ends_inspection_and_filters_stay() {
+        let mut app = catalogued_app();
+        app.sessions[1].state.current_status = Some(dirty_status(None));
+        app.sessions[0].branch_filter = Some("main".into());
+        let _ = app.update(Message::WorktreeClicked(SECOND.to_string()));
+        assert_eq!(app.session().branch_filter.as_deref(), Some("main"), "inspection keeps filters");
+
+        let _ = app.update(Message::Select(Selection::Commit { id: "aaaaaaa1".into() }));
+
+        assert_eq!(app.inspected_path(), None);
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn quick_open_inspects_a_worktree_instead_of_activating_it() {
+        let message = palette_message(crate::palette::PaletteTarget::Worktree { path: SECOND.to_string() });
+        assert!(matches!(message, Message::InspectWorktree(path) if path == SECOND));
+
+        let mut app = catalogued_app();
+        app.sessions[1].state.current_status = Some(dirty_status(None));
+        let _ = app.update(message_for(SECOND));
+        assert_eq!(app.active, 0);
+        assert_eq!(app.inspected_path(), Some(SECOND));
+
+        fn message_for(path: &str) -> Message {
+            palette_message(crate::palette::PaletteTarget::Worktree { path: path.to_string() })
+        }
+    }
+
+    #[test]
+    fn a_catalogue_load_reads_only_the_worktrees_without_a_tab() {
+        let mut app = catalogued_app();
+        let list = app.worktree_catalogue.clone();
+
+        let probes = load_catalogue_list(&mut app, list);
+
+        assert_eq!(probes.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), vec![THIRD]);
+        assert!(app.worktree_probes[0].status.is_none(), "nothing is shown before the read lands");
+    }
+
+    #[test]
+    fn a_dirty_unopened_worktree_gets_a_row_from_its_own_read() {
+        let mut app = catalogued_app();
+        let list = app.worktree_catalogue.clone();
+        let probes = load_catalogue_list(&mut app, list);
+
+        let _ = app.update(Message::WorktreeProbed(
+            THIRD.to_string(),
+            generation_of(&probes, THIRD),
+            Ok(dirty_status(Some("cccc"))),
+        ));
+
+        let rows = app.wip_rows();
+        let row = rows.iter().find(|row| row.path == THIRD).expect("a WIP row for the unopened worktree");
+        assert_eq!(row.session, None);
+        assert_eq!(row.label, "WIP · other · third");
+        assert!(row.tooltip.starts_with(THIRD));
+        assert!(row.tooltip.contains("HEAD: cccc"));
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn an_older_read_landing_late_is_dropped() {
+        let mut app = catalogued_app();
+        let list = app.worktree_catalogue.clone();
+        let first = generation_of(&load_catalogue_list(&mut app, list.clone()), THIRD);
+        let second = generation_of(&load_catalogue_list(&mut app, list), THIRD);
+        assert!(second > first);
+
+        let _ = app.update(Message::WorktreeProbed(THIRD.to_string(), first, Ok(dirty_status(None))));
+        assert!(app.wip_rows().iter().all(|row| row.path != THIRD), "the stale read is dropped");
+
+        let _ = app.update(Message::WorktreeProbed(THIRD.to_string(), second, Ok(dirty_status(None))));
+        assert!(app.wip_rows().iter().any(|row| row.path == THIRD));
+    }
+
+    #[test]
+    fn worktrees_in_folders_of_the_same_name_are_told_apart() {
+        let mut app = two_session_app();
+        let list = vec![
+            linked(FIRST, "main", true),
+            linked(SECOND, "feature", false),
+            linked(r"D:\a\wt", "one", false),
+            linked(r"D:\b\wt", "two", false),
+        ];
+        let probes = load_catalogue_list(&mut app, list);
+        for path in [r"D:\a\wt", r"D:\b\wt"] {
+            let _ = app.update(Message::WorktreeProbed(
+                path.to_string(),
+                generation_of(&probes, path),
+                Ok(dirty_status(None)),
+            ));
+        }
+
+        let labels: Vec<String> = app
+            .wip_rows()
+            .into_iter()
+            .filter(|row| row.session.is_none())
+            .map(|row| row.label)
+            .collect();
+
+        assert_eq!(labels, vec!["WIP · one · a/wt".to_string(), "WIP · two · b/wt".to_string()]);
+        assert_eq!(app.worktree_folder(FIRST), "first");
+    }
+
+    #[test]
+    fn a_worktree_removed_between_launches_is_handled_without_panicking() {
+        let gone = r"D:\gone\wt";
+        let mut app = catalogued_app();
+        let mut list = app.worktree_catalogue.clone();
+        list.push(linked(gone, "stale", false));
+        let probes = load_catalogue_list(&mut app, list);
+
+        // git still lists it, but its folder is gone: the read fails and there is no row.
+        let _ = app.update(Message::WorktreeProbed(
+            gone.to_string(),
+            generation_of(&probes, gone),
+            Err(DomainError::RepositoryNotFound),
+        ));
+        assert!(app.wip_rows().iter().all(|row| row.path != gone));
+        let probe = app.worktree_probes.iter().find(|probe| probe.path == gone).expect("kept");
+        assert!(probe.error.is_some());
+
+        // Inspecting it shows what is known (nothing loaded) and moves nothing.
+        let _ = app.update(Message::WorktreeClicked(gone.to_string()));
+        assert_eq!(app.active, 0);
+        assert_eq!(app.inspected_path(), Some(gone));
+
+        // The next catalogue no longer lists it: its probe and inspection go, a late read is dropped.
+        let list = app.worktree_catalogue.iter().filter(|entry| entry.path != gone).cloned().collect();
+        let _ = load_catalogue_list(&mut app, list);
+        assert!(app.worktree_probes.iter().all(|probe| probe.path != gone));
+        assert_eq!(app.inspected_path(), None);
+        let _ = app.update(Message::WorktreeProbed(gone.to_string(), u64::MAX, Ok(dirty_status(None))));
+        assert!(app.wip_rows().iter().all(|row| row.path != gone));
+    }
+
+    #[test]
+    fn opening_a_probed_worktree_in_a_tab_drops_its_probe() {
+        let mut app = catalogued_app();
+        let list = app.worktree_catalogue.clone();
+        let _ = load_catalogue_list(&mut app, list);
+        assert!(!app.worktree_probes.is_empty());
+
+        let _ = app.update(Message::OpenWorktree(THIRD.to_string()));
+        let _ = app.update(Message::WorktreeOpened(
+            THIRD.to_string(),
+            Ok(OpenedRepository(std::sync::Arc::new(FakeGitRepository::ok()))),
+        ));
+
+        assert!(app.worktree_probes.is_empty());
+        assert_eq!(app.active, 2, "Open in tab activates");
+    }
+
+    #[test]
+    fn closing_a_tab_reads_its_worktree_like_any_other() {
+        let mut app = catalogued_app();
+
+        let _ = app.update(Message::CloseWorktreeTab(1));
+
+        assert!(app.worktree_probes.iter().any(|probe| probe.path == SECOND));
     }
 
     #[test]

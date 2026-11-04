@@ -554,6 +554,30 @@ pub(crate) fn open_worktree_in_background(
     )
 }
 
+/// Read the status of a worktree that has no tab, through a transient adapter the
+/// `WorktreeOpener` builds for this one read. Only `status` is called; the adapter is
+/// dropped when the read ends. The path and `generation` come back so a stale read is dropped.
+pub(crate) fn probe_worktree_in_background(
+    open: crate::WorktreeOpener,
+    path: String,
+    generation: u64,
+) -> impl Future<Output = (String, u64, Result<core_domain::RepoStatus, DomainError>)> {
+    let echoed = path.clone();
+    in_background(
+        move || {
+            let result = open(&path).and_then(|repo| repo.status());
+            (path, generation, result)
+        },
+        move || {
+            (
+                echoed,
+                generation,
+                Err(DomainError::Unknown("worktree status read was interrupted".to_string())),
+            )
+        },
+    )
+}
+
 pub(crate) fn worktrees_in_background(
     repo: SharedRepository,
 ) -> impl Future<Output = Result<Vec<Worktree>, DomainError>> {
@@ -1285,5 +1309,43 @@ mod tests {
         assert_eq!(listed, Ok(vec![linked]));
         assert_eq!(added, Err(DomainError::Unknown("path exists".to_string())));
         assert_eq!(removed, Ok(()));
+    }
+
+    #[test]
+    fn a_worktree_probe_reads_status_through_an_adapter_for_its_own_path() {
+        use std::sync::Mutex;
+        let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let open: crate::WorktreeOpener = Arc::new(move |path: &str| {
+            seen.lock().unwrap().push(path.to_string());
+            let mut repo = FakeGitRepository::ok();
+            if let Ok(status) = repo.status_result.as_mut() {
+                status.unstaged_files = vec!["notes.md".to_string()];
+            }
+            Ok(Arc::new(repo) as SharedRepository)
+        });
+
+        let (path, generation, result) = iced::futures::executor::block_on(
+            probe_worktree_in_background(open, r"D:\wt\Knowl-analy-3bd5e".to_string(), 7),
+        );
+
+        assert_eq!(asked.lock().unwrap().as_slice(), [r"D:\wt\Knowl-analy-3bd5e".to_string()]);
+        assert_eq!(path, r"D:\wt\Knowl-analy-3bd5e");
+        assert_eq!(generation, 7);
+        assert_eq!(result.unwrap().unstaged_files, vec!["notes.md".to_string()]);
+    }
+
+    #[test]
+    fn a_worktree_probe_for_a_removed_folder_reports_the_error() {
+        let open: crate::WorktreeOpener =
+            Arc::new(|_: &str| Err(DomainError::RepositoryNotFound));
+
+        let (_, _, result) = iced::futures::executor::block_on(probe_worktree_in_background(
+            open,
+            "/gone".to_string(),
+            1,
+        ));
+
+        assert_eq!(result, Err(DomainError::RepositoryNotFound));
     }
 }

@@ -18,7 +18,10 @@ pub(crate) enum RefPillKind {
 /// One branch or tag that tips at a commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefPill {
+    /// What the pill shows: the name, ellipsised past [`PILL_LABEL_MAX`].
     pub label: String,
+    /// The full ref name, for the hover text.
+    pub name: String,
     pub kind: RefPillKind,
     pub ahead: usize,
     pub behind: usize,
@@ -69,6 +72,7 @@ pub(crate) fn refs_at(
         };
         pills.push(RefPill {
             label: shorten_ref(&branch.name, PILL_LABEL_MAX),
+            name: branch.name.clone(),
             kind,
             ahead: branch.ahead,
             behind: branch.behind,
@@ -78,6 +82,7 @@ pub(crate) fn refs_at(
         if tag.commit_id == commit_id {
             pills.push(RefPill {
                 label: shorten_ref(&tag.name, PILL_LABEL_MAX),
+                name: tag.name.clone(),
                 kind: RefPillKind::Tag,
                 ahead: 0,
                 behind: 0,
@@ -92,6 +97,35 @@ pub(crate) fn refs_at(
         RefPillKind::Tag => 4,
     });
     pills
+}
+
+/// Hover text for a commit's pills: every ref at the commit, one per line, by full name,
+/// with the worktree folder where one has the branch checked out. A clipped pill or a
+/// "+N" never hides a name.
+pub(crate) fn pill_tooltip(
+    pills: &[RefPill],
+    worktrees: &[Worktree],
+    folder_of: &dyn Fn(&str) -> String,
+) -> String {
+    pills
+        .iter()
+        .map(|pill| {
+            let kind = match pill.kind {
+                RefPillKind::Head => "current branch",
+                RefPillKind::Worktree => "branch in a worktree",
+                RefPillKind::Local => "branch",
+                RefPillKind::Remote => "remote branch",
+                RefPillKind::Tag => "tag",
+            };
+            let checked_out = matches!(pill.kind, RefPillKind::Head | RefPillKind::Worktree)
+                .then(|| worktrees.iter().find(|entry| entry.branch == pill.name))
+                .flatten()
+                .map(|entry| format!(" · worktree {}", folder_of(&entry.path)))
+                .unwrap_or_default();
+            format!("{} ({kind}){checked_out}", pill.name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Dominant tip kind for canvas node styling (local/worktree beat remote).
@@ -191,10 +225,33 @@ mod tests {
     }
 
     #[test]
+    fn the_tooltip_names_every_ref_in_full_with_its_worktree_folder() {
+        let long = "feature/analyse-changes-done-pr";
+        let branches = vec![
+            branch("main", "abc", false, true),
+            branch(long, "abc", false, false),
+            branch("origin/main", "abc", true, false),
+        ];
+        let worktrees = vec![wt("D:/repo", "main"), wt("D:/wt/Knowl-analy-3bd5e", long)];
+        let pills = refs_at("abc", &branches, &[], &worktrees);
+        let folder = |path: &str| crate::session::basename(path).to_string();
+
+        let tip = pill_tooltip(&pills, &worktrees, &folder);
+
+        assert_eq!(
+            tip,
+            "main (current branch) · worktree repo\n\
+             feature/analyse-changes-done-pr (branch in a worktree) · worktree Knowl-analy-3bd5e\n\
+             origin/main (remote branch)"
+        );
+    }
+
+    #[test]
     fn long_ref_names_are_ellipsised() {
         let long = "feature/very-long-branch-name-that-overflows-the-pill-gutter-limit";
         let pills = refs_at("id", &[branch(long, "id", false, false)], &[], &[]);
         assert_eq!(pills[0].label.chars().count(), PILL_LABEL_MAX);
         assert!(pills[0].label.ends_with('…'));
+        assert_eq!(pills[0].name, long, "the full name stays for the hover text");
     }
 }

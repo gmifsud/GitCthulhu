@@ -9,14 +9,15 @@ use crate::context_menu::ContextTarget;
 use crate::jobs::COMMIT_PAGE_SIZE;
 use crate::palette::commit_matches;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
-use crate::ref_pills::{pill_mark, primary_node_kind, refs_at, RefPill, RefPillKind};
+use crate::ref_pills::{pill_mark, pill_tooltip, primary_node_kind, refs_at, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
-use crate::session::{basename, WorktreeSession};
+use crate::session::WorktreeSession;
+use crate::wip::WipRow;
 use crate::theme::DesignTokens;
 use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, tooltip};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -177,49 +178,48 @@ pub(super) fn history_pane<'a>(
         ));
     }
 
-    for (index, session) in app.sessions.iter().enumerate() {
-        if narrowing {
-            break;
+    let wip_rows = app.wip_rows();
+    let inspecting = app.inspected_path().is_some();
+    for wip in &wip_rows {
+        // The inspected worktree is always drawn, so inspecting never needs a filter cleared.
+        // Otherwise working changes belong to a worktree's HEAD: hide other worktrees under
+        // any filter or search, and the active one too unless the filter is HEAD or its own branch.
+        if !wip.inspected {
+            if narrowing || (filter.is_some() && !wip.active) {
+                continue;
+            }
+            if wip.active
+                && !focus
+                && session
+                    .branch_filter
+                    .as_ref()
+                    .is_some_and(|name| session.local_branch(name).is_none_or(|branch| !branch.is_head))
+            {
+                continue;
+            }
         }
-        // Working changes belong to a session's HEAD: hide other sessions under any filter,
-        // and this one too unless the filter is HEAD or its own branch.
-        if filter.is_some() && index != app.active {
-            continue;
-        }
-        if index == app.active
-            && !focus
-            && session
-                .branch_filter
-                .as_ref()
-                .is_some_and(|name| session.local_branch(name).is_none_or(|branch| !branch.is_head))
-        {
-            continue;
-        }
-        if !session_dirty(session) {
-            continue;
-        }
-        let selected = index == app.active
-            && matches!(
-                selection,
-                Selection::Branch { current: true, .. } | Selection::File { .. }
-            );
-        let head = wip_label(session);
-        commit_rows = commit_rows.push(
-            button(history_row(
-                graph_cell_empty(graph_w),
-                wip_description_cell(&head, tokens, reading),
-                "",
-                "",
-                "",
-                false,
-                tokens,
-                reading,
-            ))
-            .width(Length::Fill)
-            .padding(0)
-            .on_press(Message::ShowSessionWorkingTree(index))
-            .style(move |_theme, status| commit_style(tokens, status, selected)),
-        );
+        let selected = wip.inspected
+            || (wip.active
+                && !inspecting
+                && matches!(
+                    selection,
+                    Selection::Branch { current: true, .. } | Selection::File { .. }
+                ));
+        let line = button(history_row(
+            graph_cell_empty(graph_w),
+            wip_description_cell(wip, tokens, reading),
+            "",
+            "",
+            "",
+            false,
+            tokens,
+            reading,
+        ))
+        .width(Length::Fill)
+        .padding(0)
+        .on_press(Message::WorktreeClicked(wip.path.clone()))
+        .style(move |_theme, status| commit_style(tokens, status, selected));
+        commit_rows = commit_rows.push(hover_tip(line.into(), wip.tooltip.clone(), tokens, reading));
     }
 
     for (node, graph_row) in table {
@@ -245,7 +245,7 @@ pub(super) fn history_pane<'a>(
             .width(Length::Fixed(graph_w))
             .height(Length::Fixed(ROW_HEIGHT))
             .into(),
-            description_cell(&commit.message, &pills, merge, tokens, reading),
+            description_cell(app, &commit.message, &pills, merge, tokens, reading),
             &commit.author,
             &age,
             short_hash(&commit.id),
@@ -272,9 +272,9 @@ pub(super) fn history_pane<'a>(
     }
 
     let any_wip = if focus {
-        app.sessions.get(app.active).is_some_and(session_dirty)
+        wip_rows.iter().any(|wip| wip.active || wip.inspected)
     } else {
-        app.sessions.iter().any(session_dirty)
+        !wip_rows.is_empty()
     };
     if narrowing {
         // The summary line already says how many matched.
@@ -374,7 +374,9 @@ fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
 }
 
 /// Subject first, taking what is left; ref pills after it at their natural width.
+/// Hovering the pills lists every ref at the commit by its full name.
 fn description_cell<'a>(
+    app: &GitApp,
     message: &str,
     pills: &[RefPill],
     muted: bool,
@@ -398,8 +400,10 @@ fn description_cell<'a>(
         .align_y(Alignment::Center);
     if !pills.is_empty() {
         // At most a quarter of the column: on a narrow log the subject is what must stay.
+        let folder_of = |path: &str| app.worktree_folder(path);
+        let names = pill_tooltip(pills, &app.worktree_catalogue, &folder_of);
         cell = cell.push(
-            container(pill_strip(pills, tokens, reading))
+            container(hover_tip(pill_strip(pills, tokens, reading), names, tokens, reading))
                 .width(Length::FillPortion(PILL_PORTION))
                 .max_width(PILL_STRIP_MAX)
                 .align_x(Alignment::End)
@@ -520,26 +524,61 @@ fn pill_strip<'a>(
     pill_row.into()
 }
 
+/// "Working changes · n files" and the WIP pill. The pill is outlined, never filled, and
+/// carries the edit mark, so it cannot pass for a branch or tag pill; the active
+/// worktree's pill is in the accent colour and says so.
 fn wip_description_cell<'a>(
-    head: &str,
+    wip: &WipRow,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let pill = RefPill {
-        label: format!("wip · {head}"),
-        kind: RefPillKind::Head,
-        ahead: 0,
-        behind: 0,
-    };
+    let files = if wip.changes == 1 { "1 file".to_string() } else { format!("{} files", wip.changes) };
+    let ink = if wip.active { tokens.accent_primary } else { tokens.text_secondary };
+    let edge = if wip.active { tokens.accent_primary } else { tokens.text_muted };
+    let small = (reading.size - 3.0).max(10.0);
+    let mut body = row![
+        glyph(Icon::Edit, (reading.size - 3.0).max(9.0), ink, &reading),
+        text(wip.label.clone())
+            .font(reading.font)
+            .size(small)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style { color: Some(ink) }),
+    ]
+    .spacing(3)
+    .align_y(Alignment::Center);
+    if wip.active {
+        body = body.push(
+            text("· active")
+                .font(reading.font)
+                .size(small)
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+        );
+    }
+    let pill = container(body)
+        .height(Length::Fixed(PILL_HEIGHT))
+        .clip(true)
+        .align_y(Alignment::Center)
+        .padding([PILL_PAD_Y, PILL_PAD_X])
+        .style(move |_theme: &Theme| container::Style {
+            background: None,
+            text_color: Some(ink),
+            border: Border {
+                color: edge,
+                width: 1.0,
+                radius: PILL_RADIUS.into(),
+            },
+            shadow: Shadow::default(),
+        });
     let stack = row![
-        text("Working changes")
+        text(format!("Working changes · {files}"))
             .font(reading.font)
             .size(reading.size)
             .wrapping(Wrapping::None)
             .style(move |_| text::Style {
                 color: Some(tokens.text_secondary),
             }),
-        ref_pill(&pill, tokens, reading),
+        pill,
     ]
     .spacing(SUBJECT_PILL_GAP)
     .align_y(Alignment::Center);
@@ -549,6 +588,32 @@ fn wip_description_cell<'a>(
         .clip(true)
         .align_y(Alignment::Center)
         .into()
+}
+
+/// `content` with `tip` shown under it on hover, in the tab strip's tooltip style.
+fn hover_tip<'a>(
+    content: Element<'a, Message>,
+    tip: String,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(tip).font(reading.mono).size((reading.size - 1.0).max(10.0)))
+            .padding([4, 8])
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(Background::Color(tokens.bg_app)),
+                text_color: Some(tokens.text_primary),
+                border: Border {
+                    color: tokens.border,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                shadow: Shadow::default(),
+            }),
+        tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -621,25 +686,6 @@ fn node_mark_for(pills: &[RefPill]) -> NodeMark {
     }
 }
 
-fn session_dirty(session: &WorktreeSession) -> bool {
-    session.state.current_status.as_ref().is_some_and(|status| {
-        !status.staged_files.is_empty()
-            || !status.unstaged_files.is_empty()
-            || !status.untracked_files.is_empty()
-            || !status.conflicted_files.is_empty()
-    })
-}
-
-fn wip_label(session: &WorktreeSession) -> String {
-    session
-        .state
-        .branches
-        .iter()
-        .find(|branch| branch.is_head && !branch.is_remote)
-        .map(|branch| branch.name.clone())
-        .unwrap_or_else(|| basename(&session.path).to_string())
-}
-
 fn single_line<'a>(
     value: &str,
     width: Length,
@@ -684,58 +730,5 @@ fn commit_style(
         text_color: tokens.text_primary,
         border: Border::default(),
         shadow: Shadow::default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn session_at(path: &str, dirty: bool, head: Option<&str>) -> WorktreeSession {
-        let mut session = WorktreeSession::test_stub();
-        session.path = path.to_string();
-        session.state.current_status = Some(core_domain::RepoStatus {
-            staged_files: Vec::new(),
-            unstaged_files: if dirty {
-                vec!["a.rs".to_string()]
-            } else {
-                Vec::new()
-            },
-            untracked_files: Vec::new(),
-            tracking: None,
-            head_commit_id: None,
-            kinds: Default::default(),
-            operation: None,
-            conflicted_files: vec![],
-        });
-        session.state.branches = head
-            .map(|name| {
-                vec![core_domain::Branch {
-                    name: name.to_string(),
-                    is_remote: false,
-                    is_head: true,
-                    tip: "abc".to_string(),
-                    ahead: 0,
-                    behind: 0,
-                }]
-            })
-            .unwrap_or_default();
-        session
-    }
-
-    #[test]
-    fn only_sessions_with_changes_are_dirty() {
-        assert!(session_dirty(&session_at(r"D:\a", true, Some("main"))));
-        assert!(!session_dirty(&session_at(r"D:\a", false, Some("main"))));
-        assert!(!session_dirty(&WorktreeSession::test_stub()));
-    }
-
-    #[test]
-    fn wip_label_is_the_branch_else_the_folder_name() {
-        assert_eq!(
-            wip_label(&session_at(r"D:\repo\wt", true, Some("feature"))),
-            "feature"
-        );
-        assert_eq!(wip_label(&session_at(r"D:\repo\wt", true, None)), "wt");
     }
 }

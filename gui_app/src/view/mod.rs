@@ -12,6 +12,7 @@ mod context_overlay;
 mod explorer;
 mod filter_bar;
 mod history;
+mod inspect;
 mod opening;
 mod operation;
 mod palette;
