@@ -31,20 +31,25 @@ pub(crate) enum WorktreeEdit {
     Commit(String),
 }
 
-/// Number of commits requested from the repository and rendered in the graph pane.
-pub(crate) const COMMIT_PAGE_SIZE: usize = 50;
+/// Commits read at first, and how many more each time the history is scrolled near its end.
+pub(crate) const COMMIT_PAGE_SIZE: usize = 200;
 
 /// Read the repository through the port and translate each result into a [`ViewEvent`].
 ///
 /// Synchronous by design: the caller chooses where it runs.
 /// Each call is reported independently, so one failure never hides another result.
 pub(crate) fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
+    load_repository_up_to(repo, COMMIT_PAGE_SIZE)
+}
+
+/// [`load_repository`] with the newest `limit` commits.
+pub(crate) fn load_repository_up_to(repo: &dyn GitRepository, limit: usize) -> Vec<ViewEvent> {
     vec![
         match repo.status() {
             Ok(status) => ViewEvent::StatusUpdated(status),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
-        match repo.log(Some(COMMIT_PAGE_SIZE)) {
+        match repo.log(Some(limit)) {
             Ok(commits) => ViewEvent::LogUpdated(commits),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
@@ -200,6 +205,21 @@ fn shell_command(cwd: &str, command: &str) -> std::process::Command {
             .current_dir(cwd)
             .env("GIT_TERMINAL_PROMPT", "0");
         process
+    }
+}
+
+/// The program and arguments for the interactive shell. PowerShell 7 (`pwsh`) when
+/// installed, else Windows PowerShell; the user's `$SHELL` (a login shell) elsewhere.
+/// The profile loads as in any terminal: no `-NoProfile`. The folder is set by the caller.
+pub(crate) fn shell_launch() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (powershell_program().to_string(), vec!["-NoLogo".to_string()])
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").ok().filter(|shell| !shell.is_empty()).unwrap_or_else(|| "/bin/sh".to_string());
+        (shell, vec!["-l".to_string()])
     }
 }
 
@@ -407,14 +427,31 @@ fn format_patch(patch: &Patch) -> String {
 
 pub(crate) fn load_repository_in_background(
     repo: SharedRepository,
+    limit: usize,
 ) -> impl Future<Output = Vec<ViewEvent>> {
     in_background(
-        move || load_repository(repo.as_ref()),
+        move || load_repository_up_to(repo.as_ref(), limit),
         || {
             vec![ViewEvent::ErrorOccurred(DomainError::Unknown(
                 "repository load was interrupted".to_string(),
             ))]
         },
+    )
+}
+
+/// The newest `limit` commits only: the next page of history, without re-reading status.
+pub(crate) fn history_in_background_up_to(
+    repo: SharedRepository,
+    limit: usize,
+) -> impl Future<Output = Vec<ViewEvent>> {
+    in_background(
+        move || {
+            vec![match repo.log(Some(limit)) {
+                Ok(commits) => ViewEvent::LogUpdated(commits),
+                Err(error) => ViewEvent::ErrorOccurred(error),
+            }]
+        },
+        || vec![ViewEvent::ErrorOccurred(DomainError::Unknown("history read was interrupted".to_string()))],
     )
 }
 
@@ -1140,7 +1177,7 @@ mod tests {
     fn background_load_returns_the_same_events() {
         let events = iced::futures::executor::block_on(load_repository_in_background(Arc::new(
             populated_repo(),
-        )));
+        ), COMMIT_PAGE_SIZE));
         assert_eq!(events.len(), 5);
         assert!(matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2));
         assert!(matches!(&events[2], ViewEvent::BranchesUpdated(branches) if branches.len() == 2));
@@ -1152,7 +1189,7 @@ mod tests {
     fn background_load_reports_a_crashed_adapter_as_an_error() {
         let events = iced::futures::executor::block_on(load_repository_in_background(Arc::new(
             PanickingRepository,
-        )));
+        ), COMMIT_PAGE_SIZE));
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],

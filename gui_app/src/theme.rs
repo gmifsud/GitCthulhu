@@ -33,6 +33,11 @@ pub(crate) struct DesignTokens {
     pub modified_word_bg: Color,
     pub added_word_bg: Color,
     pub removed_word_bg: Color,
+    /// Commits on the upstream not here (↓). Not green or red: those mean added and
+    /// removed lines, which a commit count is not.
+    pub incoming: Color,
+    /// Commits here not yet on the upstream (↑).
+    pub outgoing: Color,
 }
 
 impl DesignTokens {
@@ -67,6 +72,8 @@ impl DesignTokens {
             modified_word_bg: hex_color(0x2C4A73),
             added_word_bg: hex_color(0x23593A),
             removed_word_bg: hex_color(0x6B2A2C),
+            incoming: hex_color(0x70AEFF),
+            outgoing: hex_color(0xC4A1FF),
         }
     }
 }

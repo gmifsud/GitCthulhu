@@ -1,0 +1,15 @@
+[package]
+name = "terminal_widget"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Terminal emulator widget for iced: a PTY-backed shell drawn on a canvas. Vendored from iced_term 0.6.0 (MIT, see LICENSE) with click-to-focus and a public write command."
+
+[dependencies]
+alacritty_terminal = "0.25.0"
+anyhow = "1.0.99"
+iced = { version = "0.13.1", features = ["tokio", "canvas", "lazy", "advanced"] }
+iced_core = "0.13.2"
+iced_graphics = "0.13.0"
+open = "5.3.2"
+tokio = { version = "1.47.1", features = ["sync"] }

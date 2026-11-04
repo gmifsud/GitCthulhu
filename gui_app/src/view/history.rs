@@ -6,7 +6,6 @@
 use crate::app::{GitApp, Message};
 use crate::commit_graph::{graph_rows, graph_width, GraphCell, GraphRow, NodeMark, ROW_HEIGHT};
 use crate::context_menu::ContextTarget;
-use crate::jobs::COMMIT_PAGE_SIZE;
 use crate::palette::commit_matches;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
 use crate::ref_pills::{pill_mark, pill_tooltip, primary_node_kind, refs_at, RefPill, RefPillKind};
@@ -17,7 +16,7 @@ use crate::theme::DesignTokens;
 use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, tooltip};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, tooltip, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -93,12 +92,12 @@ pub(super) fn history_pane<'a>(
         .map(|tip| {
             filter_dag_nodes(tip, &session.state.commits, &session.state.dag_nodes)
                 .into_iter()
-                .take(COMMIT_PAGE_SIZE)
+                .take(session.history_limit)
                 .cloned()
                 .collect()
         })
         .unwrap_or_default();
-    let page_end = session.state.dag_nodes.len().min(COMMIT_PAGE_SIZE);
+    let page_end = session.state.dag_nodes.len();
     // A filter must never blank the graph: when its tip is not among the loaded commits
     // (remote-only history, or pushed off the page), say so and keep the full page.
     let filter_unloaded = filter.is_some() && filtered_owned.is_empty();
@@ -222,8 +221,17 @@ pub(super) fn history_pane<'a>(
         commit_rows = commit_rows.push(hover_tip(line.into(), wip.tooltip.clone(), tokens, reading));
     }
 
-    for (node, graph_row) in table {
+    // Only the rows in view (plus a margin) are built; every row is exactly ROW_HEIGHT tall, so
+    // the rest are stood in for by empty space of the same height and the scrollbar is true.
+    // Building all of a long history every frame is what made more history unaffordable.
+    let (first, last) = visible_rows(table.len(), app.history_scroll, app.history_viewport);
+    if first > 0 {
+        commit_rows = commit_rows.push(Space::with_height(Length::Fixed(first as f32 * ROW_HEIGHT)));
+    }
+    let after = table.len().saturating_sub(last);
+    for (node, graph_row) in table.into_iter().skip(first).take(last - first) {
         let Some(&commit) = commits_by_id.get(node.commit_id.as_str()) else {
+            commit_rows = commit_rows.push(Space::with_height(Length::Fixed(ROW_HEIGHT)));
             continue;
         };
         let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
@@ -270,6 +278,17 @@ pub(super) fn history_pane<'a>(
             }),
         );
     }
+    if after > 0 {
+        commit_rows = commit_rows.push(Space::with_height(Length::Fixed(after as f32 * ROW_HEIGHT)));
+    }
+    if session.history_more_pending {
+        commit_rows = commit_rows.push(
+            text("Loading more commits…")
+                .font(reading.font)
+                .size(reading.size)
+                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+        );
+    }
 
     let any_wip = if focus {
         wip_rows.iter().any(|wip| wip.active || wip.inspected)
@@ -294,7 +313,15 @@ pub(super) fn history_pane<'a>(
         );
     }
 
-    container(scrollable(commit_rows.padding([2, 8])).width(Length::Fill))
+    container(
+        scrollable(commit_rows.padding([2, 8]))
+            .width(Length::Fill)
+            .on_scroll(|viewport| Message::HistoryScrolled {
+                offset: viewport.absolute_offset().y,
+                height: viewport.bounds().height,
+                content: viewport.content_bounds().height,
+            }),
+    )
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_theme: &Theme| panel_style(tokens, false))
@@ -536,9 +563,50 @@ fn wip_description_cell<'a>(
     let ink = if wip.active { tokens.accent_primary } else { tokens.text_secondary };
     let edge = if wip.active { tokens.accent_primary } else { tokens.text_muted };
     let small = (reading.size - 3.0).max(10.0);
+    let label = wip.label.clone();
+    let active = wip.active;
+    // The label is fitted to the width the cell really has, shortening names in the middle,
+    // so the distinguishing end of a long branch or folder name is never what gets cut.
+    let fitted = iced::widget::responsive(move |size| {
+        let reserved = 26.0 + if active { 52.0 } else { 0.0 } + files.chars().count() as f32 * reading.size * 0.55 + 24.0;
+        let max_chars = ((size.width - reserved) / (small * WIP_CHAR_WIDTH)).max(12.0) as usize;
+        wip_cell(crate::wip::fit_label(&label, max_chars), files.clone(), active, ink, edge, small, tokens, reading)
+    });
+    container(fitted).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)).into()
+}
+
+/// Average glyph width of the UI font as a share of its size, for fitting WIP labels.
+/// A slight overestimate, so a fitted label never clips.
+const WIP_CHAR_WIDTH: f32 = 0.6;
+
+/// Rows built either side of the view, so a fast scroll never shows a gap and the few rows
+/// above the commits (headers, summaries, WIP) need not be measured exactly.
+const OVERSCAN_ROWS: usize = 40;
+
+/// The `first..last` commit rows to build for a view scrolled `offset` px, `height` px tall.
+/// Before the first scroll event the height is unknown (0): build one screenful generously.
+pub(crate) fn visible_rows(count: usize, offset: f32, height: f32) -> (usize, usize) {
+    let height = if height > 0.0 { height } else { 1_200.0 };
+    let top = (offset.max(0.0) / ROW_HEIGHT) as usize;
+    let first = top.saturating_sub(OVERSCAN_ROWS).min(count);
+    let last = (top + (height / ROW_HEIGHT).ceil() as usize + OVERSCAN_ROWS).min(count);
+    (first, last.max(first))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wip_cell<'a>(
+    label: String,
+    files: String,
+    active: bool,
+    ink: iced::Color,
+    edge: iced::Color,
+    small: f32,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
     let mut body = row![
         glyph(Icon::Edit, (reading.size - 3.0).max(9.0), ink, &reading),
-        text(wip.label.clone())
+        text(label)
             .font(reading.font)
             .size(small)
             .wrapping(Wrapping::None)
@@ -546,7 +614,7 @@ fn wip_description_cell<'a>(
     ]
     .spacing(3)
     .align_y(Alignment::Center);
-    if wip.active {
+    if active {
         body = body.push(
             text("· active")
                 .font(reading.font)
@@ -570,15 +638,16 @@ fn wip_description_cell<'a>(
             },
             shadow: Shadow::default(),
         });
+    // The pill first: it names the worktree. The count follows, muted.
     let stack = row![
-        text(format!("Working changes · {files}"))
+        pill,
+        text(files)
             .font(reading.font)
             .size(reading.size)
             .wrapping(Wrapping::None)
             .style(move |_| text::Style {
-                color: Some(tokens.text_secondary),
+                color: Some(tokens.text_muted),
             }),
-        pill,
     ]
     .spacing(SUBJECT_PILL_GAP)
     .align_y(Alignment::Center);
@@ -730,5 +799,19 @@ fn commit_style(
         text_color: tokens.text_primary,
         border: Border::default(),
         shadow: Shadow::default(),
+    }
+}
+
+#[cfg(test)]
+mod virtual_rows_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_rows_in_view_and_a_margin_are_built() {
+        assert_eq!(visible_rows(1_500, 0.0, 480.0), (0, 60));
+        let (first, last) = visible_rows(1_500, 24.0 * 500.0, 480.0);
+        assert_eq!((first, last), (460, 560));
+        assert_eq!(visible_rows(10, 9_999.0, 480.0), (10, 10), "past the end builds nothing");
+        assert_eq!(visible_rows(0, 0.0, 0.0), (0, 0));
     }
 }

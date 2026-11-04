@@ -130,12 +130,7 @@ fn branch_row<'a>(branch: &Branch, tokens: DesignTokens, reading: Reading) -> El
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    if branch.ahead > 0 {
-        line = line.push(label(&format!("↑{}", branch.ahead), tokens.vcs_added, reading));
-    }
-    if branch.behind > 0 {
-        line = line.push(label(&format!("↓{}", branch.behind), tokens.vcs_modified, reading));
-    }
+    line = line.push(super::explorer::tracking_badges(branch.ahead, branch.behind, tokens, reading));
     if current {
         line = line.push(glyph(Icon::Check, reading.size, tokens.accent_primary, &reading));
     }

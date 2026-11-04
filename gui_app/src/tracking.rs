@@ -51,9 +51,11 @@ pub(crate) fn sync_buttons(status: Option<&RepoStatus>, running: Option<&str>) -
             "Push".to_string(),
             Some("No upstream: this branch does not track a remote branch"),
         ),
+        // A count only when there is something to move: "Pull ↓0" read as noise. The branch
+        // line says "Up to date with …" when both are zero.
         Some(RepoStatus { tracking: Some(tracking), .. }) => (
-            format!("Pull ↓{}", tracking.behind),
-            format!("Push ↑{}", tracking.ahead),
+            if tracking.behind > 0 { format!("Pull ↓{}", tracking.behind) } else { "Pull".to_string() },
+            if tracking.ahead > 0 { format!("Push ↑{}", tracking.ahead) } else { "Push".to_string() },
             None,
         ),
     };
@@ -157,7 +159,7 @@ mod tests {
         assert!(pull.enabled && push.enabled);
 
         let [_, pull, push] = sync_buttons(Some(&status(Some(tracked(0, 0)))), None);
-        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull ↓0", "Push ↑0"));
+        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull", "Push"));
 
         let [fetch, pull, _] = sync_buttons(None, None);
         assert_eq!(pull.label, "Pull ↓…");

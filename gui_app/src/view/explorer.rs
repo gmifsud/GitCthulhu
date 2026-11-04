@@ -377,13 +377,19 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
     let inspected = app.inspected_path().is_some_and(|path| same_path(path, &entry.path));
     let branch = if entry.branch.is_empty() { DETACHED.to_string() } else { entry.branch.clone() };
     let (ahead, behind) = tracking_for_worktree(app, entry);
-    let mut content = row![
+    // The names share the spare width and clip; the tags and counts after them keep their
+    // size. Without that, long names squeezed the counts to nothing and they wrapped one
+    // character per line.
+    let names = row![
         // Two worktrees in folders of the same name read apart (`a/wt`, `b/wt`).
         label_text(&app.worktree_folder(&entry.path), if open { tokens.text_primary } else { tokens.text_secondary }, reading),
         label_text(&branch, tokens.accent_primary, reading),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
+    let mut content = row![container(names).width(Length::Fill).clip(true)]
+        .spacing(6)
+        .align_y(Alignment::Center);
     if entry.is_main {
         content = content.push(wt_tag("main", tokens, reading));
     }
@@ -470,7 +476,10 @@ fn tracking_for_worktree(app: &GitApp, entry: &Worktree) -> (usize, usize) {
     (0, 0)
 }
 
-fn tracking_badges<'a>(
+/// Incoming ↓ and outgoing ↑ counts on one line, in their own colours, nothing when both
+/// are zero. The one place these badges are drawn: the branch tree, worktrees and the
+/// branches popup all use it, so they always read the same.
+pub(super) fn tracking_badges<'a>(
     ahead: usize,
     behind: usize,
     tokens: DesignTokens,
@@ -480,28 +489,23 @@ fn tracking_badges<'a>(
         return Space::with_width(0).into();
     }
     let size = (reading.size - 1.0).max(11.0);
-    let mut badges = row![].spacing(4).align_y(Alignment::Center);
-    if ahead > 0 {
-        badges = badges.push(
-            text(format!("↑{ahead}"))
-                .font(reading.font)
+    let badge = |value: String, colour: Color| -> Element<'a, Message> {
+        one_line(
+            text(value)
+                .font(reading.mono)
                 .size(size)
                 .wrapping(Wrapping::None)
-                .style(move |_| iced::widget::text::Style {
-                    color: Some(tokens.added),
-                }),
-        );
-    }
+                .style(move |_| iced::widget::text::Style { color: Some(colour) }),
+            size,
+            Length::Shrink,
+        )
+    };
+    let mut badges = row![].spacing(6).align_y(Alignment::Center);
     if behind > 0 {
-        badges = badges.push(
-            text(format!("↓{behind}"))
-                .font(reading.font)
-                .size(size)
-                .wrapping(Wrapping::None)
-                .style(move |_| iced::widget::text::Style {
-                    color: Some(tokens.removed),
-                }),
-        );
+        badges = badges.push(badge(format!("↓{behind}"), tokens.incoming));
     }
-    badges.into()
+    if ahead > 0 {
+        badges = badges.push(badge(format!("↑{ahead}"), tokens.outgoing));
+    }
+    container(badges).width(Length::Shrink).into()
 }

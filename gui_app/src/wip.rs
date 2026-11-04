@@ -22,6 +22,44 @@ pub(crate) fn wip_label(branch: Option<&str>, folder: &str) -> String {
     [WIP_WORD, branch, folder].join(WIP_SEPARATOR)
 }
 
+/// `label` cut to at most `max` characters by shortening the middle of its longest part
+/// (parts are split on [`WIP_SEPARATOR`]). The start and end of each name stay readable:
+/// worktree and branch names often share a prefix and differ at the end.
+pub(crate) fn fit_label(label: &str, max: usize) -> String {
+    const KEEP_EACH_SIDE: usize = 4;
+    let mut parts: Vec<Vec<char>> = label.split(WIP_SEPARATOR).map(|part| part.chars().collect()).collect();
+    let separators = WIP_SEPARATOR.chars().count() * parts.len().saturating_sub(1);
+    let total = |parts: &[Vec<char>]| parts.iter().map(Vec::len).sum::<usize>() + separators;
+    while total(&parts) > max {
+        let Some(longest) = (0..parts.len()).max_by_key(|&index| parts[index].len()) else {
+            break;
+        };
+        let part = &parts[longest];
+        if part.len() <= KEEP_EACH_SIDE * 2 + 1 {
+            break;
+        }
+        let excess = total(&parts) - max;
+        // Drop enough from the middle to fit, but never more than the part can spare.
+        let removable = part.len() - (KEEP_EACH_SIDE * 2 + 1);
+        let drop = (excess + 1).min(removable).max(1);
+        let keep = part.len() - drop - 1;
+        let head = keep.div_ceil(2);
+        let tail = keep - head;
+        let mut shorter: Vec<char> = part[..head].to_vec();
+        shorter.push('…');
+        shorter.extend_from_slice(&part[part.len() - tail..]);
+        if shorter.len() >= part.len() {
+            break;
+        }
+        parts[longest] = shorter;
+    }
+    parts
+        .into_iter()
+        .map(|part| part.into_iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join(WIP_SEPARATOR)
+}
+
 /// Path segments, root first, with either slash and no empty parts.
 fn segments(path: &str) -> Vec<&str> {
     path.split(['/', '\\']).filter(|part| !part.is_empty()).collect()
@@ -152,6 +190,31 @@ pub(crate) struct WipRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_that_fits_is_left_alone() {
+        let label = wip_label(Some("main"), "primary");
+        assert_eq!(fit_label(&label, 80), label);
+    }
+
+    #[test]
+    fn a_long_label_loses_the_middle_of_its_longest_part() {
+        let label = wip_label(
+            Some("7015-signature-modal-ensure-that-same-logic-implemented-not-allowing-success-closure-of-screen"),
+            "7015-signature-modal",
+        );
+        let fitted = fit_label(&label, 60);
+        assert!(fitted.chars().count() <= 60, "{fitted}");
+        assert!(fitted.starts_with("WIP · 7015-"), "{fitted}");
+        assert!(fitted.contains('…'), "{fitted}");
+        assert!(fitted.ends_with("of-screen · 7015-signature-modal"), "end of the branch and the folder stay: {fitted}");
+    }
+
+    #[test]
+    fn a_tiny_budget_still_ends_cleanly() {
+        let fitted = fit_label(&wip_label(Some("a-very-long-branch-name"), "a-very-long-folder"), 5);
+        assert!(fitted.starts_with("WIP · "), "{fitted}");
+    }
 
     #[test]
     fn the_label_names_wip_then_branch_then_folder() {

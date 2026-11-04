@@ -134,7 +134,8 @@ pub(crate) fn layout(patches: &[Patch], focus: Option<&str>, budget: usize, spli
             continue;
         }
         for (index, hunk) in patch.hunks.iter().enumerate() {
-            let rows = if split { split_rows(hunk) } else { unified_rows(hunk) };
+            let hunk = displayable(hunk);
+            let rows = if split { split_rows(&hunk) } else { unified_rows(&hunk) };
             if left == 0 {
                 hidden += rows.len();
                 continue;
@@ -173,6 +174,43 @@ fn unified_rows(hunk: &Hunk) -> Vec<Line> {
             Line::Unified { old: o, new: n, kind: line.kind, text: line.text.clone() }
         })
         .collect()
+}
+
+/// Columns between tab stops when a tab is drawn.
+const TAB_WIDTH: usize = 4;
+
+/// A hunk whose lines can be drawn as they are: tabs expanded to the next tab stop, carriage
+/// returns and other control characters dropped. iced's basic text shaping has no tab glyph:
+/// it drew a box and misplaced every glyph after it, so indented code came out spread apart.
+fn displayable(hunk: &Hunk) -> Hunk {
+    Hunk {
+        header: hunk.header.clone(),
+        lines: hunk
+            .lines
+            .iter()
+            .map(|line| core_domain::DiffLine { kind: line.kind, text: display_text(&line.text) })
+            .collect(),
+    }
+}
+
+pub(crate) fn display_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut column = 0;
+    for c in text.chars() {
+        match c {
+            '\t' => {
+                let spaces = TAB_WIDTH - column % TAB_WIDTH;
+                out.extend(std::iter::repeat_n(' ', spaces));
+                column += spaces;
+            }
+            c if c.is_control() => {}
+            c => {
+                out.push(c);
+                column += 1;
+            }
+        }
+    }
+    out
 }
 
 fn whole(text: &str, changed: bool) -> Vec<Piece> {
@@ -350,6 +388,34 @@ fn prefix_suffix(before: &str, after: &str) -> (Vec<Piece>, Vec<Piece>) {
 mod tests {
     use super::*;
     use core_domain::DiffLine;
+
+    #[test]
+    fn tabs_expand_to_tab_stops_and_control_characters_go() {
+        assert_eq!(display_text("\t\tif (x)"), "        if (x)");
+        assert_eq!(display_text("ab\tc"), "ab  c");
+        assert_eq!(display_text("end;\r"), "end;");
+        assert_eq!(display_text("naïve\tx"), "naïve   x");
+    }
+
+    #[test]
+    fn laid_out_rows_never_carry_a_tab() {
+        let patch = Patch {
+            path: "a.ts".into(),
+            binary: false,
+            hunks: vec![hunk("@@ -1 +1 @@", &[(DiffLineKind::Removed, "\tsetA();"), (DiffLineKind::Added, "\tif (x) setA();")])],
+        };
+        for split in [true, false] {
+            let laid = layout(std::slice::from_ref(&patch), None, 100, split);
+            for line in &laid.lines {
+                let texts: Vec<String> = match line {
+                    Line::Split { left, right } => left.pieces.iter().chain(&right.pieces).map(|p| p.text.clone()).collect(),
+                    Line::Unified { text, .. } => vec![text.clone()],
+                    _ => vec![],
+                };
+                assert!(texts.iter().all(|t| !t.contains('\t')), "{texts:?}");
+            }
+        }
+    }
 
     fn hunk(header: &str, lines: &[(DiffLineKind, &str)]) -> Hunk {
         Hunk {

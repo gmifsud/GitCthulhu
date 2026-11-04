@@ -132,6 +132,11 @@ pub(crate) struct WorktreeSession {
     pub(crate) diff_change: Option<usize>,
     /// Where a Shift-click range in the working tree starts: the last plain or Ctrl click.
     pub(crate) selection_anchor: Option<MarkedFile>,
+    /// Commits asked for in the history: one page to start, one more each time the list is
+    /// scrolled near its end. Kept across refreshes so a reload never cuts the history short.
+    pub(crate) history_limit: usize,
+    /// A next page of history is being read.
+    pub(crate) history_more_pending: bool,
 }
 
 impl WorktreeSession {
@@ -163,7 +168,14 @@ impl WorktreeSession {
             author_filter: None,
             diff_change: None,
             selection_anchor: None,
+            history_limit: crate::jobs::COMMIT_PAGE_SIZE,
+            history_more_pending: false,
         }
+    }
+
+    /// True when the last read filled the page, so older commits may exist.
+    pub(crate) fn history_may_have_more(&self) -> bool {
+        self.state.commits.len() >= self.history_limit
     }
 
     /// Identity plus path, for a job this session starts.

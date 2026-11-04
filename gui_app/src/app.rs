@@ -178,6 +178,12 @@ pub(crate) struct GitApp {
     /// The Compare window, when open.
     pub(crate) compare: Option<CompareState>,
     compare_generation: u64,
+    /// The interactive shell: a pseudoconsole running pwsh, alive while the window is, folded
+    /// panel or not. `None` until the terminal is first shown, or after the shell exited.
+    pub(crate) pty: Option<terminal_widget::Terminal>,
+    /// Why there is no shell: it could not start, or it exited.
+    pub(crate) pty_error: Option<String>,
+    pty_next_id: u64,
     /// What every repository opened in this window has done, and what is running now.
     pub(crate) activity: crate::activity::ActivityLog,
     /// Keeps each repository's log between runs. A no-op until the composition root sets one.
@@ -186,6 +192,10 @@ pub(crate) struct GitApp {
     activity_requested: Vec<String>,
     /// Which tab the bottom panel shows.
     pub(crate) bottom_tab: BottomTab,
+    /// History list scroll offset and height in px, from its last scroll event, so only the
+    /// rows in view are built.
+    pub(crate) history_scroll: f32,
+    pub(crate) history_viewport: f32,
     /// The Activity tab lists failures only.
     pub(crate) activity_failures_only: bool,
     /// Last error line of the running terminal command, for its activity entry.
@@ -331,6 +341,10 @@ pub(crate) enum Message {
     Shell(u64, ShellEvent),
     /// Stop button, or Ctrl+C while the command line has focus.
     ShellInterrupt,
+    /// Output, resize, selection… from the interactive shell.
+    Pty(terminal_widget::Event),
+    /// Start a fresh shell after the last one exited or failed to start.
+    RestartShell,
     /// Ctrl+C anywhere; stops the command only when the command line has focus.
     CtrlCPressed,
     /// Ctrl+C was pressed; `focused` says whether the command line had focus.
@@ -380,6 +394,8 @@ pub(crate) enum Message {
     ClearActivity,
     /// Redraw the status bar while an action runs or its result is showing.
     ActivityTick,
+    /// The history list scrolled: its offset and visible height in px.
+    HistoryScrolled { offset: f32, height: f32, content: f32 },
     CloseSettings,
     /// Disk write finished. No UI effect; keeps the task from being discarded silently.
     SettingsSaved,
@@ -615,6 +631,9 @@ fn finished_outcome(message: &Message) -> Option<(crate::activity::Lane, core_do
 
 /// The terminal, carried across the rebuild that opening another repository does.
 struct KeptTerminal {
+    pty: Option<terminal_widget::Terminal>,
+    pty_error: Option<String>,
+    pty_next_id: u64,
     console: crate::terminal::Console,
     log: text_editor::Content,
     open: bool,
@@ -769,10 +788,15 @@ impl GitApp {
             repository_filter: String::new(),
             compare: None,
             compare_generation: 0,
+            pty: None,
+            pty_error: None,
+            pty_next_id: 1,
             activity: crate::activity::ActivityLog::default(),
             activity_store: Arc::new(NoActivityStore),
             activity_requested: Vec::new(),
             bottom_tab: BottomTab::Terminal,
+            history_scroll: 0.0,
+            history_viewport: 0.0,
             activity_failures_only: false,
             shell_last_error: None,
             shell_stopped: false,
@@ -1219,6 +1243,9 @@ impl GitApp {
                 let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
                 };
+                if events.iter().any(|event| matches!(event, ViewEvent::LogUpdated(_))) {
+                    session.history_more_pending = false;
+                }
                 for event in events {
                     if let ViewEvent::ErrorOccurred(error) = &event {
                         saw_error.get_or_insert_with(|| error_message(error));
@@ -1959,9 +1986,10 @@ impl GitApp {
                 Task::none()
             }
             Message::ToggleTerminal => {
+                // Folding the panel keeps the shell running; unfolding brings it back focused.
                 self.terminal_open = !self.terminal_open;
-                if self.terminal_open {
-                    focus_shell()
+                if self.terminal_open && self.bottom_tab == BottomTab::Terminal {
+                    self.open_shell()
                 } else {
                     Task::none()
                 }
@@ -1974,9 +2002,9 @@ impl GitApp {
                 Task::none()
             }
             Message::ClearTerminal => {
-                self.console.clear();
-                self.terminal_log = text_editor::Content::new();
-                focus_shell()
+                // Ctrl+L: the shell's own clear-screen, so a half-typed line is kept.
+                self.write_to_shell(b"\x0c");
+                self.open_shell()
             }
             Message::ShellInputChanged(value) => {
                 self.shell_input = value;
@@ -1985,6 +2013,10 @@ impl GitApp {
             Message::ShellSubmit => self.submit_shell(),
             Message::Shell(run, event) => self.shell_event(run, event),
             Message::ShellInterrupt => {
+                if self.pty.is_some() {
+                    self.write_to_shell(b"\x03");
+                    return self.open_shell();
+                }
                 if let Some(pid) = self.shell_pid.take() {
                     self.shell_stopped = true;
                     stop_shell(pid);
@@ -2011,7 +2043,24 @@ impl GitApp {
                 }
                 Task::none()
             }
-            Message::FocusShell => focus_shell(),
+            Message::FocusShell => self.open_shell(),
+            Message::Pty(terminal_widget::Event::BackendCall(_, command)) => {
+                let Some(shell) = self.pty.as_mut() else {
+                    return Task::none();
+                };
+                if shell.handle(terminal_widget::Command::ProxyToBackend(command))
+                    == terminal_widget::actions::Action::Shutdown
+                {
+                    self.pty = None;
+                    self.pty_error = Some("The shell exited. Click here to start a new one.".to_string());
+                }
+                Task::none()
+            }
+            Message::RestartShell => {
+                self.pty = None;
+                self.pty_error = None;
+                self.open_shell()
+            }
             Message::TerminalDragStart => {
                 self.terminal_drag = Some((self.cursor.1, self.terminal_height));
                 Task::none()
@@ -2135,6 +2184,15 @@ impl GitApp {
                 Task::none()
             }
             Message::ActivitySaved | Message::ActivityTick => Task::none(),
+            Message::HistoryScrolled { offset, height, content } => {
+                self.history_scroll = offset;
+                self.history_viewport = height;
+                // Within a few screens of the end: read the next page, once at a time.
+                if content - (offset + height) < height * 2.0 {
+                    return self.load_more_history();
+                }
+                Task::none()
+            }
             Message::ShowActivity => {
                 self.terminal_open = true;
                 self.bottom_tab = BottomTab::Activity;
@@ -2144,7 +2202,7 @@ impl GitApp {
                 self.bottom_tab = tab;
                 self.terminal_open = true;
                 if tab == BottomTab::Terminal {
-                    focus_shell()
+                    self.open_shell()
                 } else {
                     Task::none()
                 }
@@ -2972,9 +3030,24 @@ impl GitApp {
         crate::wip::wip_label(self.worktree_branch(path).as_deref(), &self.worktree_folder(path))
     }
 
-    /// Working changes rows, dirty worktrees only: open tabs in tab order, then worktrees
-    /// without a tab in catalogue order.
+    /// Working changes rows: the active worktree's, plus the one being inspected, when dirty.
+    /// Every other worktree is listed in the Explorer; giving each a graph row buried the
+    /// history under a screenful of WIP rows.
     pub(crate) fn wip_rows(&self) -> Vec<WipRow> {
+        let inspected = self.inspected_path().map(str::to_string);
+        let active_path = self.active_session().map(|session| session.path.clone());
+        self.all_wip_rows()
+            .into_iter()
+            .filter(|row| {
+                row.active
+                    || active_path.as_deref().is_some_and(|path| same_path(path, &row.path))
+                    || inspected.as_deref().is_some_and(|path| same_path(path, &row.path))
+            })
+            .collect()
+    }
+
+    /// Every dirty worktree's row: open tabs in tab order, then worktrees without a tab.
+    pub(crate) fn all_wip_rows(&self) -> Vec<WipRow> {
         let inspected = self.inspected_path();
         let mut paths: Vec<(String, Option<usize>)> = self
             .sessions
@@ -3342,11 +3415,12 @@ impl GitApp {
         }
         let repo = session.adapter.clone();
         let key = session.key();
+        let limit = session.history_limit;
         session.state.loading = true;
         if clear_error {
             self.error = None;
         }
-        Task::perform(load_repository_in_background(repo), move |events| {
+        Task::perform(load_repository_in_background(repo, limit), move |events| {
             Message::RepositoryLoaded(key.clone(), events)
         })
     }
@@ -3480,9 +3554,79 @@ impl GitApp {
         )
     }
 
+    /// Ask for one more page of the active tab's history, unless a read is under way or the
+    /// last one came back short (there is nothing older).
+    fn load_more_history(&mut self) -> Task<Message> {
+        let Some(session) = self.active_session_mut() else {
+            return Task::none();
+        };
+        if session.history_more_pending || session.state.loading || !session.history_may_have_more() {
+            return Task::none();
+        }
+        session.history_limit += crate::jobs::COMMIT_PAGE_SIZE;
+        session.history_more_pending = true;
+        let repo = session.adapter.clone();
+        let key = session.key();
+        let limit = session.history_limit;
+        Task::perform(crate::jobs::history_in_background_up_to(repo, limit), move |events| {
+            Message::RepositoryLoaded(key.clone(), events)
+        })
+    }
+
+    /// Start the shell if there is none, then give it the keyboard.
+    pub(crate) fn open_shell(&mut self) -> Task<Message> {
+        if self.pty.is_none() {
+            let folder = self.shell_folder().unwrap_or_else(|| ".".to_string());
+            let (program, args) = crate::jobs::shell_launch();
+            let settings = terminal_widget::settings::Settings {
+                font: terminal_widget::settings::FontSettings {
+                    size: (f32::from(crate::appearance::font_size(self.settings.ui_size)) - 1.0).max(11.0),
+                    ..Default::default()
+                },
+                theme: terminal_widget::settings::ThemeSettings::new(Box::new(terminal_widget::ColorPalette {
+                    background: "#0a0a0b".to_string(),
+                    ..Default::default()
+                })),
+                backend: terminal_widget::settings::BackendSettings {
+                    program: program.clone(),
+                    args,
+                    working_directory: Some(std::path::PathBuf::from(&folder)),
+                },
+            };
+            let id = self.pty_next_id;
+            self.pty_next_id += 1;
+            match terminal_widget::Terminal::new(id, settings) {
+                Ok(shell) => {
+                    self.pty = Some(shell);
+                    self.pty_error = None;
+                }
+                Err(error) => {
+                    self.pty_error = Some(format!("Could not start {program}: {error}. Click here to try again."));
+                    return Task::none();
+                }
+            }
+        }
+        match &self.pty {
+            Some(shell) => terminal_widget::TerminalView::focus(shell.widget_id()),
+            None => Task::none(),
+        }
+    }
+
+    /// Type `bytes` into the shell, as if pressed.
+    fn write_to_shell(&mut self, bytes: &[u8]) {
+        if let Some(shell) = self.pty.as_mut() {
+            let _ = shell.handle(terminal_widget::Command::ProxyToBackend(
+                terminal_widget::backend::Command::Write(bytes.to_vec()),
+            ));
+        }
+    }
+
     /// Lift the terminal out before the window is rebuilt for another repository.
     fn take_terminal(&mut self) -> KeptTerminal {
         KeptTerminal {
+            pty: self.pty.take(),
+            pty_error: self.pty_error.take(),
+            pty_next_id: self.pty_next_id,
             console: std::mem::replace(&mut self.console, crate::terminal::Console::new()),
             log: std::mem::take(&mut self.terminal_log),
             open: self.terminal_open,
@@ -3497,6 +3641,9 @@ impl GitApp {
     /// Put the terminal back after a rebuild. The next command runs in the new repository,
     /// like opening a project in an editor; a command still running keeps streaming here.
     fn restore_terminal(&mut self, kept: KeptTerminal) {
+        self.pty = kept.pty;
+        self.pty_error = kept.pty_error;
+        self.pty_next_id = kept.pty_next_id;
         self.console = kept.console;
         self.terminal_log = kept.log;
         self.terminal_open = kept.open;
@@ -4308,6 +4455,9 @@ impl GitApp {
             subscriptions.push(
                 iced::time::every(iced::time::Duration::from_millis(500)).map(|_| Message::ActivityTick),
             );
+        }
+        if let Some(shell) = &self.pty {
+            subscriptions.push(iced::Subscription::run_with_id(shell.id, shell.subscription()).map(Message::Pty));
         }
         iced::Subscription::batch(subscriptions)
     }
@@ -7093,7 +7243,7 @@ mod tests {
             Ok(dirty_status(Some("cccc"))),
         ));
 
-        let rows = app.wip_rows();
+        let rows = app.all_wip_rows();
         let row = rows.iter().find(|row| row.path == THIRD).expect("a WIP row for the unopened worktree");
         assert_eq!(row.session, None);
         assert_eq!(row.label, "WIP · other · third");
@@ -7111,10 +7261,10 @@ mod tests {
         assert!(second > first);
 
         let _ = app.update(Message::WorktreeProbed(THIRD.to_string(), first, Ok(dirty_status(None))));
-        assert!(app.wip_rows().iter().all(|row| row.path != THIRD), "the stale read is dropped");
+        assert!(app.all_wip_rows().iter().all(|row| row.path != THIRD), "the stale read is dropped");
 
         let _ = app.update(Message::WorktreeProbed(THIRD.to_string(), second, Ok(dirty_status(None))));
-        assert!(app.wip_rows().iter().any(|row| row.path == THIRD));
+        assert!(app.all_wip_rows().iter().any(|row| row.path == THIRD));
     }
 
     #[test]
@@ -7136,7 +7286,7 @@ mod tests {
         }
 
         let labels: Vec<String> = app
-            .wip_rows()
+            .all_wip_rows()
             .into_iter()
             .filter(|row| row.session.is_none())
             .map(|row| row.label)
@@ -7144,6 +7294,10 @@ mod tests {
 
         assert_eq!(labels, vec!["WIP · one · a/wt".to_string(), "WIP · two · b/wt".to_string()]);
         assert_eq!(app.worktree_folder(FIRST), "first");
+        assert!(
+            app.wip_rows().iter().all(|row| row.session.is_some()),
+            "the graph lists unopened worktrees only while one is inspected"
+        );
     }
 
     #[test]
@@ -7503,20 +7657,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_commands_echo_with_a_prompt_and_builtins_stay_local() {
-        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        app.terminal_open = true;
-        let _ = app.update(Message::ShellInputChanged("cls".into()));
-        let _ = app.update(Message::ShellSubmit);
-        assert!(app.console.text().is_empty(), "cls clears, the echo included");
-        assert!(!app.shell_busy);
-        let _ = app.update(Message::ShellInputChanged("exit".into()));
-        let _ = app.update(Message::ShellSubmit);
-        assert!(!app.terminal_open, "exit folds the terminal");
-        assert!(app.console.text().contains("exit"));
-    }
-
-    #[test]
     fn output_of_a_stopped_command_cannot_land_in_the_next() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
         app.shell_run = 2;
@@ -7623,6 +7763,39 @@ mod tests {
         let _ = app.update(Message::FetchFinished(app.active_key(), Ok(())));
         let _ = app.update(Message::ClearActivity);
         assert!(app.activity.for_repository(&repository).is_empty());
+    }
+
+    #[test]
+    fn scrolling_near_the_end_reads_one_more_page_until_history_runs_out() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let page = crate::jobs::COMMIT_PAGE_SIZE;
+        let commits = |count: usize| -> Vec<core_domain::Commit> {
+            (0..count)
+                .map(|index| core_domain::Commit {
+                    id: format!("{index:040x}"),
+                    parent_ids: vec![],
+                    author: "a".into(),
+                    message: "m".into(),
+                    timestamp: 0,
+                })
+                .collect()
+        };
+        app.session_mut().state.commits = commits(page);
+        let near_end = Message::HistoryScrolled { offset: 4_500.0, height: 500.0, content: 5_200.0 };
+        let _ = app.update(near_end.clone());
+        assert_eq!(app.session().history_limit, page * 2);
+        assert!(app.session().history_more_pending);
+        let _ = app.update(near_end.clone());
+        assert_eq!(app.session().history_limit, page * 2, "one read at a time");
+
+        let key = app.active_key();
+        let _ = app.update(Message::RepositoryLoaded(key, vec![ViewEvent::LogUpdated(commits(page + 30))]));
+        assert!(!app.session().history_more_pending);
+        let _ = app.update(near_end);
+        assert_eq!(app.session().history_limit, page * 2, "a short read means there is nothing older");
+
+        let _ = app.update(Message::HistoryScrolled { offset: 0.0, height: 500.0, content: 50_000.0 });
+        assert_eq!(app.session().history_limit, page * 2, "far from the end reads nothing");
     }
 
     #[test]
