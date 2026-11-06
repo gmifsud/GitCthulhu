@@ -1,0 +1,44 @@
+<!-- @dsCard group="History" height=200 subtitle="Six lanes, 24px rows; plain, local, remote and worktree tips" -->
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>CommitGraph</title>
+<style>
+  .l0{stroke:var(--lane-0)} .l1{stroke:var(--lane-1)} .l2{stroke:var(--lane-2)} .l3{stroke:var(--lane-3)} .l4{stroke:var(--lane-4)} .l5{stroke:var(--lane-5)}
+  .f0{fill:var(--lane-0)} .f1{fill:var(--lane-1)} .f2{fill:var(--lane-2)} .f3{fill:var(--lane-3)}
+  line, .ring{stroke-width:2;fill:none}
+  .meta{font:400 14px/24px var(--font-mono);fill:var(--text-secondary)}
+  .hash{fill:var(--text-muted)}
+</style></head>
+<body class="gc-ground" style="margin:0;padding:8px 12px">
+<svg width="520" height="168" viewBox="0 0 520 168" role="img" aria-label="Commit graph">
+  <!-- lane x = 16 * (lane + 0.5): 8, 24, 40, 56, 72, 88 -->
+  <line class="l0" x1="8" y1="0" x2="8" y2="168"/>
+  <line class="l1" x1="24" y1="12" x2="24" y2="132"/>
+  <line class="l2" x1="40" y1="36" x2="40" y2="84"/>
+  <line class="l3" x1="56" y1="60" x2="56" y2="108"/>
+  <!-- merges: straight segments between dots -->
+  <line class="l1" x1="24" y1="132" x2="8" y2="156"/>
+  <line class="l2" x1="40" y1="84" x2="24" y2="108"/>
+  <line class="l3" x1="56" y1="108" x2="8" y2="132"/>
+  <!-- row 1: HEAD (local ring) -->
+  <circle class="ring l0" cx="8" cy="12" r="6.5"/><circle class="f0" cx="8" cy="12" r="4"/>
+  <!-- row 2: remote tip (hollow ring) on lane 1 -->
+  <circle class="ring l1" cx="24" cy="36" r="5"/>
+  <!-- row 3: worktree tip on lane 2 -->
+  <circle class="ring l2" cx="40" cy="60" r="6.5"/><circle class="f2" cx="40" cy="60" r="4"/>
+  <!-- row 4: plain on lane 3 -->
+  <circle class="f3" cx="56" cy="84" r="4"/>
+  <!-- rows 5-7 plain -->
+  <circle class="f1" cx="24" cy="108" r="4"/>
+  <circle class="f0" cx="8" cy="132" r="4"/>
+  <circle class="f0" cx="8" cy="156" r="4"/>
+  <g class="meta">
+    <text x="112" y="17"><tspan class="hash">17dccb6</tspan>  fix(gui): real pwsh terminal, readable diffs</text>
+    <text x="112" y="41"><tspan class="hash">fc97f1b</tspan>  feat(gui): worktrees in the history graph</text>
+    <text x="112" y="65"><tspan class="hash">4f5ce8d</tspan>  feat(gui): centred sync group</text>
+    <text x="112" y="89"><tspan class="hash">949bfa8</tspan>  Merge pull request #3</text>
+    <text x="112" y="113"><tspan class="hash">1d93bc6</tspan>  feat(gui): safe repository open</text>
+    <text x="112" y="137"><tspan class="hash">30a857a</tspan>  feat(gui): session-identity job routing</text>
+    <text x="112" y="161"><tspan class="hash">c26a1c6</tspan>  chore: bootstrap</text>
+  </g>
+</svg>
+</body></html>

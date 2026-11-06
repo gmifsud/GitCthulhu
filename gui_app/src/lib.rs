@@ -10,6 +10,8 @@ mod compare;
 mod context_menu;
 mod icons;
 mod dates;
+#[cfg(feature = "design-export")]
+pub mod design_export;
 mod diff_view;
 mod jobs;
 mod layout;

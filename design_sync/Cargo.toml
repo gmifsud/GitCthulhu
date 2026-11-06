@@ -1,0 +1,12 @@
+[package]
+name = "design_sync"
+version = "0.1.0"
+edition = "2021"
+description = "Builds the Design System artifact's files from gui_app into target/design-system (see /design-sync)"
+
+[[bin]]
+name = "design_sync"
+path = "src/main.rs"
+
+[dependencies]
+gui_app = { path = "../gui_app", features = ["design-export"] }

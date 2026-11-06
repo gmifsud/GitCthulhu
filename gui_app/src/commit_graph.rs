@@ -18,8 +18,8 @@ const LANE_SPACING: f32 = 16.0;
 const DOT_RADIUS: f32 = 4.0;
 const RING_RADIUS: f32 = 6.5;
 const LINE_WIDTH: f32 = 2.0;
-/// Lane colours, cycled by lane index.
-const LANE_COLOURS: [u32; 6] = [0xF27D26, 0x3B82F6, 0x22C55E, 0xA855F7, 0xEC4899, 0x14B8A6];
+/// Lane colours, cycled by lane index. Exported to the design system as `lane-0` … `lane-5`.
+pub(crate) const LANE_COLOURS: [u32; 6] = [0xF27D26, 0x3B82F6, 0x22C55E, 0xA855F7, 0xEC4899, 0x14B8A6];
 
 /// How the graph's lanes cross one commit row.
 #[derive(Debug, Clone, PartialEq, Eq)]

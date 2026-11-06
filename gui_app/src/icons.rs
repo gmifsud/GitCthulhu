@@ -62,6 +62,19 @@ pub(crate) enum Icon {
 }
 
 impl Icon {
+    /// Every icon, in declaration order: the font test and the design system walk this.
+    pub(crate) const ALL: [Icon; 44] = [
+        Icon::Add,
+        Icon::ArrowSmallDown, Icon::ArrowSmallUp, Icon::Branch, Icon::Check, Icon::CheckAll, Icon::ChevronDown,
+        Icon::ChevronLeft, Icon::ChevronRight, Icon::CircleFilled, Icon::ClearAll, Icon::Close, Icon::Cloud,
+        Icon::Commit, Icon::Compare, Icon::Discard, Icon::Edit, Icon::Fetch,
+        Icon::File, Icon::Folder, Icon::FolderOpened, Icon::ListFlat, Icon::ListTree,
+        Icon::Merge, Icon::Pin, Icon::Pinned, Icon::Pull, Icon::Push, Icon::Refresh, Icon::Remove,
+        Icon::Repo, Icon::Search, Icon::Stop, Icon::Terminal,
+        Icon::Sparkle, Icon::StashApply, Icon::StashPop, Icon::Stash, Icon::SplitView, Icon::SwitchBranch,
+        Icon::Tag, Icon::Target, Icon::Trash, Icon::Worktree,
+    ];
+
     pub(crate) fn codepoint(self) -> char {
         match self {
             Icon::Add => '\u{EA60}',
@@ -128,19 +141,8 @@ mod tests {
     /// Every codepoint must be a glyph in the bundled font, or the icon draws as a box.
     #[test]
     fn every_icon_is_in_the_font() {
-        let icons = [
-            Icon::Add,
-            Icon::ArrowSmallDown, Icon::ArrowSmallUp, Icon::SplitView, Icon::Branch, Icon::Check, Icon::CheckAll, Icon::ChevronDown,
-            Icon::ChevronLeft, Icon::ChevronRight, Icon::CircleFilled, Icon::ClearAll, Icon::Close, Icon::Cloud,
-            Icon::Commit, Icon::Compare, Icon::Discard, Icon::Edit, Icon::Fetch,
-            Icon::File, Icon::Folder, Icon::FolderOpened, Icon::ListFlat, Icon::ListTree,
-            Icon::Merge, Icon::Pin, Icon::Pinned, Icon::Pull, Icon::Push, Icon::Refresh, Icon::Remove,
-            Icon::Repo, Icon::Search, Icon::Stop, Icon::Terminal,
-            Icon::Sparkle, Icon::StashApply, Icon::StashPop, Icon::Stash, Icon::SwitchBranch,
-            Icon::Tag, Icon::Target, Icon::Trash, Icon::Worktree,
-        ];
         let covered = cmap_codepoints(FONT_BYTES);
-        for icon in icons {
+        for icon in Icon::ALL {
             assert!(covered.contains(&(icon.codepoint() as u32)), "{icon:?} is not in codicon.ttf");
         }
     }

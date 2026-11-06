@@ -34,6 +34,7 @@ Tenant logic, module boundaries, plugin scopes — any change crossing a boundar
 - **Tests:** `@tests/`
 - **Build/CI:** `@.github/workflows/` or `@azure-pipelines.yml`
 - **ADRs / decisions:** `@docs/adr/`
+- **Design system:** `@design/system/` (authored) + `gui_app/src/design_export.rs` (from code); `cargo run -p design_sync`, then `/design-sync` publishes
 
 ## 4. Build & Run
 <!-- Replace with real commands. Keep terse. -->

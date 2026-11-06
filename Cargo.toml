@@ -10,7 +10,8 @@ members = [
     "cache_adapter",
     "test_support",
     "terminal_widget",
-    "app"
+    "app",
+    "design_sync"
 ]
 resolver = "2"
 

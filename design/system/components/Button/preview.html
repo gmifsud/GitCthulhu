@@ -1,0 +1,26 @@
+<!-- @dsCard group="Actions" height=150 subtitle="Command, accent, labelled, quiet, icon; rest, hover, disabled" -->
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Button</title></head>
+<body class="gc-ground" style="margin:0">
+<div style="display:grid;grid-template-columns:auto auto auto auto;gap:10px 24px;align-items:center;justify-content:start">
+  <div class="gc-label" style="margin:0">Command</div>
+  <button class="gc-btn">Cancel</button>
+  <button class="gc-btn is-hover">Cancel</button>
+  <button class="gc-btn" disabled>Cancel</button>
+
+  <div class="gc-label" style="margin:0">Accent</div>
+  <button class="gc-btn gc-btn--accent">Merge</button>
+  <button class="gc-btn gc-btn--accent is-hover">Merge</button>
+  <button class="gc-btn gc-btn--accent" disabled>Merge</button>
+
+  <div class="gc-label" style="margin:0">Labelled</div>
+  <button class="gc-btn"><span class="gc-ico">&#xEC1D;</span>Fetch</button>
+  <button class="gc-btn gc-btn--accent"><span class="gc-ico">&#xEAFC;</span>Commit</button>
+  <button class="gc-btn" disabled><span class="gc-ico">&#xEB41;</span>Push</button>
+
+  <div class="gc-label" style="margin:0">Quiet · icon</div>
+  <span><button class="gc-btn gc-btn--quiet">Open…</button> <button class="gc-btn gc-btn--quiet">Settings</button></span>
+  <span class="gc-row"><button class="gc-btn gc-btn--icon"><span class="gc-ico">&#xEB37;</span></button><button class="gc-btn gc-btn--icon is-accent"><span class="gc-ico">&#xEAFD;</span></button><button class="gc-btn gc-btn--icon"><span class="gc-ico">&#xEB56;</span></button></span>
+  <button class="gc-btn gc-btn--icon" disabled><span class="gc-ico">&#xEA85;</span></button>
+</div>
+</body></html>

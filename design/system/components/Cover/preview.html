@@ -1,0 +1,67 @@
+<!-- @dsCard height=288 -->
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Cover</title>
+<style>
+  html, body { margin: 0; background: var(--bg-app); }
+  .cover { position: relative; width: 960px; height: 288px; overflow: hidden; }
+  .cover svg { position: absolute; inset: 0; }
+  .name { position: absolute; left: 32px; bottom: 64px; width: 440px; font: 700 72px/0.95 var(--font-sans); color: var(--text-primary); letter-spacing: -0.01em; }
+  .tag { position: absolute; left: 34px; bottom: 28px; width: 440px; font: 400 13px/1.3 var(--font-sans); color: var(--text-muted); white-space: nowrap; }
+  .ember { fill: var(--accent-primary); }
+  .chip { fill: var(--chip); }
+  .raised { fill: var(--bg-raised); }
+  .blue { fill: var(--incoming); }
+  .violet { fill: var(--outgoing); }
+  .green { fill: var(--added); }
+  .lane0 { stroke: var(--lane-0); } .lane1 { stroke: var(--lane-1); } .lane2 { stroke: var(--lane-2); } .lane3 { stroke: var(--lane-3); }
+  .dot0 { fill: var(--lane-0); } .dot1 { fill: var(--lane-1); } .dot2 { fill: var(--lane-2); } .dot3 { fill: var(--lane-3); }
+  .lane { fill: none; stroke-width: 2; }
+  .ring { fill: none; stroke-width: 2; }
+  .ground { fill: var(--bg-app); }
+  .r-sm { rx: 4; } .r-md { rx: 5; } .r-lg { rx: 6; }
+</style></head>
+<body>
+<div class="cover">
+<!--
+  blocks: accent-primary 192×288 slab bleeding off the top and right (x 768), chip 240×144 (x 528, y 0) with bg-raised 240×144 under it (y 144), incoming 96×64 and outgoing 96×48 satellites, added 48×48 corner tile; sides are lane-pitch 16 multiples, corners radius-sm 4 / radius-md 5 / radius-lg 6.
+  arrangement: one tall ember slab against the right edge with a two-tone charcoal stack beside it and three small signal satellites between, everything right of x = 480; the name bottom-left on the ground.
+  pattern: a commit graph (the literal motif: lanes at lane-pitch 16, graph-dot 4 discs, graph-ring 6.5 rings, graph-line 2 strokes, lane-0..3 colours) crossing the charcoal stack — chosen because the brand is a Git client whose logo is circuit-tentacles and whose tip lane is the ember.
+  scales: lane-pitch 16, graph-row 24, graph-dot 4, graph-ring 6.5, graph-line 2, radius-sm 4, radius-md 5, radius-lg 6.
+-->
+<svg viewBox="0 0 960 288" width="960" height="288" aria-hidden="true">
+  <!-- ember slab bleeding off top and right -->
+  <rect class="ember r-lg" x="768" y="-8" width="200" height="304"/>
+  <!-- two-tone charcoal stack -->
+  <rect class="chip r-md" x="528" y="0" width="224" height="144"/>
+  <rect class="raised r-md" x="528" y="152" width="224" height="136"/>
+  <!-- satellites: signal hues stay small -->
+  <rect class="blue r-sm" x="496" y="176" width="24" height="64"/>
+  <rect class="violet r-sm" x="496" y="248" width="24" height="40"/>
+  <rect class="green r-sm" x="496" y="128" width="24" height="40"/>
+  <!-- commit graph across the stack: lanes at x = 560 + 16k, rows 24 apart -->
+  <g class="lane">
+    <path class="lane0" d="M560 0 V288"/>
+    <path class="lane1" d="M576 24 V120 L560 144"/>
+    <path class="lane2" d="M592 72 V192 L576 216 V264 L560 288"/>
+    <path class="lane3" d="M608 120 V168 L592 192"/>
+    <path class="lane1" d="M576 216 V240"/>
+  </g>
+  <!-- tips -->
+  <circle class="ring lane0" cx="560" cy="24" r="6.5"/><circle class="dot0" cx="560" cy="24" r="4"/>
+  <circle class="ring lane1" cx="576" cy="48" r="5"/>
+  <circle class="dot1" cx="576" cy="96" r="4"/>
+  <circle class="ring lane2" cx="592" cy="72" r="6.5"/><circle class="dot2" cx="592" cy="72" r="4"/>
+  <circle class="dot2" cx="592" cy="144" r="4"/>
+  <circle class="dot3" cx="608" cy="120" r="4"/>
+  <circle class="dot0" cx="560" cy="168" r="4"/>
+  <circle class="dot1" cx="576" cy="240" r="4"/>
+  <circle class="dot0" cx="560" cy="264" r="4"/>
+  <!-- pill marks beside two tips, cut from the ground and the ember -->
+  <rect class="ember r-sm" x="632" y="16" width="72" height="16" rx="3"/>
+  <rect class="ground" x="632" y="64" width="56" height="16" rx="3"/>
+  <rect class="ground" x="632" y="160" width="88" height="16" rx="3"/>
+</svg>
+<div class="name">GitCthulhu</div>
+<div class="tag">A deep charcoal shell and one ember accent, for history and staging.</div>
+</div>
+</body></html>

@@ -14,6 +14,12 @@ core_domain = { path = "../core_domain" }
 terminal_widget = { path = "../terminal_widget" }
 iced = { version = "0.13", features = ["advanced", "canvas", "lazy", "tokio"] } # Pure Rust reactive GUI; canvas draws the commit graph, advanced colours the terminal; tokio powers delayed icon tips
 rfd = "0.17.2"
+# Only for `design_export` (the `design_sync` tool); the window itself never parses JSON.
+serde_json = { version = "1", optional = true, features = ["preserve_order"] }
+
+[features]
+# Exposes `design_export`, which stamps the design system's files from the compiled tokens.
+design-export = ["dep:serde_json"]
 
 [dev-dependencies]
 test_support = { path = "../test_support" }
