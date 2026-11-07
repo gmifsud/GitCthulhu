@@ -407,6 +407,8 @@ pub(crate) enum Message {
     HistoryScrolled { offset: f32, height: f32, content: f32 },
     /// The Diff pane scrolled to this offset in px.
     DiffScrolled(f32),
+    /// The next chunk of a tab's history arrived (streamed in the background).
+    HistoryPageLoaded(SessionKey, Result<Vec<core_domain::Commit>, DomainError>),
     CloseSettings,
     /// Disk write finished. No UI effect; keeps the task from being discarded silently.
     SettingsSaved,
@@ -1285,16 +1287,16 @@ impl GitApp {
                     }
                     session.state.apply_event(event);
                 }
+                session.history_generation = session.history_generation.wrapping_add(1);
                 session.reconcile_selection();
                 session.retain_marks();
                 if let Some(message) = saw_error {
                     self.error.get_or_insert(message);
                 }
-                if self.session().id == path.id {
-                    self.start_patch()
-                } else {
-                    Task::none()
-                }
+                // Older history streams in behind the first page, without waiting to be asked.
+                let stream = self.stream_history(&path, false);
+                let patch = if self.session().id == path.id { self.start_patch() } else { Task::none() };
+                Task::batch([patch, stream])
             }
             Message::FocusFile { path, place } => {
                 let modifiers = self.modifiers;
@@ -2247,14 +2249,46 @@ impl GitApp {
             Message::HistoryScrolled { offset, height, content } => {
                 self.history_scroll = offset;
                 self.history_viewport = height;
-                if let Some(session) = self.active_session_mut() {
-                    session.note_history_scroll(offset);
-                }
-                // Within a few screens of the end: read the next page, once at a time.
+                let Some(session) = self.active_session_mut() else {
+                    return Task::none();
+                };
+                session.note_history_scroll(offset);
+                // Within two screens of the end of what has arrived: the user is outrunning the
+                // stream. Ask for bigger chunks; past the cap, scrolling is what reads more.
                 if content - (offset + height) < height * 2.0 {
-                    return self.load_more_history();
+                    if session.history_more_pending {
+                        session.history_urgent = true;
+                        return Task::none();
+                    }
+                    let key = session.key();
+                    return self.stream_history(&key, true);
                 }
                 Task::none()
+            }
+            Message::HistoryPageLoaded(key, result) => {
+                let Some(session) = self.session_mut_for(&key) else {
+                    return Task::none();
+                };
+                session.history_more_pending = false;
+                match result {
+                    Ok(commits) => {
+                        // Only the log changes: a git action running in this tab keeps its
+                        // busy state (applying the log alone used to clear it).
+                        let busy = session.state.loading;
+                        session.state.apply_event(ViewEvent::LogUpdated(commits));
+                        session.state.loading = busy;
+                        session.history_generation = session.history_generation.wrapping_add(1);
+                        session.reconcile_selection();
+                        let urgent = std::mem::take(&mut session.history_urgent);
+                        self.stream_history(&key, urgent)
+                    }
+                    Err(error) => {
+                        // Streaming stops; scrolling to the end tries again.
+                        session.history_urgent = false;
+                        self.error.get_or_insert(error_message(&error));
+                        Task::none()
+                    }
+                }
             }
             Message::ShowActivity => {
                 self.terminal_open = true;
@@ -3629,20 +3663,28 @@ impl GitApp {
 
     /// Ask for one more page of the active tab's history, unless a read is under way or the
     /// last one came back short (there is nothing older).
-    fn load_more_history(&mut self) -> Task<Message> {
-        let Some(session) = self.active_session_mut() else {
+    /// Read the next chunk of a tab's history in the background, one chunk at a time, while
+    /// older commits may exist. Streaming goes on by itself up to `STREAM_CAP`; past it,
+    /// `asked` (the user scrolled to the end) is what reads more. `asked` also means the user
+    /// is waiting, so the chunk is bigger.
+    fn stream_history(&mut self, key: &SessionKey, asked: bool) -> Task<Message> {
+        use crate::jobs::{STREAM_CAP, STREAM_CHUNK, STREAM_CHUNK_URGENT};
+        let Some(session) = self.session_mut_for(key) else {
             return Task::none();
         };
-        if session.history_more_pending || session.state.loading || !session.history_may_have_more() {
+        if session.history_more_pending || !session.history_may_have_more() {
             return Task::none();
         }
-        session.history_limit += crate::jobs::COMMIT_PAGE_SIZE;
+        if session.history_limit >= STREAM_CAP && !asked {
+            return Task::none();
+        }
+        session.history_limit += if asked { STREAM_CHUNK_URGENT } else { STREAM_CHUNK };
         session.history_more_pending = true;
         let repo = session.adapter.clone();
         let key = session.key();
         let limit = session.history_limit;
-        Task::perform(crate::jobs::history_in_background_up_to(repo, limit), move |events| {
-            Message::RepositoryLoaded(key.clone(), events)
+        Task::perform(crate::jobs::history_in_background_up_to(repo, limit), move |result| {
+            Message::HistoryPageLoaded(key.clone(), result)
         })
     }
 
@@ -8010,37 +8052,69 @@ mod tests {
         assert!(app.activity.for_repository(&repository).is_empty());
     }
 
+    fn commits(count: usize) -> Vec<core_domain::Commit> {
+        (0..count)
+            .map(|index| core_domain::Commit {
+                id: format!("{index:040x}"),
+                parent_ids: vec![],
+                author: "a".into(),
+                message: "m".into(),
+                timestamp: 0,
+            })
+            .collect()
+    }
+
     #[test]
-    fn scrolling_near_the_end_reads_one_more_page_until_history_runs_out() {
+    fn history_streams_in_behind_the_first_page_until_it_runs_out() {
+        use crate::jobs::{COMMIT_PAGE_SIZE, STREAM_CHUNK};
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        let page = crate::jobs::COMMIT_PAGE_SIZE;
-        let commits = |count: usize| -> Vec<core_domain::Commit> {
-            (0..count)
-                .map(|index| core_domain::Commit {
-                    id: format!("{index:040x}"),
-                    parent_ids: vec![],
-                    author: "a".into(),
-                    message: "m".into(),
-                    timestamp: 0,
-                })
-                .collect()
-        };
-        app.session_mut().state.commits = commits(page);
-        let near_end = Message::HistoryScrolled { offset: 4_500.0, height: 500.0, content: 5_200.0 };
-        let _ = app.update(near_end.clone());
-        assert_eq!(app.session().history_limit, page * 2);
-        assert!(app.session().history_more_pending);
-        let _ = app.update(near_end.clone());
-        assert_eq!(app.session().history_limit, page * 2, "one read at a time");
-
         let key = app.active_key();
-        let _ = app.update(Message::RepositoryLoaded(key, vec![ViewEvent::LogUpdated(commits(page + 30))]));
-        assert!(!app.session().history_more_pending);
-        let _ = app.update(near_end);
-        assert_eq!(app.session().history_limit, page * 2, "a short read means there is nothing older");
+        // A full first page: older history may exist, so the next chunk is asked for at once.
+        let _ = app.update(Message::RepositoryLoaded(key.clone(), vec![ViewEvent::LogUpdated(commits(COMMIT_PAGE_SIZE))]));
+        assert!(app.session().history_more_pending, "streaming starts without a scroll");
+        assert_eq!(app.session().history_limit, COMMIT_PAGE_SIZE + STREAM_CHUNK);
 
-        let _ = app.update(Message::HistoryScrolled { offset: 0.0, height: 500.0, content: 50_000.0 });
-        assert_eq!(app.session().history_limit, page * 2, "far from the end reads nothing");
+        // A chunk lands while a git action runs: the action stays busy, the next chunk follows.
+        app.session_mut().state.loading = true;
+        let generation = app.session().history_generation;
+        let _ = app.update(Message::HistoryPageLoaded(key.clone(), Ok(commits(COMMIT_PAGE_SIZE + STREAM_CHUNK))));
+        assert!(app.session().state.loading, "a history chunk never clears the busy state");
+        assert!(app.session().history_generation > generation, "the row index will rebuild");
+        assert_eq!(app.session().history_limit, COMMIT_PAGE_SIZE + STREAM_CHUNK * 2);
+
+        // A short chunk means the start of history was reached: streaming stops.
+        let _ = app.update(Message::HistoryPageLoaded(key, Ok(commits(COMMIT_PAGE_SIZE + STREAM_CHUNK + 7))));
+        assert!(!app.session().history_more_pending);
+        assert_eq!(app.session().history_limit, COMMIT_PAGE_SIZE + STREAM_CHUNK * 2);
+    }
+
+    #[test]
+    fn outrunning_the_stream_asks_for_bigger_chunks() {
+        use crate::jobs::{COMMIT_PAGE_SIZE, STREAM_CHUNK, STREAM_CHUNK_URGENT};
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let key = app.active_key();
+        let _ = app.update(Message::RepositoryLoaded(key.clone(), vec![ViewEvent::LogUpdated(commits(COMMIT_PAGE_SIZE))]));
+        // The user reaches the end while a chunk is still on its way.
+        let _ = app.update(Message::HistoryScrolled { offset: 4_500.0, height: 500.0, content: 5_200.0 });
+        assert!(app.session().history_urgent);
+        let limit = app.session().history_limit;
+        let _ = app.update(Message::HistoryPageLoaded(key, Ok(commits(limit))));
+        assert_eq!(app.session().history_limit, limit + STREAM_CHUNK_URGENT, "the next chunk is the big one");
+        assert!(!app.session().history_urgent, "urgency is per wait");
+        assert!(STREAM_CHUNK_URGENT > STREAM_CHUNK);
+    }
+
+    #[test]
+    fn streaming_stops_at_its_cap_but_scrolling_to_the_end_reads_on() {
+        use crate::jobs::{STREAM_CAP, STREAM_CHUNK_URGENT};
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let key = app.active_key();
+        app.session_mut().history_limit = STREAM_CAP;
+        let _ = app.update(Message::HistoryPageLoaded(key, Ok(commits(STREAM_CAP))));
+        assert!(!app.session().history_more_pending, "no more on its own past the cap");
+        let _ = app.update(Message::HistoryScrolled { offset: 4_500.0, height: 500.0, content: 5_200.0 });
+        assert!(app.session().history_more_pending, "the user asked by scrolling to the end");
+        assert_eq!(app.session().history_limit, STREAM_CAP + STREAM_CHUNK_URGENT);
     }
 
     #[test]

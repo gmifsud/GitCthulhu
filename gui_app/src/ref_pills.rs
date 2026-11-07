@@ -18,7 +18,7 @@ pub(crate) enum RefPillKind {
 /// One branch or tag that tips at a commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefPill {
-    /// What the pill shows: the name, ellipsised past [`PILL_LABEL_MAX`].
+    /// What the pill shows: the full name, never shortened.
     pub label: String,
     /// The full ref name, for the hover text.
     pub name: String,
@@ -27,8 +27,6 @@ pub(crate) struct RefPill {
     pub behind: usize,
 }
 
-/// Long enough for typical `feature/…` names; still caps pathological refs.
-const PILL_LABEL_MAX: usize = 44;
 
 /// Icon shown inside the pill for the ref kind.
 pub(crate) fn pill_mark(kind: RefPillKind) -> Icon {
@@ -71,7 +69,7 @@ pub(crate) fn refs_at(
             RefPillKind::Local
         };
         pills.push(RefPill {
-            label: shorten_ref(&branch.name, PILL_LABEL_MAX),
+            label: branch.name.clone(),
             name: branch.name.clone(),
             kind,
             ahead: branch.ahead,
@@ -81,7 +79,7 @@ pub(crate) fn refs_at(
     for tag in tags {
         if tag.commit_id == commit_id {
             pills.push(RefPill {
-                label: shorten_ref(&tag.name, PILL_LABEL_MAX),
+                label: tag.name.clone(),
                 name: tag.name.clone(),
                 kind: RefPillKind::Tag,
                 ahead: 0,
@@ -140,10 +138,6 @@ pub(crate) fn primary_node_kind(pills: &[RefPill]) -> Option<RefPillKind> {
             RefPillKind::Remote => 3,
             RefPillKind::Tag => 4,
         })
-}
-
-fn shorten_ref(name: &str, max: usize) -> String {
-    crate::wip::middle_ellipsis(name, max)
 }
 
 #[cfg(test)]
@@ -242,13 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn long_ref_names_are_ellipsised() {
+    fn long_ref_names_are_shown_whole() {
         let long = "feature/very-long-branch-name-that-overflows-the-pill-gutter-limit";
         let pills = refs_at("id", &[branch(long, "id", false, false)], &[], &[]);
-        assert_eq!(pills[0].label.chars().count(), PILL_LABEL_MAX);
-        assert!(pills[0].label.contains('…'), "shortened in the middle");
-        assert!(pills[0].label.starts_with("feature/"), "the start stays");
-        assert!(pills[0].label.ends_with("gutter-limit"), "and so does the end");
-        assert_eq!(pills[0].name, long, "the full name stays for the hover text");
+        assert_eq!(pills[0].label, long, "a cut name could read as another branch");
+        assert_eq!(pills[0].name, long);
     }
 }

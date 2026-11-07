@@ -1,11 +1,10 @@
 use crate::app::{GitApp, Message};
 use crate::palette::REPOSITORY_SCOPE;
 use crate::theme::DesignTokens;
-use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
-use super::chrome::{branch_chip, one_line, quiet_button, Reading};
+use super::chrome::{branch_chip, quiet_button, Reading};
 use super::refs::current_branch_name;
 
 /// Identity row: app mark, repository name and folder, then app-level commands.
@@ -44,10 +43,11 @@ fn chrome_row<'a>(
     height: f32,
     tokens: DesignTokens,
 ) -> Element<'a, Message> {
+    // At least `height` tall, taller when a long name wraps: names are never clipped.
+    let pad = ((height - 22.0) / 2.0).max(4.0);
     container(content)
         .width(Length::Fill)
-        .height(Length::Fixed(height))
-        .padding([0.0, TOP_BAR_PADDING])
+        .padding([pad, TOP_BAR_PADDING])
         .align_y(Alignment::Center)
         .style(move |_theme: &Theme| container::Style {
             background: Some(Background::Color(tokens.bg_chrome)),
@@ -112,10 +112,11 @@ fn branch_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> El
             tracking(summary, tokens, reading),
         ]
         .spacing(COMMAND_SPACING)
-        .align_y(Alignment::Center),
+        .align_y(Alignment::Center)
+        // A long branch pushes the status line onto the next line instead of cutting either.
+        .wrap(),
     )
-    .width(Length::Fill)
-    .clip(true);
+    .width(Length::Fill);
     // The compare / conflict window: the selected change against HEAD, or yours against
     // theirs when the file is conflicted.
     let right = container(
@@ -220,50 +221,27 @@ fn separator<'a>(tokens: DesignTokens) -> Element<'a, Message> {
 
 /// The folder's own name, which is what people call the repository.
 fn repository_name<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    one_line(
-        text(crate::session::basename(path).to_string())
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..reading.font
-            })
-            .size(reading.size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_primary),
-            }),
+    super::chrome::full_text(
+        crate::session::basename(path).to_string(),
+        iced::Font {
+            weight: iced::font::Weight::Semibold,
+            ..reading.font
+        },
         reading.size,
-        Length::Shrink,
+        tokens.text_primary,
     )
 }
 
-/// The full folder, muted. Takes whatever room is left and clips; it no longer shares a row
-/// with the branch chip, so clipping it costs nothing else.
+/// The full folder, muted, in the room that is left. It says which worktree this window is
+/// working in, so it wraps rather than being cut.
 fn repository_folder<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    one_line(
-        text(path.to_string())
-            .font(reading.mono)
-            .size((reading.size - 1.0).max(10.0))
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_muted),
-            }),
-        reading.size,
-        Length::Fill,
-    )
+    container(super::chrome::full_text(path.to_string(), reading.mono, (reading.size - 1.0).max(10.0), tokens.text_muted))
+        .width(Length::Fill)
+        .into()
 }
 
 fn tracking<'a>(summary: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    one_line(
-        text(summary)
-            .font(reading.font)
-            .size(reading.size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_secondary),
-            }),
-        reading.size,
-        Length::Shrink,
-    )
+    super::chrome::full_text(summary, reading.font, reading.size, tokens.text_secondary)
 }
 
 fn hunk_segment<'a>(current: crate::layout::HunkMode, tokens: DesignTokens) -> Element<'a, Message> {

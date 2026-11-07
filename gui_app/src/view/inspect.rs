@@ -11,7 +11,7 @@ use core_domain::RepoStatus;
 use iced::widget::{column, container, horizontal_space, row, scrollable, text};
 use iced::{Alignment, Element, Length};
 
-use super::chrome::{command_button, glyph, hairline, one_line, Reading};
+use super::chrome::{command_button, glyph, hairline, Reading};
 use super::explorer::label_text;
 use super::files_nav::files_navigator;
 use crate::icons::Icon;
@@ -26,17 +26,15 @@ pub(super) fn inspected_worktree<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let title = one_line(
-        text(format!("Inspecting {}", app.worktree_label(path)))
-            .font(reading.font)
-            .size(reading.size)
-            .style(move |_| text::Style { color: Some(tokens.accent_primary) }),
-        reading.size,
-        Length::Shrink,
-    );
+    // The whole label: which worktree this is must never be a guess.
+    let title = text(format!("Inspecting {}", app.worktree_label(path)))
+        .font(reading.font)
+        .size(reading.size)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .style(move |_| text::Style { color: Some(tokens.accent_primary) });
     let head = row![
         glyph(Icon::Worktree, reading.size, tokens.accent_primary, &reading),
-        container(title).width(Length::Fill).clip(true),
+        container(title).width(Length::Fill),
         horizontal_space().width(Length::Shrink),
         command_button("Open in tab", Message::OpenWorktree(path.to_string()), true, tokens, reading),
         command_button("Back", Message::ClearInspect, true, tokens, reading),

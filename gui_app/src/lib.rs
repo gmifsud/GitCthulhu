@@ -8,6 +8,7 @@ mod changes;
 mod commit_graph;
 mod compare;
 mod context_menu;
+mod history_index;
 mod icons;
 mod dates;
 #[cfg(feature = "design-export")]
@@ -25,6 +26,7 @@ mod selection;
 mod session;
 mod terminal;
 mod theme;
+mod text_measure;
 mod tracking;
 mod view;
 mod wip;

@@ -72,8 +72,10 @@ impl DesignTokens {
             modified_word_bg: hex_color(0x2C4A73),
             added_word_bg: hex_color(0x23593A),
             removed_word_bg: hex_color(0x6B2A2C),
-            incoming: hex_color(0x70AEFF),
-            outgoing: hex_color(0xC4A1FF),
+            // One quiet ink for every commit count: the arrow tells incoming from outgoing.
+            // Colour is kept for meaning elsewhere: green/red are added/removed lines.
+            incoming: hex_color(0xC8C8CC),
+            outgoing: hex_color(0xC8C8CC),
         }
     }
 }

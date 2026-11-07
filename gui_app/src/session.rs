@@ -91,6 +91,25 @@ pub(crate) struct ExplorerCollapsed {
 }
 
 
+/// Where each commit row of a history list sits, in scroll px from the top of the list.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HistoryLayout {
+    /// Commit id and top of each row, in drawing order (tops increase).
+    pub(crate) rows: Vec<(String, f32)>,
+}
+
+impl HistoryLayout {
+    /// The row under `offset`: its commit and top.
+    pub(crate) fn row_at(&self, offset: f32) -> Option<(&str, f32)> {
+        let after = self.rows.partition_point(|(_, top)| *top <= offset);
+        after.checked_sub(1).map(|at| (self.rows[at].0.as_str(), self.rows[at].1))
+    }
+
+    pub(crate) fn top_of(&self, commit: &str) -> Option<f32> {
+        self.rows.iter().find(|(id, _)| id == commit).map(|(_, top)| *top)
+    }
+}
+
 /// Everything bound to one open worktree path.
 pub(crate) struct WorktreeSession {
     /// This session's identity; background results are routed by it, never by path alone.
@@ -137,11 +156,24 @@ pub(crate) struct WorktreeSession {
     pub(crate) history_limit: usize,
     /// A next page of history is being read.
     pub(crate) history_more_pending: bool,
+    /// The user reached the end of what has arrived while more was on its way: read bigger
+    /// chunks until the history catches up.
+    pub(crate) history_urgent: bool,
+    /// Bumped whenever this tab's commits, branches, tags or status change, so the history
+    /// row index knows to rebuild (and only then).
+    pub(crate) history_generation: u64,
+    /// The history list's row index, built from the state above. See `history_index`.
+    pub(crate) history_index: std::cell::RefCell<Option<crate::history_index::HistoryIndex>>,
     /// Where the history list was scrolled to, in px, and the commit at the top of the view
     /// then. The commit is the anchor: when newer commits arrive above it, returning scrolls
     /// to it rather than to a pixel offset that now shows something else.
     pub(crate) history_offset: f32,
     pub(crate) history_anchor: Option<String>,
+    /// How far below the anchor commit's top the view was.
+    pub(crate) history_anchor_within: f32,
+    /// Where each commit row sat the last time this tab's history was drawn. Rows are as tall
+    /// as their text, so this, not a fixed row height, maps a scroll offset to a commit.
+    pub(crate) history_layout: std::cell::RefCell<HistoryLayout>,
     /// Where the Diff pane was scrolled to, in px.
     pub(crate) diff_offset: f32,
     /// Put the Diff pane back at `diff_offset` once the diff loads (after a return to this tab).
@@ -179,8 +211,13 @@ impl WorktreeSession {
             selection_anchor: None,
             history_limit: crate::jobs::COMMIT_PAGE_SIZE,
             history_more_pending: false,
+            history_urgent: false,
+            history_generation: 0,
+            history_index: std::cell::RefCell::new(None),
             history_offset: 0.0,
             history_anchor: None,
+            history_anchor_within: 0.0,
+            history_layout: std::cell::RefCell::new(HistoryLayout::default()),
             diff_offset: 0.0,
             diff_restore_pending: false,
         }
@@ -201,20 +238,36 @@ impl WorktreeSession {
     /// Remember a history scroll: the offset and the commit then at the top of the view.
     pub(crate) fn note_history_scroll(&mut self, offset: f32) {
         self.history_offset = offset.max(0.0);
-        let row = (self.history_offset / crate::commit_graph::ROW_HEIGHT) as usize;
+        let layout = self.history_layout.borrow();
+        if let Some((id, top)) = layout.row_at(self.history_offset) {
+            self.history_anchor = Some(id.to_string());
+            self.history_anchor_within = self.history_offset - top;
+            return;
+        }
+        drop(layout);
+        // Not drawn yet: fall back to whole rows of the base height.
+        let row_height = crate::commit_graph::ROW_HEIGHT;
+        let row = (self.history_offset / row_height) as usize;
         self.history_anchor = self.state.dag_nodes.get(row).map(|node| node.commit_id.clone());
+        self.history_anchor_within = self.history_offset % row_height;
     }
 
     /// The offset that puts the anchor commit back at the top of the view, keeping how far
     /// into its row the view was. Falls back to the plain offset when the anchor is gone
     /// (rewritten history, a reset) or was never set.
     pub(crate) fn anchored_history_offset(&self) -> f32 {
+        let Some(anchor) = self.history_anchor.as_ref() else {
+            return self.history_offset;
+        };
+        if let Some(top) = self.history_layout.borrow().top_of(anchor) {
+            return top + self.history_anchor_within;
+        }
         let row_height = crate::commit_graph::ROW_HEIGHT;
-        let into_row = self.history_offset % row_height;
-        self.history_anchor
-            .as_ref()
-            .and_then(|anchor| self.state.dag_nodes.iter().position(|node| &node.commit_id == anchor))
-            .map(|row| row as f32 * row_height + into_row)
+        self.state
+            .dag_nodes
+            .iter()
+            .position(|node| &node.commit_id == anchor)
+            .map(|row| row as f32 * row_height + self.history_anchor_within)
             .unwrap_or(self.history_offset)
     }
 

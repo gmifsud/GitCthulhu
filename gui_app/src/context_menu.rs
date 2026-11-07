@@ -145,10 +145,26 @@ pub(crate) fn context_actions(
         ContextTarget::Commit { id } => {
             let short = short_hash(id);
             let on_head = active_head == Some(id.as_str());
-            vec![
+            // A worktree already checked out here opens in a tab; only otherwise is a new one
+            // offered. Offering to create one over an existing worktree made no sense.
+            let mut actions: Vec<ContextAction> = catalogue
+                .iter()
+                .filter(|worktree| {
+                    !worktree.branch.is_empty()
+                        && branches.iter().any(|branch| !branch.is_remote && branch.name == worktree.branch && branch.tip == *id)
+                })
+                .map(|worktree| {
+                    action(
+                        format!("Open worktree '{}' in a tab", worktree.branch),
+                        true,
+                        ContextActionKind::OpenWorktreeTab { path: worktree.path.clone() },
+                    )
+                })
+                .collect();
+            actions.extend([
                 action("New branch from here…", idle, ContextActionKind::NewBranchFrom { start: id.clone() }),
                 action(
-                    "Open as worktree…",
+                    "New worktree from here…",
                     idle,
                     ContextActionKind::OpenAsWorktree {
                         branch: format!("wip/{short}"),
@@ -160,7 +176,8 @@ pub(crate) fn context_actions(
                 action("Cherry-pick onto current…", idle && !on_head, ContextActionKind::CherryPick { id: id.clone() }),
                 action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
                 action("Copy hash", true, ContextActionKind::CopyText { text: id.clone() }),
-            ]
+            ]);
+            actions
         }
         ContextTarget::LocalBranch { name, tip } => {
             let current = branches
@@ -502,7 +519,7 @@ mod tests {
             ContextActionKind::NewBranchFrom { start } if start == "abcdef0123456789"
         ));
         assert!(matches!(
-            &find(&actions, "Open as worktree").kind,
+            &find(&actions, "New worktree from here").kind,
             ContextActionKind::OpenAsWorktree {
                 create_branch: true,
                 start_point: Some(id),
@@ -510,6 +527,29 @@ mod tests {
             } if id == "abcdef0123456789"
         ));
         assert!(find(&actions, "Detach HEAD here").enabled);
+        assert!(!actions.iter().any(|action| action.label.starts_with("Open worktree")), "no worktree is here");
+    }
+
+    #[test]
+    fn a_commit_with_a_worktree_offers_to_open_it_in_a_tab() {
+        let id = "abcdef0123456789";
+        let target = ContextTarget::Commit { id: id.into() };
+        let branches = vec![Branch {
+            name: "feature/x".into(),
+            is_remote: false,
+            is_head: false,
+            tip: id.into(),
+            ahead: 0,
+            behind: 0,
+        }];
+        let catalogue = vec![Worktree { path: "D:/wt/x".into(), branch: "feature/x".into(), is_main: false, locked: false }];
+        let actions = context_actions(&target, &catalogue, &branches, Some("other"), false);
+        assert!(
+            matches!(&actions[0].kind, ContextActionKind::OpenWorktreeTab { path } if path == "D:/wt/x"),
+            "the existing worktree comes first: {:?}",
+            actions[0]
+        );
+        assert_eq!(actions[0].label, "Open worktree 'feature/x' in a tab");
     }
 
     #[test]

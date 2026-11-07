@@ -99,7 +99,7 @@ fn lane_x(lane: usize, _width: f32) -> f32 {
     LANE_SPACING * (lane as f32 + 0.5)
 }
 
-fn lane_colour(lane: usize) -> Color {
+pub(crate) fn lane_colour(lane: usize) -> Color {
     hex_color(LANE_COLOURS[lane % LANE_COLOURS.len()])
 }
 

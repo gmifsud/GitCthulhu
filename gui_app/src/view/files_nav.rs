@@ -11,7 +11,7 @@ use crate::ref_tree::{path_rows, RefRow};
 use crate::selection::{short_hash, Selection};
 use crate::theme::DesignTokens;
 use core_domain::{Commit, RepoStatus};
-use iced::widget::{column, container, row, scrollable, text, Space};
+use iced::widget::{column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length};
 
 use super::changes::wip_working_tree_block;
@@ -114,7 +114,8 @@ fn changed_files_tree<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Readin
                 Some(glyph(Icon::fold(open), reading.size, tokens.text_muted, &reading)),
                 Some(glyph(if open { Icon::FolderOpened } else { Icon::Folder }, reading.size, tokens.text_muted, &reading)),
                 row![
-                    label_text(&label, tokens.text_secondary, reading),
+                    // Whole names, wrapping when the column is narrow.
+                    container(super::chrome::full_text(label.clone(), reading.font, reading.size, tokens.text_secondary)).width(Length::Fill),
                     label_text(&leaves.to_string(), tokens.text_muted, reading),
                 ]
                 .spacing(6)
@@ -132,8 +133,7 @@ fn changed_files_tree<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Readin
                 let ink = patch.map_or(tokens.text_primary, |patch| tokens.change_ink(patch_kind(patch)));
                 let mut line = row![
                     glyph(Icon::File, reading.size, tokens.text_muted, &reading),
-                    label_text(&label, ink, reading),
-                    Space::with_width(Length::Fill)
+                    container(super::chrome::full_text(label.clone(), reading.font, reading.size, ink)).width(Length::Fill),
                 ]
                     .spacing(6)
                     .align_y(Alignment::Center);
@@ -224,14 +224,15 @@ fn subject<'a>(message: &str, tokens: DesignTokens, reading: Reading) -> Element
         .into()
 }
 
-/// "Label  value" on one line; long values clip. Copy hash lives on the commit's right-click menu.
+/// "Label  value"; a long value (every ref at the commit, say) wraps rather than being cut.
+/// Copy hash lives on the commit's right-click menu.
 fn field<'a>(label: &'static str, value: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     row![
         container(label_text(label, tokens.text_muted, reading)).width(Length::Fixed(56.0)),
-        container(label_text(&value, tokens.text_secondary, reading)).width(Length::Fill).clip(true),
+        container(super::chrome::full_text(value, reading.font, reading.size, tokens.text_secondary)).width(Length::Fill),
     ]
     .spacing(8)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Start)
     .into()
 }
 

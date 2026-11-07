@@ -1,0 +1,172 @@
+//! The history list's row index: everything needed to draw any row, worked out once per change
+//! instead of on every redraw.
+//!
+//! iced rebuilds the view on every message, mouse moves included. Filtering, searching, laying
+//! out lanes, finding each commit's refs and measuring every row on each of those rebuilds made
+//! the window slow once the history grew. The index holds that work's result, keyed by what it
+//! depends on; a redraw only finds the rows in view (a binary search over row tops) and builds
+//! those. No widget outlives its frame, so memory holds this plain data and nothing else.
+
+use crate::commit_graph::GraphRow;
+use crate::ref_pills::RefPill;
+
+pub(crate) const COL_GAP: f32 = 10.0;
+pub(crate) const HASH_WIDTH: f32 = 64.0;
+/// Fits "Yesterday 23:59" and "28 Sep 2026".
+pub(crate) const WHEN_WIDTH: f32 = 112.0;
+pub(crate) const AUTHOR_WIDTH: f32 = 120.0;
+/// The narrowest the Description column may get before a column steps aside.
+pub(crate) const MIN_DESCRIPTION_WIDTH: f32 = 380.0;
+
+/// What an index was built from. Any difference means rebuilding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexKey {
+    /// Bumped whenever the tab's commits, branches, tags or status change.
+    pub(crate) generation: u64,
+    pub(crate) width_px: u32,
+    pub(crate) size_tenths: u32,
+    pub(crate) query: String,
+    pub(crate) author: Option<String>,
+    pub(crate) branch_filter: Option<String>,
+    pub(crate) focus: bool,
+    /// Worktrees decide which pills read as worktrees.
+    pub(crate) worktrees: usize,
+    /// The checked-out branch's counts, drawn on its pill.
+    pub(crate) head_counts: Option<(usize, usize)>,
+}
+
+/// One commit row, ready to draw.
+#[derive(Debug, Clone)]
+pub(crate) struct IndexRow {
+    pub(crate) commit_id: String,
+    pub(crate) subject: String,
+    pub(crate) author: String,
+    pub(crate) timestamp: i64,
+    pub(crate) merge: bool,
+    pub(crate) graph: GraphRow,
+    pub(crate) pills: Vec<RefPill>,
+    /// Height in px, from measured text.
+    pub(crate) height: f32,
+    /// Distance from the first commit row's top, in px.
+    pub(crate) top: f32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HistoryIndex {
+    pub(crate) key: IndexKey,
+    pub(crate) rows: Vec<IndexRow>,
+    /// Height of every row together.
+    pub(crate) total: f32,
+    /// The branch the log is filtered to, if any, and whether its tip is not loaded.
+    pub(crate) filter: Option<String>,
+    pub(crate) filter_unloaded: bool,
+    /// Commits the filter kept (before search).
+    pub(crate) shown: usize,
+    /// A search or author filter picked rows out, so lanes do not join them up.
+    pub(crate) narrowing: bool,
+    pub(crate) columns: Columns,
+    /// The lane column width the rows were measured against (the widest in the index), so a
+    /// narrower lane column on screen only ever leaves the text more room than measured.
+    pub(crate) graph_width: f32,
+}
+
+impl HistoryIndex {
+    /// The `first..last` rows touching `top..bottom` (px from the first commit row).
+    pub(crate) fn window(&self, top: f32, bottom: f32) -> (usize, usize) {
+        let first = self.rows.partition_point(|row| row.top + row.height < top);
+        let last = self.rows.partition_point(|row| row.top < bottom).max(first);
+        (first, last)
+    }
+}
+
+/// Which of Author, Date and Hash fit beside a readable Description. They step aside in that
+/// order of least use: Hash first, then Author, then Date. All of them are in the Inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Columns {
+    pub(crate) author: bool,
+    pub(crate) when: bool,
+    pub(crate) hash: bool,
+}
+
+impl Columns {
+    /// For `space` px right of the lane column.
+    pub(crate) fn for_width(space: f32) -> Self {
+        let mut columns = Columns { author: true, when: true, hash: true };
+        let drops: [fn(&mut Columns); 3] = [|c| c.hash = false, |c| c.author = false, |c| c.when = false];
+        for drop in drops {
+            if columns.description_width(space) >= MIN_DESCRIPTION_WIDTH {
+                break;
+            }
+            drop(&mut columns);
+        }
+        columns
+    }
+
+    /// What Description gets of `space` once the shown columns and gaps are taken.
+    pub(crate) fn description_width(self, space: f32) -> f32 {
+        let mut used = COL_GAP;
+        for (shown, width) in [(self.author, AUTHOR_WIDTH), (self.when, WHEN_WIDTH), (self.hash, HASH_WIDTH)] {
+            if shown {
+                used += width + COL_GAP;
+            }
+        }
+        (space - used).max(80.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(top: f32, height: f32) -> IndexRow {
+        IndexRow {
+            commit_id: String::new(),
+            subject: String::new(),
+            author: String::new(),
+            timestamp: 0,
+            merge: false,
+            graph: GraphRow { lane: 0, incoming: vec![], passing: vec![], outgoing: vec![] },
+            pills: vec![],
+            height,
+            top,
+        }
+    }
+
+    #[test]
+    fn the_window_is_the_rows_touching_the_range() {
+        let index = HistoryIndex {
+            key: IndexKey {
+                generation: 0,
+                width_px: 0,
+                size_tenths: 0,
+                query: String::new(),
+                author: None,
+                branch_filter: None,
+                focus: false,
+                worktrees: 0,
+                head_counts: None,
+            },
+            rows: vec![row(0.0, 24.0), row(24.0, 48.0), row(72.0, 24.0), row(96.0, 24.0)],
+            total: 120.0,
+            filter: None,
+            filter_unloaded: false,
+            shown: 4,
+            narrowing: false,
+            columns: Columns { author: true, when: true, hash: true },
+            graph_width: 24.0,
+        };
+        assert_eq!(index.window(0.0, 30.0), (0, 2));
+        assert_eq!(index.window(50.0, 80.0), (1, 3), "a tall row is kept while any of it shows");
+        assert_eq!(index.window(500.0, 900.0), (4, 4));
+    }
+
+    #[test]
+    fn columns_step_aside_hash_then_author_then_date() {
+        assert_eq!(Columns::for_width(2_000.0), Columns { author: true, when: true, hash: true });
+        let narrower = Columns::for_width(MIN_DESCRIPTION_WIDTH + AUTHOR_WIDTH + WHEN_WIDTH + COL_GAP * 3.0 + 10.0);
+        assert_eq!(narrower, Columns { author: true, when: true, hash: false });
+        let narrow = Columns::for_width(MIN_DESCRIPTION_WIDTH + WHEN_WIDTH + COL_GAP * 2.0 + 10.0);
+        assert_eq!(narrow, Columns { author: false, when: true, hash: false });
+        assert_eq!(Columns::for_width(200.0), Columns { author: false, when: false, hash: false });
+    }
+}

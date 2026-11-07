@@ -4,7 +4,7 @@
 //! The top-bar search narrows the table to matching loaded commits.
 
 use crate::app::{GitApp, Message};
-use crate::commit_graph::{graph_rows, graph_width, GraphCell, GraphRow, NodeMark, ROW_HEIGHT};
+use crate::commit_graph::{graph_rows, graph_width, lane_colour, GraphCell, GraphRow, NodeMark, ROW_HEIGHT};
 use crate::context_menu::ContextTarget;
 use crate::palette::commit_matches;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
@@ -13,6 +13,7 @@ use crate::selection::{short_hash, Selection};
 use crate::session::WorktreeSession;
 use crate::wip::WipRow;
 use crate::theme::DesignTokens;
+use crate::history_index::{Columns, AUTHOR_WIDTH, COL_GAP, HASH_WIDTH, WHEN_WIDTH};
 use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
@@ -25,13 +26,8 @@ use super::chrome::{glyph, panel_style, Reading};
 use crate::dates::log_date;
 use crate::icons::Icon;
 
-const COL_GAP: f32 = 10.0;
 /// Space between the subject and the first ref pill.
 const SUBJECT_PILL_GAP: f32 = 8.0;
-const HASH_WIDTH: f32 = 64.0;
-/// Fits "Yesterday 23:59" and "28 Sep 2026".
-const WHEN_WIDTH: f32 = 112.0;
-const AUTHOR_WIDTH: f32 = 120.0;
 const MIN_GRAPH_COL_WIDTH: f32 = 24.0;
 /// Ten lanes. Wider histories clip at the right edge of the graph instead of taking the
 /// Description column: the subject is what is read, lanes beyond ten rarely are.
@@ -44,16 +40,19 @@ const PILL_PAD_Y: f32 = 0.0;
 const PILL_PAD_X: f32 = 5.0;
 const PILL_RADIUS: f32 = 3.0;
 const PILL_GAP: f32 = 3.0;
-/// One pill (the most important ref: HEAD, worktree, local, remote, tag) and a "+N" count.
-const MAX_PILLS_SHOWN: usize = 1;
-/// Widest the pill strip may grow; the subject keeps the rest of the cell.
-const PILL_STRIP_MAX: f32 = 320.0;
-/// Description column split between the subject and the ref pills.
-const SUBJECT_PORTION: u16 = 3;
-const PILL_PORTION: u16 = 1;
 /// One text line inside a pill. iced 0.13 can still wrap `Wrapping::None` text when
 /// squeezed, so pills are clamped to this height and clipped.
 const PILL_HEIGHT: f32 = 16.0;
+/// Between wrapped lines of pills.
+const PILL_LINE_GAP: f32 = 3.0;
+/// Between the names line and the subject.
+const STACK_GAP: f32 = 2.0;
+/// Above and below a commit row's text.
+const ROW_PAD_Y: f32 = 3.0;
+/// Left and right of the history list.
+const LIST_PAD_X: f32 = 8.0;
+/// Rows built above and below the view, in px, so a fast scroll never shows a gap.
+const OVERSCAN_PX: f32 = 900.0;
 /// Most rows a history search draws.
 const MAX_SEARCH_ROWS: usize = 200;
 
@@ -63,15 +62,247 @@ pub(super) fn history_pane<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    // The table is laid out for the width it really has: rows are as tall as their wrapped
+    // text, and columns step aside when the pane is narrow.
+    let selection = selection.clone();
+    iced::widget::responsive(move |size| history_table(app, &selection, size.width, tokens, reading)).into()
+}
+
+fn history_table<'a>(
+    app: &'a GitApp,
+    selection: &Selection,
+    width: f32,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
     let session = app.session();
+    // Rebuild the row index only when what it depends on changed: never for a mouse move,
+    // a hover or a scroll. This is what keeps a long history fast.
+    // Rows are measured at the width rounded down to a step, so dragging a divider rebuilds
+    // the index every step, not every pixel. Narrower than real is safe: text fits.
+    let measured_width = (width / WIDTH_STEP).floor() * WIDTH_STEP;
+    let key = index_key(app, session, measured_width, reading);
+    let stale = session.history_index.borrow().as_ref().is_none_or(|index| index.key != key);
+    if stale {
+        let index = build_index(app, session, key, measured_width, reading);
+        *session.history_layout.borrow_mut() = crate::session::HistoryLayout {
+            rows: index.rows.iter().map(|row| (row.commit_id.clone(), PREAMBLE_HEIGHT + row.top)).collect(),
+        };
+        *session.history_index.borrow_mut() = Some(index);
+    }
+    let guard = session.history_index.borrow();
+    let Some(index) = guard.as_ref() else {
+        return Space::new(Length::Fill, Length::Fill).into();
+    };
+    let focus = session.focus_current_branch;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // The sliding window: rows touching the view plus a margin each side for fast scrolls.
+    // The offset is clamped to this list: one left from a longer history (another tab or
+    // repository, deep in thousands of commits) pointed past the end of a short list, which
+    // drew nothing and, too short to scroll, never sent the event that would have fixed it.
+    let viewport = if app.history_viewport > 0.0 { app.history_viewport } else { 1_200.0 };
+    let scroll = app.history_scroll.min((index.total + PREAMBLE_HEIGHT - viewport).max(0.0)).max(0.0);
+    let (first, last) = index.window(
+        scroll - PREAMBLE_HEIGHT - OVERSCAN_PX,
+        scroll + viewport + OVERSCAN_PX,
+    );
+    // As wide as the lanes in view need: a narrow history drawn narrow.
+    let graph_w = if index.narrowing {
+        MIN_GRAPH_COL_WIDTH
+    } else {
+        graph_width(&index.rows[first..last].iter().map(|row| row.graph.clone()).collect::<Vec<_>>())
+            .clamp(MIN_GRAPH_COL_WIDTH, MAX_GRAPH_COL_WIDTH)
+            .min(index.graph_width)
+    };
+    let columns = index.columns;
+
+    let mut commit_rows = column![column_headers(graph_w, columns, tokens, reading)].width(Length::Fill);
+    if let Some(name) = &index.filter {
+        commit_rows = commit_rows.push(filter_summary(name, index.filter_unloaded, index.shown, tokens, reading));
+    }
+    if index.narrowing {
+        commit_rows = commit_rows.push(search_summary(index.rows.len(), session.state.dag_nodes.len(), tokens, reading));
+    }
+
+    let wip_rows = app.wip_rows();
+    let inspecting = app.inspected_path().is_some();
+    for wip in &wip_rows {
+        // The inspected worktree is always drawn, so inspecting never needs a filter cleared.
+        // Otherwise working changes belong to a worktree's HEAD: hide other worktrees under
+        // any filter or search, and the active one too unless the filter is HEAD or its own branch.
+        if !wip.inspected {
+            if index.narrowing || (index.filter.is_some() && !wip.active) {
+                continue;
+            }
+            if wip.active
+                && !focus
+                && session
+                    .branch_filter
+                    .as_ref()
+                    .is_some_and(|name| session.local_branch(name).is_none_or(|branch| !branch.is_head))
+            {
+                continue;
+            }
+        }
+        let selected = wip.inspected
+            || (wip.active
+                && !inspecting
+                && matches!(selection, Selection::Branch { current: true, .. } | Selection::File { .. }));
+        let line = button(history_row(
+            graph_cell_empty(graph_w),
+            wip_description_cell(wip, tokens, reading),
+            "",
+            "",
+            "",
+            false,
+            // A WIP row names a worktree, so it grows to show the name whole.
+            Length::Shrink,
+            columns,
+            tokens,
+            reading,
+        ))
+        .width(Length::Fill)
+        .padding(0)
+        .on_press(Message::WorktreeClicked(wip.path.clone()))
+        .style(move |_theme, status| commit_style(tokens, status, selected));
+        commit_rows = commit_rows.push(hover_tip(line.into(), wip.tooltip.clone(), tokens, reading));
+    }
+
+    if first < index.rows.len() && index.rows[first].top > 0.0 {
+        commit_rows = commit_rows.push(Space::with_height(Length::Fixed(index.rows[first].top)));
+    }
+    for row in &index.rows[first..last] {
+        let selected = matches!(selection, Selection::Commit { id } if id == &row.commit_id);
+        let age = log_date(now, row.timestamp);
+        let mark = node_mark_for(&row.pills);
+        let label = history_row(
+            canvas(GraphCell { row: row.graph.clone(), mark })
+                .width(Length::Fixed(graph_w))
+                .height(Length::Fixed(row.height))
+                .into(),
+            description_cell(app, &row.subject, &row.pills, row.merge, row.height, lane_colour(row.graph.lane), tokens, reading),
+            &row.author,
+            &age,
+            short_hash(&row.commit_id),
+            row.merge,
+            Length::Fixed(row.height),
+            columns,
+            tokens,
+            reading,
+        );
+        let id = row.commit_id.clone();
+        let right_target = ContextTarget::Commit { id: row.commit_id.clone() };
+        commit_rows = commit_rows.push(
+            mouse_area(
+                button(label)
+                    .width(Length::Fill)
+                    .padding(0)
+                    .on_press(Message::Select(Selection::Commit { id }))
+                    .style(move |_theme, status| commit_style(tokens, status, selected)),
+            )
+            .on_right_press(Message::OpenContextMenu { target: right_target }),
+        );
+    }
+    let drawn_to = index.rows.get(last).map_or(index.total, |row| row.top);
+    if index.total > drawn_to {
+        commit_rows = commit_rows.push(Space::with_height(Length::Fixed(index.total - drawn_to)));
+    }
+
+    // Streaming: older history keeps arriving in the background. When the view reaches the
+    // end of what has arrived, say so with progress rather than leaving a blank end.
+    let at_end = scroll + viewport + PREAMBLE_HEIGHT >= index.total;
+    if session.history_more_pending && (at_end || index.rows.is_empty()) {
+        let loaded = session.state.commits.len();
+        let asked = session.history_limit.max(1);
+        commit_rows = commit_rows.push(
+            column![
+                text(format!("Loading history… {loaded} commits so far"))
+                    .font(reading.font)
+                    .size(reading.size)
+                    .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+                iced::widget::progress_bar(0.0..=asked as f32, loaded as f32).height(Length::Fixed(4.0)),
+            ]
+            .spacing(4)
+            .padding([8, 0]),
+        );
+    }
+
+    let any_wip = if focus { wip_rows.iter().any(|wip| wip.active || wip.inspected) } else { !wip_rows.is_empty() };
+    if !index.narrowing && index.rows.is_empty() && !any_wip && !session.history_more_pending {
+        let empty = if session.state.commits.is_empty() {
+            "No commits yet"
+        } else {
+            "No commits on this view — try turning off Focus"
+        };
+        commit_rows = commit_rows.push(
+            text(empty)
+                .font(reading.font)
+                .size(reading.size)
+                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+        );
+    }
+    drop(guard);
+
+    container(
+        scrollable(commit_rows.padding([2.0, LIST_PAD_X]))
+            .id(scrollable::Id::new(crate::app::HISTORY_SCROLL_ID))
+            .width(Length::Fill)
+            .on_scroll(|viewport| Message::HistoryScrolled {
+                offset: viewport.absolute_offset().y,
+                height: viewport.bounds().height,
+                content: viewport.content_bounds().height,
+            }),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_theme: &Theme| panel_style(tokens, false))
+    .into()
+}
+
+/// Width step the row index is measured at.
+const WIDTH_STEP: f32 = 24.0;
+
+/// Height of what sits above the commit rows: the column headers. Summaries and WIP rows add
+/// a little more, which the overscan margin covers.
+const PREAMBLE_HEIGHT: f32 = HEADER_HEIGHT + 4.0;
+
+/// What the index for this view depends on.
+fn index_key(app: &GitApp, session: &WorktreeSession, width: f32, reading: Reading) -> crate::history_index::IndexKey {
+    let head_counts = session
+        .state
+        .branches
+        .iter()
+        .find(|branch| branch.is_head && !branch.is_remote)
+        .map(|branch| session.branch_counts(branch));
+    crate::history_index::IndexKey {
+        generation: session.history_generation,
+        width_px: width.max(0.0) as u32,
+        size_tenths: (reading.size * 10.0) as u32,
+        query: app.history_query.trim().to_string(),
+        author: session.author_filter.clone(),
+        branch_filter: session.branch_filter.clone(),
+        focus: session.focus_current_branch,
+        worktrees: app.worktree_catalogue.len(),
+        head_counts,
+    }
+}
+
+/// Filter, search, lanes, refs and measured heights for every row, once.
+fn build_index(
+    app: &GitApp,
+    session: &WorktreeSession,
+    key: crate::history_index::IndexKey,
+    width: f32,
+    reading: Reading,
+) -> crate::history_index::HistoryIndex {
     let focus = session.focus_current_branch;
     let head_tip = session_head_tip(
         &session.state.branches,
-        session
-            .state
-            .current_status
-            .as_ref()
-            .and_then(|status| status.head_commit_id.as_deref()),
+        session.state.current_status.as_ref().and_then(|status| status.head_commit_id.as_deref()),
     );
     // The log shows what one tip reaches: HEAD under Focus, else the branch clicked in the
     // branch tree. `None` shows every loaded branch.
@@ -92,40 +323,26 @@ pub(super) fn history_pane<'a>(
         .map(|tip| {
             filter_dag_nodes(tip, &session.state.commits, &session.state.dag_nodes)
                 .into_iter()
-                .take(session.history_limit)
                 .cloned()
                 .collect()
         })
         .unwrap_or_default();
-    let page_end = session.state.dag_nodes.len();
     // A filter must never blank the graph: when its tip is not among the loaded commits
     // (remote-only history, or pushed off the page), say so and keep the full page.
     let filter_unloaded = filter.is_some() && filtered_owned.is_empty();
     let shown_nodes: &[DagNode] = if filter.is_some() && !filtered_owned.is_empty() {
         &filtered_owned
     } else {
-        &session.state.dag_nodes[..page_end]
+        &session.state.dag_nodes
     };
-    let query = app.history_query.trim();
+    let query = key.query.as_str();
     let searching = !query.is_empty();
     let author = session.author_filter.as_deref();
     // Search and User ▾ pick rows out of the history, so lanes no longer join them up.
     let narrowing = searching || author.is_some();
+    let commits_by_id: HashMap<&str, &Commit> =
+        session.state.commits.iter().map(|commit| (commit.id.as_str(), commit)).collect();
     let rows = graph_rows(shown_nodes);
-    let graph_w = graph_width(&rows).clamp(MIN_GRAPH_COL_WIDTH, MAX_GRAPH_COL_WIDTH);
-    let commits_by_id: HashMap<&str, &Commit> = session
-        .state
-        .commits
-        .iter()
-        .map(|commit| (commit.id.as_str(), commit))
-        .collect();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    // A search runs over every loaded commit, not only the first page. Lane lines mean
-    // nothing between non-adjacent rows, so matches draw their dot alone.
     let table: Vec<(&DagNode, GraphRow)> = if narrowing {
         // A search reads every loaded commit; the author filter alone keeps the branch filter.
         let source: &[DagNode] = if searching { &session.state.dag_nodes } else { shown_nodes };
@@ -138,204 +355,77 @@ pub(super) fn history_pane<'a>(
                 })
             })
             .take(MAX_SEARCH_ROWS)
-            .map(|node| {
-                (
-                    node,
-                    GraphRow {
-                        lane: node.lane,
-                        incoming: Vec::new(),
-                        passing: Vec::new(),
-                        outgoing: Vec::new(),
-                    },
-                )
-            })
+            .map(|node| (node, GraphRow { lane: node.lane, incoming: Vec::new(), passing: Vec::new(), outgoing: Vec::new() }))
             .collect()
     } else {
         shown_nodes.iter().zip(rows).collect()
     };
     let graph_w = if narrowing {
-        table
-            .iter()
-            .map(|(_, row)| graph_width(std::slice::from_ref(row)))
-            .fold(MIN_GRAPH_COL_WIDTH, f32::max)
-            .min(MAX_GRAPH_COL_WIDTH)
+        MIN_GRAPH_COL_WIDTH
     } else {
-        graph_w
+        graph_width(&table.iter().map(|(_, row)| row.clone()).collect::<Vec<_>>())
+            .clamp(MIN_GRAPH_COL_WIDTH, MAX_GRAPH_COL_WIDTH)
     };
+    let columns = crate::history_index::Columns::for_width(width - LIST_PAD_X * 2.0 - graph_w);
+    // Measured against the widest lane column: text never needs more room than measured.
+    let description_w = columns.description_width(width - LIST_PAD_X * 2.0 - graph_w);
 
-    let mut commit_rows =
-        column![column_headers(graph_w, tokens, reading)].width(Length::Fill);
-    if let Some((name, _)) = &filter {
-        commit_rows = commit_rows.push(filter_summary(name, filter_unloaded, shown_nodes.len(), tokens, reading));
+    // Refs grouped by the commit they point at, once: looking each row up in every branch
+    // was the other half of the slowness with a thousand remote branches.
+    let mut tips: HashMap<&str, (Vec<core_domain::Branch>, Vec<core_domain::Tag>)> = HashMap::new();
+    for branch in &session.state.branches {
+        tips.entry(branch.tip.as_str()).or_default().0.push(branch.clone());
     }
-    if narrowing {
-        commit_rows = commit_rows.push(search_summary(
-            table.len(),
-            session.state.dag_nodes.len(),
-            tokens,
-            reading,
-        ));
+    for tag in &session.state.tags {
+        tips.entry(tag.commit_id.as_str()).or_default().1.push(tag.clone());
     }
+    let head = session.state.branches.iter().find(|branch| branch.is_head && !branch.is_remote);
+    let head_counts = head.map(|branch| (branch.name.clone(), session.branch_counts(branch)));
 
-    let wip_rows = app.wip_rows();
-    let inspecting = app.inspected_path().is_some();
-    for wip in &wip_rows {
-        // The inspected worktree is always drawn, so inspecting never needs a filter cleared.
-        // Otherwise working changes belong to a worktree's HEAD: hide other worktrees under
-        // any filter or search, and the active one too unless the filter is HEAD or its own branch.
-        if !wip.inspected {
-            if narrowing || (filter.is_some() && !wip.active) {
-                continue;
-            }
-            if wip.active
-                && !focus
-                && session
-                    .branch_filter
-                    .as_ref()
-                    .is_some_and(|name| session.local_branch(name).is_none_or(|branch| !branch.is_head))
-            {
-                continue;
-            }
-        }
-        let selected = wip.inspected
-            || (wip.active
-                && !inspecting
-                && matches!(
-                    selection,
-                    Selection::Branch { current: true, .. } | Selection::File { .. }
-                ));
-        let line = button(history_row(
-            graph_cell_empty(graph_w),
-            wip_description_cell(wip, tokens, reading),
-            "",
-            "",
-            "",
-            false,
-            tokens,
-            reading,
-        ))
-        .width(Length::Fill)
-        .padding(0)
-        .on_press(Message::WorktreeClicked(wip.path.clone()))
-        .style(move |_theme, status| commit_style(tokens, status, selected));
-        commit_rows = commit_rows.push(hover_tip(line.into(), wip.tooltip.clone(), tokens, reading));
-    }
-
-    // Only the rows in view (plus a margin) are built; every row is exactly ROW_HEIGHT tall, so
-    // the rest are stood in for by empty space of the same height and the scrollbar is true.
-    // Building all of a long history every frame is what made more history unaffordable.
-    let (first, last) = visible_rows(table.len(), app.history_scroll, app.history_viewport);
-    if first > 0 {
-        commit_rows = commit_rows.push(Space::with_height(Length::Fixed(first as f32 * ROW_HEIGHT)));
-    }
-    let after = table.len().saturating_sub(last);
-    for (node, graph_row) in table.into_iter().skip(first).take(last - first) {
-        let Some(&commit) = commits_by_id.get(node.commit_id.as_str()) else {
-            commit_rows = commit_rows.push(Space::with_height(Length::Fixed(ROW_HEIGHT)));
+    let mut out = Vec::with_capacity(table.len());
+    let mut top = 0.0_f32;
+    for (node, graph) in table {
+        let Some(commit) = commits_by_id.get(node.commit_id.as_str()) else {
             continue;
         };
-        let selected = matches!(selection, Selection::Commit { id } if id == &commit.id);
-        let age = log_date(now, commit.timestamp);
-        // Merge commits recede, as in the JetBrains log: the work is in their parents.
-        let merge = commit.parent_ids.len() > 1;
-        let mut pills = refs_at(
-            &commit.id,
-            &app.session().state.branches,
-            &app.session().state.tags,
-            &app.worktree_catalogue,
-        );
+        let mut pills = tips
+            .get(commit.id.as_str())
+            .map(|(branches, tags)| refs_at(&commit.id, branches, tags, &app.worktree_catalogue))
+            .unwrap_or_default();
         // The checked-out branch's counts come from the header's tracking state, like every
         // other place they are shown.
-        if let Some(head) = session.state.branches.iter().find(|branch| branch.is_head && !branch.is_remote) {
-            let (ahead, behind) = session.branch_counts(head);
-            for pill in pills.iter_mut().filter(|pill| pill.name == head.name) {
-                pill.ahead = ahead;
-                pill.behind = behind;
+        if let Some((name, (ahead, behind))) = &head_counts {
+            for pill in pills.iter_mut().filter(|pill| &pill.name == name) {
+                pill.ahead = *ahead;
+                pill.behind = *behind;
             }
         }
-        let mark = node_mark_for(&pills);
-        let label = history_row(
-            canvas(GraphCell {
-                row: graph_row,
-                mark,
-            })
-            .width(Length::Fixed(graph_w))
-            .height(Length::Fixed(ROW_HEIGHT))
-            .into(),
-            description_cell(app, &commit.message, &pills, merge, tokens, reading),
-            &commit.author,
-            &age,
-            short_hash(&commit.id),
-            merge,
-            tokens,
-            reading,
-        );
-        let id = commit.id.clone();
-        let right_target = ContextTarget::Commit {
-            id: commit.id.clone(),
-        };
-        commit_rows = commit_rows.push(
-            mouse_area(
-                button(label)
-                    .width(Length::Fill)
-                    .padding(0)
-                    .on_press(Message::Select(Selection::Commit { id }))
-                    .style(move |_theme, status| commit_style(tokens, status, selected)),
-            )
-            .on_right_press(Message::OpenContextMenu {
-                target: right_target,
-            }),
-        );
+        let subject = subject_of(&commit.message).to_string();
+        let height = row_height(&subject, &pills, description_w, reading);
+        out.push(crate::history_index::IndexRow {
+            commit_id: commit.id.clone(),
+            subject,
+            author: commit.author.clone(),
+            timestamp: commit.timestamp,
+            merge: commit.parent_ids.len() > 1,
+            graph,
+            pills,
+            height,
+            top,
+        });
+        top += height;
     }
-    if after > 0 {
-        commit_rows = commit_rows.push(Space::with_height(Length::Fixed(after as f32 * ROW_HEIGHT)));
+    crate::history_index::HistoryIndex {
+        key,
+        rows: out,
+        total: top,
+        filter: filter.map(|(name, _)| name),
+        filter_unloaded,
+        shown: shown_nodes.len(),
+        narrowing,
+        columns,
+        graph_width: graph_w,
     }
-    if session.history_more_pending {
-        commit_rows = commit_rows.push(
-            text("Loading more commits…")
-                .font(reading.font)
-                .size(reading.size)
-                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
-        );
-    }
-
-    let any_wip = if focus {
-        wip_rows.iter().any(|wip| wip.active || wip.inspected)
-    } else {
-        !wip_rows.is_empty()
-    };
-    if narrowing {
-        // The summary line already says how many matched.
-    } else if shown_nodes.is_empty() && !any_wip {
-        let empty = if session.state.commits.is_empty() {
-            "No commits yet"
-        } else {
-            "No commits on this view — try turning off Focus"
-        };
-        commit_rows = commit_rows.push(
-            text(empty)
-                .font(reading.font)
-                .size(reading.size)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_muted),
-                }),
-        );
-    }
-
-    container(
-        scrollable(commit_rows.padding([2, 8]))
-            .id(scrollable::Id::new(crate::app::HISTORY_SCROLL_ID))
-            .width(Length::Fill)
-            .on_scroll(|viewport| Message::HistoryScrolled {
-                offset: viewport.absolute_offset().y,
-                height: viewport.bounds().height,
-                content: viewport.content_bounds().height,
-            }),
-    )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_theme: &Theme| panel_style(tokens, false))
-        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,18 +436,22 @@ fn history_row<'a>(
     when: &str,
     hash: &str,
     muted: bool,
+    height: Length,
+    columns: Columns,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    row![
-        graph,
-        description,
-        single_line(author, Length::Fixed(AUTHOR_WIDTH), reading, tokens, false, muted),
-        single_line(when, Length::Fixed(WHEN_WIDTH), reading, tokens, false, muted),
-        single_line(hash, Length::Fixed(HASH_WIDTH), reading, tokens, true, muted),
-    ]
-    .spacing(COL_GAP)
-    .height(Length::Fixed(ROW_HEIGHT))
+    let mut line = row![graph, description].spacing(COL_GAP);
+    if columns.author {
+        line = line.push(single_line(author, Length::Fixed(AUTHOR_WIDTH), reading, tokens, false, muted));
+    }
+    if columns.when {
+        line = line.push(single_line(when, Length::Fixed(WHEN_WIDTH), reading, tokens, false, muted));
+    }
+    if columns.hash {
+        line = line.push(single_line(hash, Length::Fixed(HASH_WIDTH), reading, tokens, true, muted));
+    }
+    line.height(height)
     .align_y(Alignment::Center)
     .width(Length::Fill)
     .into()
@@ -365,16 +459,23 @@ fn history_row<'a>(
 
 /// Mirrors [`history_row`] cell for cell, so every header sits over its column. The focus
 /// toggle lives in the History toolbar, not here: an extra header cell shifted the columns.
-fn column_headers<'a>(graph_w: f32, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
-    row![
+fn column_headers<'a>(graph_w: f32, columns: Columns, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let mut line = row![
         // The graph column has no title: "Description" lines up with the subjects.
         container(text("")).width(Length::Fixed(graph_w)),
         header_cell("Description", Length::Fill, tokens, reading),
-        header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading),
-        header_cell("Date (UTC)", Length::Fixed(WHEN_WIDTH), tokens, reading),
-        header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading),
     ]
-    .spacing(COL_GAP)
+    .spacing(COL_GAP);
+    if columns.author {
+        line = line.push(header_cell("Author", Length::Fixed(AUTHOR_WIDTH), tokens, reading));
+    }
+    if columns.when {
+        line = line.push(header_cell("Date (UTC)", Length::Fixed(WHEN_WIDTH), tokens, reading));
+    }
+    if columns.hash {
+        line = line.push(header_cell("Hash", Length::Fixed(HASH_WIDTH), tokens, reading));
+    }
+    line
     .padding([2, 0])
     .height(Length::Fixed(HEADER_HEIGHT))
     .align_y(Alignment::Center)
@@ -410,49 +511,81 @@ fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
         .into()
 }
 
-/// Subject first, taking what is left; ref pills after it at their natural width.
-/// Hovering the pills lists every ref at the commit by its full name.
+/// The worktree and branch names on top, then the subject, both whole and wrapping. Hovering
+/// the names lists every ref at the commit by its full name.
 fn description_cell<'a>(
     app: &GitApp,
     message: &str,
     pills: &[RefPill],
     muted: bool,
+    height: f32,
+    lane: Color,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
     let subject_colour = if muted { tokens.text_muted } else { tokens.text_primary };
-    let subject = container(
-        text(message.lines().next().unwrap_or_default().to_string())
-            .font(reading.font)
-            .size(reading.size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(subject_colour),
-            }),
-    )
-    .width(Length::FillPortion(SUBJECT_PORTION))
-    .clip(true);
-    let mut cell = row![subject]
-        .spacing(SUBJECT_PILL_GAP)
-        .align_y(Alignment::Center);
+    let subject = text(subject_of(message).to_string())
+        .font(reading.font)
+        .size(reading.size)
+        .wrapping(Wrapping::WordOrGlyph)
+        .style(move |_| text::Style { color: Some(subject_colour) });
+    let mut cell = column![].spacing(STACK_GAP).width(Length::Fill);
     if !pills.is_empty() {
-        // At most a quarter of the column: on a narrow log the subject is what must stay.
         let folder_of = |path: &str| app.worktree_folder(path);
         let names = pill_tooltip(pills, &app.worktree_catalogue, &folder_of);
-        cell = cell.push(
-            container(hover_tip(pill_strip(pills, tokens, reading), names, tokens, reading))
-                .width(Length::FillPortion(PILL_PORTION))
-                .max_width(PILL_STRIP_MAX)
-                .align_x(Alignment::End)
-                .clip(true),
-        );
+        cell = cell.push(hover_tip(pill_strip(pills, lane, tokens, reading), names, tokens, reading));
     }
+    cell = cell.push(subject);
     container(cell)
         .width(Length::Fill)
-        .height(Length::Fixed(ROW_HEIGHT))
-        .clip(true)
+        .height(Length::Fixed(height))
+        .padding([ROW_PAD_Y, 0.0])
         .align_y(Alignment::Center)
         .into()
+}
+
+/// The first line of a commit message.
+fn subject_of(message: &str) -> &str {
+    message.lines().next().unwrap_or_default()
+}
+
+/// How tall a commit row is: its names line (wrapped across the column) above its subject
+/// (wrapped too), at least one base row.
+fn row_height(subject: &str, pills: &[RefPill], width: f32, reading: Reading) -> f32 {
+    let subject_h = crate::text_measure::height(subject, reading.font, reading.size, width);
+    let names_h = if pills.is_empty() {
+        0.0
+    } else {
+        pill_lines(pills, width, reading) as f32 * (PILL_HEIGHT + PILL_LINE_GAP) + STACK_GAP
+    };
+    (subject_h + names_h + ROW_PAD_Y * 2.0).max(ROW_HEIGHT)
+}
+
+/// Lines the pills take when wrapped into `width`.
+fn pill_lines(pills: &[RefPill], width: f32, reading: Reading) -> usize {
+    let small = (reading.size - 3.0).max(10.0);
+    let mut lines = 1;
+    let mut used = 0.0;
+    for pill in pills {
+        let mut pill_w = crate::text_measure::width(&pill.label, reading.font, small) + small + 3.0 + PILL_PAD_X * 2.0 + 2.0;
+        for count in [pill.behind, pill.ahead] {
+            if count > 0 {
+                pill_w += crate::text_measure::width(&format!("↓{count}"), reading.mono, (reading.size - 4.0).max(9.0)) + 3.0;
+            }
+        }
+        // A pill wider than the line wraps inside itself, taking a line per line it wraps to.
+        if pill_w > width {
+            lines += (pill_w / width).ceil() as usize - 1;
+        }
+        let pill_w = pill_w.min(width);
+        if used > 0.0 && used + PILL_GAP + pill_w > width {
+            lines += 1;
+            used = pill_w;
+        } else {
+            used += if used > 0.0 { PILL_GAP } else { 0.0 } + pill_w;
+        }
+    }
+    lines
 }
 
 /// "Branch: <name> · N commits  ✕" under the headers while the log is filtered to a branch.
@@ -540,25 +673,17 @@ fn ref_names_at<'s>(commit_id: &str, session: &'s WorktreeSession) -> Vec<&'s st
 
 fn pill_strip<'a>(
     pills: &[RefPill],
+    lane: Color,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    // Every ref at the commit, whole, wrapping onto more lines when they do not fit. Nothing
+    // hides behind a "+N": a hidden worktree is exactly the mix-up this row must prevent.
     let mut pill_row = row![].spacing(PILL_GAP).align_y(Alignment::Center);
-    for pill in pills.iter().take(MAX_PILLS_SHOWN) {
-        pill_row = pill_row.push(ref_pill(pill, tokens, reading));
+    for pill in pills {
+        pill_row = pill_row.push(ref_pill(pill, lane, tokens, reading));
     }
-    if pills.len() > MAX_PILLS_SHOWN {
-        pill_row = pill_row.push(
-            text(format!("+{}", pills.len() - MAX_PILLS_SHOWN))
-                .font(reading.font)
-                .size((reading.size - 2.0).max(10.0))
-                .wrapping(Wrapping::None)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_muted),
-                }),
-        );
-    }
-    pill_row.into()
+    pill_row.wrap().into()
 }
 
 /// "Working changes · n files" and the WIP pill. The pill is outlined, never filled, and
@@ -573,34 +698,7 @@ fn wip_description_cell<'a>(
     let ink = if wip.active { tokens.accent_primary } else { tokens.text_secondary };
     let edge = if wip.active { tokens.accent_primary } else { tokens.text_muted };
     let small = (reading.size - 3.0).max(10.0);
-    let label = wip.label.clone();
-    let active = wip.active;
-    // The label is fitted to the width the cell really has, shortening names in the middle,
-    // so the distinguishing end of a long branch or folder name is never what gets cut.
-    let fitted = iced::widget::responsive(move |size| {
-        let reserved = 26.0 + if active { 52.0 } else { 0.0 } + files.chars().count() as f32 * reading.size * 0.55 + 24.0;
-        let max_chars = ((size.width - reserved) / (small * WIP_CHAR_WIDTH)).max(12.0) as usize;
-        wip_cell(crate::wip::fit_label(&label, max_chars), files.clone(), active, ink, edge, small, tokens, reading)
-    });
-    container(fitted).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)).into()
-}
-
-/// Average glyph width of the UI font as a share of its size, for fitting WIP labels.
-/// A slight overestimate, so a fitted label never clips.
-const WIP_CHAR_WIDTH: f32 = 0.55;
-
-/// Rows built either side of the view, so a fast scroll never shows a gap and the few rows
-/// above the commits (headers, summaries, WIP) need not be measured exactly.
-const OVERSCAN_ROWS: usize = 40;
-
-/// The `first..last` commit rows to build for a view scrolled `offset` px, `height` px tall.
-/// Before the first scroll event the height is unknown (0): build one screenful generously.
-pub(crate) fn visible_rows(count: usize, offset: f32, height: f32) -> (usize, usize) {
-    let height = if height > 0.0 { height } else { 1_200.0 };
-    let top = (offset.max(0.0) / ROW_HEIGHT) as usize;
-    let first = top.saturating_sub(OVERSCAN_ROWS).min(count);
-    let last = (top + (height / ROW_HEIGHT).ceil() as usize + OVERSCAN_ROWS).min(count);
-    (first, last.max(first))
+    wip_cell(wip.label.clone(), files, wip.active, ink, edge, small, tokens, reading)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,10 +714,11 @@ fn wip_cell<'a>(
 ) -> Element<'a, Message> {
     let mut body = row![
         glyph(Icon::Edit, (reading.size - 3.0).max(9.0), ink, &reading),
+        // Whole, wrapping if the column is narrow: never cut.
         text(label)
             .font(reading.font)
             .size(small)
-            .wrapping(Wrapping::None)
+            .wrapping(Wrapping::WordOrGlyph)
             .style(move |_| text::Style { color: Some(ink) }),
     ]
     .spacing(3)
@@ -634,10 +733,8 @@ fn wip_cell<'a>(
         );
     }
     let pill = container(body)
-        .height(Length::Fixed(PILL_HEIGHT))
-        .clip(true)
         .align_y(Alignment::Center)
-        .padding([PILL_PAD_Y, PILL_PAD_X])
+        .padding([PILL_PAD_Y + 2.0, PILL_PAD_X])
         .style(move |_theme: &Theme| container::Style {
             background: None,
             text_color: Some(ink),
@@ -663,8 +760,7 @@ fn wip_cell<'a>(
     .align_y(Alignment::Center);
     container(stack)
         .width(Length::Fill)
-        .height(Length::Fixed(ROW_HEIGHT))
-        .clip(true)
+        .padding([ROW_PAD_Y, 0.0])
         .align_y(Alignment::Center)
         .into()
 }
@@ -695,28 +791,33 @@ fn hover_tip<'a>(
     .into()
 }
 
-fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+/// A ref at a commit, in the colour of the lane it sits on, so a coloured line in the graph
+/// can be told by name: the orange line is the branch whose pill is orange. The shape says
+/// the kind: filled for the checkout, outlined for a worktree or branch, faint for a remote
+/// (with its cloud mark), neutral for a tag.
+fn ref_pill<'a>(pill: &RefPill, lane: Color, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let faint = Color { a: 0.55, ..lane };
     let (fg, bg, border) = match pill.kind {
-        RefPillKind::Head => (tokens.bg_app, tokens.accent_primary, tokens.accent_primary),
-        RefPillKind::Worktree => (tokens.accent_primary, tokens.bg_raised, tokens.accent_primary),
-        RefPillKind::Local => (tokens.text_secondary, tokens.chip, tokens.chip_border),
-        RefPillKind::Remote => (tokens.text_muted, tokens.bg_raised, tokens.border),
-        RefPillKind::Tag => (tokens.added, tokens.chip, tokens.added),
+        RefPillKind::Head => (tokens.bg_app, lane, lane),
+        RefPillKind::Worktree => (lane, tokens.bg_raised, lane),
+        RefPillKind::Local => (lane, tokens.chip, lane),
+        RefPillKind::Remote => (faint, tokens.bg_raised, faint),
+        RefPillKind::Tag => (tokens.text_secondary, tokens.chip, tokens.chip_border),
     };
     let mark = pill_mark(pill.kind);
     let mut body = row![
         glyph(mark, (reading.size - 3.0).max(9.0), fg, &reading),
+        // Whole: a long name wraps inside its pill.
         text(pill.label.clone())
             .font(reading.font)
             .size((reading.size - 3.0).max(10.0))
-            .wrapping(Wrapping::None)
+            .wrapping(Wrapping::WordOrGlyph)
             .style(move |_| text::Style { color: Some(fg) }),
     ]
     .spacing(3)
     .align_y(Alignment::Center);
-    // The same ↓ incoming / ↑ outgoing badge as everywhere else. These used to read +n / -n
-    // in the diff's green and red, which says lines, not commits.
-    for (count, arrow, colour) in [(pill.behind, '↓', tokens.incoming), (pill.ahead, '↑', tokens.outgoing)] {
+    // ↓ incoming / ↑ outgoing, in the pill's own ink: the arrow says which, never a colour.
+    for (count, arrow, colour) in [(pill.behind, '↓', fg), (pill.ahead, '↑', fg)] {
         if count > 0 {
             body = body.push(
                 text(format!("{arrow}{count}"))
@@ -728,8 +829,7 @@ fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Eleme
         }
     }
     container(body)
-        .height(Length::Fixed(PILL_HEIGHT))
-        .clip(true)
+        .height(Length::Shrink)
         .align_y(Alignment::Center)
         .padding([PILL_PAD_Y, PILL_PAD_X])
         .style(move |_theme: &Theme| container::Style {
@@ -802,15 +902,33 @@ fn commit_style(
 }
 
 #[cfg(test)]
-mod virtual_rows_tests {
+mod measured_rows_tests {
     use super::*;
+    use crate::ref_pills::RefPillKind;
+
+    fn reading() -> Reading {
+        Reading { font: iced::Font::DEFAULT, mono: iced::Font::MONOSPACE, size: 13.0 }
+    }
+
+    fn pill(name: &str) -> RefPill {
+        RefPill { label: name.into(), name: name.into(), kind: RefPillKind::Worktree, ahead: 0, behind: 0 }
+    }
 
     #[test]
-    fn only_the_rows_in_view_and_a_margin_are_built() {
-        assert_eq!(visible_rows(1_500, 0.0, 480.0), (0, 60));
-        let (first, last) = visible_rows(1_500, 24.0 * 500.0, 480.0);
-        assert_eq!((first, last), (460, 560));
-        assert_eq!(visible_rows(10, 9_999.0, 480.0), (10, 10), "past the end builds nothing");
-        assert_eq!(visible_rows(0, 0.0, 0.0), (0, 0));
+    fn a_row_grows_to_hold_its_names_and_its_whole_subject() {
+        let plain = row_height("Update", &[], 400.0, reading());
+        assert_eq!(plain, ROW_HEIGHT, "a short subject is one base row");
+        let named = row_height("Update", &[pill("feature/tenant-db-isolation-shared-instance")], 400.0, reading());
+        assert!(named > plain, "the names line sits above the subject: {named}");
+        let long = "fix(plt): Correct tenant titles on first load and add notification page titles across every module";
+        let wrapped = row_height(long, &[], 150.0, reading());
+        assert!(wrapped > ROW_HEIGHT * 1.5, "a long subject wraps rather than being cut: {wrapped}");
+    }
+
+    #[test]
+    fn many_names_wrap_onto_more_lines() {
+        let names: Vec<RefPill> = (0..6).map(|i| pill(&format!("worktree-branch-number-{i}"))).collect();
+        assert!(pill_lines(&names, 300.0, reading()) >= 2);
+        assert_eq!(pill_lines(&names[..1], 3_000.0, reading()), 1);
     }
 }

@@ -11,8 +11,6 @@ use iced::{
     font::Family, Alignment, Background, Border, Color, Element, Font, Length, Shadow, Theme,
 };
 
-/// Widest the top-bar branch name grows before it clips.
-const BRANCH_CHIP_MAX_WIDTH: f32 = 280.0;
 
 /// The face and size chosen under Appearance. Hashes and paths stay monospace.
 #[derive(Clone, Copy)]
@@ -48,23 +46,17 @@ pub(super) fn one_line<'a>(
         .into()
 }
 
-/// Average glyph width of the UI font as a share of its size, for fitting names to a width.
-/// Slightly generous, so a fitted name never clips.
-const FIT_CHAR_WIDTH: f32 = 0.55;
-
-/// One line of text that fits the width it is given: shortened in the middle only when it
-/// would not fit, so the end of a long branch or folder name is never what gets cut.
-pub(super) fn fitted_text<'a>(value: String, font: Font, size: f32, colour: Color) -> Element<'a, Message> {
-    iced::widget::responsive(move |space| {
-        let max = (space.width / (size * FIT_CHAR_WIDTH)).max(4.0) as usize;
-        text(crate::wip::middle_ellipsis(&value, max))
-            .font(font)
-            .size(size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style { color: Some(colour) })
-            .into()
-    })
-    .into()
+/// A name that is always shown whole: a worktree, branch, folder or repository. When it does
+/// not fit on one line it wraps (between words, or inside a long word) and the row grows.
+/// Never clipped or shortened: a cut-off name can pass for another and send work to the
+/// wrong worktree.
+pub(super) fn full_text<'a>(value: String, font: Font, size: f32, colour: Color) -> Element<'a, Message> {
+    text(value)
+        .font(font)
+        .size(size)
+        .wrapping(Wrapping::WordOrGlyph)
+        .style(move |_| text::Style { color: Some(colour) })
+        .into()
 }
 
 pub(super) fn reading(settings: &AppSettings) -> Reading {
@@ -123,22 +115,13 @@ pub(super) fn branch_chip<'a>(
                 },
                 &reading,
             ),
-            container(one_line(
-                text(label)
-                    .font(reading.font)
-                    .size(reading.size)
-                    .wrapping(Wrapping::None)
-                    .style(move |_| text::Style {
-                        color: Some(if enabled {
-                            tokens.accent_primary
-                        } else {
-                            tokens.text_muted
-                        }),
-                    }),
+            // The whole branch name: it wraps inside the chip rather than being cut.
+            full_text(
+                label,
+                reading.font,
                 reading.size,
-                Length::Shrink,
-            ))
-            .max_width(BRANCH_CHIP_MAX_WIDTH),
+                if enabled { tokens.accent_primary } else { tokens.text_muted },
+            ),
             glyph(
                 chevron,
                 (reading.size - 1.0).max(10.0),

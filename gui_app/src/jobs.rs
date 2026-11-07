@@ -31,8 +31,14 @@ pub(crate) enum WorktreeEdit {
     Commit(String),
 }
 
-/// Commits read at first, and how many more each time the history is scrolled near its end.
-pub(crate) const COMMIT_PAGE_SIZE: usize = 200;
+/// Commits read at first: enough to fill the window at once.
+pub(crate) const COMMIT_PAGE_SIZE: usize = 100;
+/// Commits added per background chunk while history streams in.
+pub(crate) const STREAM_CHUNK: usize = 300;
+/// Chunk size while the user is waiting at the end of what has arrived.
+pub(crate) const STREAM_CHUNK_URGENT: usize = 1_200;
+/// Streaming stops on its own here; scrolling to the end still reads further.
+pub(crate) const STREAM_CAP: usize = 5_000;
 
 /// Read the repository through the port and translate each result into a [`ViewEvent`].
 ///
@@ -443,15 +449,10 @@ pub(crate) fn load_repository_in_background(
 pub(crate) fn history_in_background_up_to(
     repo: SharedRepository,
     limit: usize,
-) -> impl Future<Output = Vec<ViewEvent>> {
+) -> impl Future<Output = Result<Vec<core_domain::Commit>, DomainError>> {
     in_background(
-        move || {
-            vec![match repo.log(Some(limit)) {
-                Ok(commits) => ViewEvent::LogUpdated(commits),
-                Err(error) => ViewEvent::ErrorOccurred(error),
-            }]
-        },
-        || vec![ViewEvent::ErrorOccurred(DomainError::Unknown("history read was interrupted".to_string()))],
+        move || repo.log(Some(limit)),
+        || Err(DomainError::Unknown("history read was interrupted".to_string())),
     )
 }
 

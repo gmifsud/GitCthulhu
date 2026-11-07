@@ -270,9 +270,8 @@ fn branch_tree_row<'a>(
             let mark = if remote { Icon::Cloud } else if in_worktree { Icon::Worktree } else { Icon::Branch };
             // The name takes the spare width and clips, so a long name never squeezes the
             // ahead/behind badge onto a second line.
-            let name_cell = container(super::chrome::fitted_text(label.to_string(), reading.font, reading.size, ink))
+            let name_cell = container(super::chrome::full_text(label.to_string(), reading.font, reading.size, ink))
                 .width(Length::Fill)
-                .height(Length::Fixed(super::chrome::one_line_height(reading.size)))
                 .align_y(Alignment::Center);
             let mut content = row![name_cell].spacing(6).align_y(Alignment::Center);
             if let Some(branch) = branch {
@@ -373,11 +372,9 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
     let inspected = app.inspected_path().is_some_and(|path| same_path(path, &entry.path));
     let branch = if entry.branch.is_empty() { DETACHED.to_string() } else { entry.branch.clone() };
     let (ahead, behind) = tracking_for_worktree(app, entry);
-    // Two lines: the folder, then its branch, each with the full row width and shortened in
-    // the middle only when it truly does not fit. One line held both and cut them off.
-    let line_height = super::chrome::one_line_height(reading.size);
+    // The folder, then its branch, each whole: a long one wraps and the row grows.
     let small = (reading.size - 1.0).max(10.0);
-    let folder = container(super::chrome::fitted_text(
+    let folder = container(super::chrome::full_text(
         // Two worktrees in folders of the same name read apart (`a/wt`, `b/wt`).
         app.worktree_folder(&entry.path),
         reading.font,
@@ -385,11 +382,9 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
         if open { tokens.text_primary } else { tokens.text_secondary },
     ))
     .width(Length::Fill)
-    .height(Length::Fixed(line_height))
     .align_y(Alignment::Center);
-    let branch_line = container(super::chrome::fitted_text(branch.clone(), reading.font, small, tokens.accent_primary))
+    let branch_line = container(super::chrome::full_text(branch.clone(), reading.font, small, tokens.accent_primary))
         .width(Length::Fill)
-        .height(Length::Fixed(super::chrome::one_line_height(small)))
         .align_y(Alignment::Center);
     let mut content = row![folder].spacing(6).align_y(Alignment::Center);
     if entry.is_main {
