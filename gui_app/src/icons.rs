@@ -63,6 +63,8 @@ pub(crate) enum Icon {
 
 impl Icon {
     /// Every icon, in declaration order: the font test and the design system walk this.
+    /// Only those two builds have it, so the window build stays free of dead-code warnings.
+    #[cfg(any(test, feature = "design-export"))]
     pub(crate) const ALL: [Icon; 44] = [
         Icon::Add,
         Icon::ArrowSmallDown, Icon::ArrowSmallUp, Icon::Branch, Icon::Check, Icon::CheckAll, Icon::ChevronDown,
