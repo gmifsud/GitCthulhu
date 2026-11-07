@@ -31,3 +31,10 @@ codegen-units = 1
 # A panic on the UI thread still ends the program; the crash-report hook in `app` records it.
 panic = "unwind"
 strip = true
+
+# Release code with symbols kept, for a profiler. Build with `cargo build --profile profiling`;
+# the binary is target\profiling\git_cthulhu.exe. Never shipped.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

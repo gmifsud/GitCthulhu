@@ -120,9 +120,6 @@ pub(crate) struct GitApp {
     pub(crate) tip_hover: Option<(String, String, std::time::Instant)>,
     /// Tip key whose hover has lasted long enough to show the title.
     pub(crate) tip_ready_key: Option<String>,
-    /// Last pointer position in window coordinates (for tips and context menus).
-    pub(crate) cursor: (f32, f32),
-    /// Dragging an Explorer section height grip: section, start y, start weight.
     /// The last branch-tree click, to recognise a double-click (checkout).
     last_ref_click: Option<(String, std::time::Instant)>,
     /// Branch-tree filter text ("Branch or tag"). Window-wide.
@@ -544,9 +541,9 @@ pub(crate) enum Message {
         target: crate::context_menu::ContextTarget,
     },
     CloseContextMenu,
-    /// Pointer moved; keeps context menus and delayed tips near the cursor.
-    CursorMoved {
-        x: f32,
+    /// Pointer moved while the terminal edge is dragged. Other moves send nothing: the
+    /// position is read from `pointer` when a right-click needs it.
+    TerminalDragMoved {
         y: f32,
     },
     /// Run a context-menu action (closes the menu first).
@@ -773,7 +770,6 @@ impl GitApp {
             confirm_detach: None,
             tip_hover: None,
             tip_ready_key: None,
-            cursor: (0.0, 0.0),
             last_ref_click: None,
             ref_filter: String::new(),
             settings,
@@ -898,7 +894,7 @@ impl GitApp {
     }
 
     #[cfg(test)]
-    fn active_key(&self) -> SessionKey {
+    pub(crate) fn active_key(&self) -> SessionKey {
         self.active_session().map(WorktreeSession::key).expect("an open session")
     }
 
@@ -2115,7 +2111,7 @@ impl GitApp {
                 self.open_shell()
             }
             Message::TerminalDragStart => {
-                self.terminal_drag = Some((self.cursor.1, self.terminal_height));
+                self.terminal_drag = Some((crate::pointer::position().1, self.terminal_height));
                 Task::none()
             }
             Message::PointerReleased => {
@@ -2766,19 +2762,16 @@ impl GitApp {
                 Task::none()
             }
             Message::OpenContextMenu { target } => {
-                self.context_menu = Some(crate::context_menu::ContextMenuState {
-                    target,
-                    x: self.cursor.0,
-                    y: self.cursor.1,
-                });
+                let (x, y) = crate::pointer::position();
+                self.context_menu = Some(crate::context_menu::ContextMenuState { target, x, y });
                 Task::none()
             }
             Message::CloseContextMenu => {
                 self.context_menu = None;
                 Task::none()
             }
-            Message::CursorMoved { x, y } => {
-                self.cursor = (x, y);
+            Message::TerminalDragMoved { y } => {
+                // Sent only while the terminal edge is being dragged (see `subscription`).
                 if let Some((start_y, start_height)) = self.terminal_drag {
                     // The edge is on top, so dragging up (smaller y) makes the terminal taller.
                     self.terminal_height = (start_height + (start_y - y))
@@ -4606,11 +4599,10 @@ impl GitApp {
             _ => None,
         });
         let cursor = iced::event::listen_with(|event, _status, _id| match event {
+            // A move is recorded, never sent: a message would rebuild the whole window.
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                Some(Message::CursorMoved {
-                    x: position.x,
-                    y: position.y,
-                })
+                crate::pointer::record(position);
+                None
             }
             iced::Event::Window(iced::window::Event::Resized(size)) => Some(Message::WindowResized(size.width)),
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
@@ -4625,6 +4617,15 @@ impl GitApp {
             && self.tip_ready_key.as_ref()
                 != self.tip_hover.as_ref().map(|(key, _, _)| key);
         let mut subscriptions = vec![keys, typing_keys, cursor];
+        // The one time a move must reach `update`: the terminal edge follows the pointer.
+        if self.terminal_drag.is_some() {
+            subscriptions.push(iced::event::listen_with(|event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::TerminalDragMoved { y: position.y })
+                }
+                _ => None,
+            }));
+        }
         if waiting_tip {
             subscriptions.push(
                 iced::time::every(iced::time::Duration::from_millis(200)).map(|_| Message::IconTipTick),
@@ -8115,6 +8116,17 @@ mod tests {
         let _ = app.update(Message::HistoryScrolled { offset: 4_500.0, height: 500.0, content: 5_200.0 });
         assert!(app.session().history_more_pending, "the user asked by scrolling to the end");
         assert_eq!(app.session().history_limit, STREAM_CAP + STREAM_CHUNK_URGENT);
+    }
+
+    #[test]
+    fn a_context_menu_opens_where_the_pointer_was_last_recorded() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        crate::pointer::record(iced::Point::new(321.0, 45.5));
+        let _ = app.update(Message::OpenContextMenu {
+            target: crate::context_menu::ContextTarget::Stash { index: 0, message: "m".into() },
+        });
+        let menu = app.context_menu.as_ref().expect("open");
+        assert_eq!((menu.x, menu.y), (321.0, 45.5));
     }
 
     #[test]

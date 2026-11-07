@@ -19,6 +19,8 @@ mod layout;
 mod log_filter;
 mod opening;
 mod palette;
+mod perf;
+mod pointer;
 mod reachability;
 mod ref_tree;
 mod ref_pills;
@@ -86,7 +88,7 @@ pub fn run(
     suggest_commit: CommitSuggester,
     activity: ActivityKeeper,
 ) -> iced::Result {
-    iced::application("GitCthulhu", GitApp::update, GitApp::view)
+    iced::application("GitCthulhu", perf::update, perf::view)
         .theme(|_| Theme::Dark)
         .window(repository_window())
         .subscription(GitApp::subscription)
@@ -127,7 +129,7 @@ pub fn run_welcome(
     suggest_commit: CommitSuggester,
     activity: ActivityKeeper,
 ) -> iced::Result {
-    iced::application("GitCthulhu", GitApp::update, GitApp::view)
+    iced::application("GitCthulhu", perf::update, perf::view)
         .theme(|_| Theme::Dark)
         .window(repository_window())
         .subscription(GitApp::subscription)

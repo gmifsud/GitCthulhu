@@ -71,7 +71,7 @@ for a platform, tool, or limitation, add a one-line bullet here.
 Keep each bullet under 15 words. No explanations. Only add things that will save time in future sessions.
 Review weekly — prune anything stale.
 -->
-- _(empty — populate as patterns emerge)_
+- Perf: fix rebuild frequency before per-pane cost. Three sprints missed this (ADR 0007).
 
 ## 9. Decisions Log
 <!-- Stable architectural decisions. One line each. Link to ADR if it deserves more. -->
@@ -79,4 +79,5 @@ Review weekly — prune anything stale.
 - ADR 0002: app state stays a reducer.
 - ADR 0003: sessions-first GitLens path — worktree tabs own `AppState`; compare + split diff after WP1. Spec: `docs/superpowers/specs/2026-10-25-worktree-tabs-design.md`.
 - ADR 0004–0006 (accepted 2026-10-27): conflict resolver — .NET + Avalonia/AvaloniaEdit behind `IEditorSurface`; git CLI authoritative; immutable merge plan + anchored result. Spec: `docs/superpowers/specs/2026-10-27-conflict-resolver-design.md`.
+- ADR 0007 (accepted 2026-11-07): `view` is O(visible) — no message per pointer move, no per-row scans, history appended not re-read. Measure with `GITCTHULHU_PERF=1`, the `perf_harness` test, and the `profiling` profile.
 

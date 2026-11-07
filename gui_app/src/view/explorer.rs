@@ -3,6 +3,8 @@
 //! each `/`. A click filters the log to a branch; a double-click checks a local branch out;
 //! everything else is on the right-click menu of each row.
 
+use std::collections::HashMap;
+
 use crate::app::{GitApp, Message};
 use crate::context_menu::ContextTarget;
 use crate::ref_tree::{ref_rows, RefRow};
@@ -34,6 +36,12 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     let head = branches.iter().find(|branch| branch.is_head && !branch.is_remote);
     let locals: Vec<&Branch> = branches.iter().filter(|branch| !branch.is_remote).collect();
     let remotes: Vec<&Branch> = branches.iter().filter(|branch| branch.is_remote).collect();
+    // Each leaf row looks its branch up once here; a scan of every branch per row made the
+    // tree quadratic in the number of branches.
+    let by_name: BranchesByName = branches
+        .iter()
+        .map(|branch| ((branch.is_remote, branch.name.as_str()), branch))
+        .collect();
     let selected = session.selection.as_ref();
 
     let mut tree = column![].spacing(0).width(Length::Fill);
@@ -61,7 +69,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     if !collapsed.local {
         let rows = ref_rows("local", locals.iter().map(|branch| branch.name.as_str()), filter, |key| session.ref_folder_open(key));
         for row_data in rows {
-            tree = tree.push(branch_tree_row(app, &row_data, false, selected, tokens, reading));
+            tree = tree.push(branch_tree_row(app, &row_data, false, &by_name, selected, tokens, reading));
         }
         if locals.is_empty() {
             tree = tree.push(hint_row("No local branches", tokens, reading));
@@ -73,7 +81,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     if !collapsed.remote {
         let rows = ref_rows("remote", remotes.iter().map(|branch| branch.name.as_str()), filter, |key| session.ref_folder_open(key));
         for row_data in rows {
-            tree = tree.push(branch_tree_row(app, &row_data, true, selected, tokens, reading));
+            tree = tree.push(branch_tree_row(app, &row_data, true, &by_name, selected, tokens, reading));
         }
         if remotes.is_empty() {
             tree = tree.push(hint_row("No remote branches", tokens, reading));
@@ -221,11 +229,16 @@ fn group_header<'a>(
     container(header).padding(Padding { top: 6.0, ..Padding::ZERO }).into()
 }
 
+/// Every branch by (is_remote, name), built once per rebuild of the tree.
+type BranchesByName<'b> = HashMap<(bool, &'b str), &'b Branch>;
+
 /// A branch-tree row: a folder (toggles) or a branch leaf (click filters the log).
+#[allow(clippy::too_many_arguments)]
 fn branch_tree_row<'a>(
     app: &'a GitApp,
     data: &RefRow,
     remote: bool,
+    by_name: &BranchesByName<'_>,
     selected: Option<&Selection>,
     tokens: DesignTokens,
     reading: Reading,
@@ -250,11 +263,7 @@ fn branch_tree_row<'a>(
             )
         }
         RefRow::Leaf { name, label, depth } => {
-            let branch = session
-                .state
-                .branches
-                .iter()
-                .find(|branch| branch.is_remote == remote && branch.name == *name);
+            let branch = by_name.get(&(remote, name.as_str())).copied();
             let current = branch.is_some_and(|branch| branch.is_head && !branch.is_remote);
             let in_worktree = !remote
                 && app

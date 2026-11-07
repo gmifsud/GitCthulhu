@@ -189,3 +189,117 @@ impl GitApp {
         None
     }
 }
+
+/// How long the window takes to build on a large repository: 1,100 branches, 5,000 commits
+/// and 16 worktrees of synthetic data, so the numbers compare run to run and machine to
+/// machine. Ignored by default; read them in an optimised build:
+///
+/// ```text
+/// cargo test --release -p gui_app perf_harness -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod perf_harness {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use core_domain::{Branch, Commit, ViewEvent, Worktree};
+    use test_support::FakeGitRepository;
+
+    use super::*;
+
+    const COMMITS: usize = 5_000;
+    const LOCAL_BRANCHES: usize = 300;
+    const BRANCHES: usize = 1_100;
+    const WORKTREES: usize = 16;
+    const RUNS: usize = 20;
+
+    fn big_app() -> GitApp {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let key = app.active_key();
+        let commits: Vec<Commit> = (0..COMMITS)
+            .map(|index| Commit {
+                id: format!("{index:040x}"),
+                parent_ids: if index + 1 < COMMITS { vec![format!("{:040x}", index + 1)] } else { vec![] },
+                author: format!("author {}", index % 7),
+                message: format!("feat(area-{}): subject {index} of a line long enough to be real", index % 13),
+                timestamp: 1_700_000_000 - index as i64 * 60,
+            })
+            .collect();
+        let branches: Vec<Branch> = (0..BRANCHES)
+            .map(|index| {
+                let local = index < LOCAL_BRANCHES;
+                Branch {
+                    name: if local {
+                        format!("feature/area-{}/topic-{index}", index % 20)
+                    } else {
+                        format!("origin/feature/area-{}/topic-{index}", index % 20)
+                    },
+                    is_remote: !local,
+                    is_head: index == 0,
+                    tip: format!("{:040x}", index % COMMITS),
+                    ahead: index % 3,
+                    behind: index % 5,
+                }
+            })
+            .collect();
+        let _ = app.update(Message::RepositoryLoaded(
+            key,
+            vec![ViewEvent::LogUpdated(commits), ViewEvent::BranchesUpdated(branches)],
+        ));
+        app.worktree_catalogue = (0..WORKTREES)
+            .map(|index| Worktree {
+                path: format!("D:/Repos/wt-{index}"),
+                branch: format!("feature/area-{}/topic-{index}", index % 20),
+                is_main: index == 0,
+                locked: false,
+            })
+            .collect();
+        app
+    }
+
+    /// Milliseconds per run of `build`, after one warm-up run.
+    fn per_run<T>(mut build: impl FnMut() -> T) -> f64 {
+        drop(build());
+        let started = Instant::now();
+        for _ in 0..RUNS {
+            drop(build());
+        }
+        started.elapsed().as_secs_f64() * 1_000.0 / RUNS as f64
+    }
+
+    #[test]
+    #[ignore = "a timing report, not a check: run with --ignored --nocapture in release"]
+    fn window_build_times_on_a_large_repository() {
+        let mut app = big_app();
+        let tokens = app.tokens;
+        let reading = compact(reading(&app.settings));
+        let session = app.session();
+        let selection = visible_selection(
+            session.selection.as_ref(),
+            &session.state.branches,
+            &session.state.commits,
+            &session.state.stashes,
+            &session.state.tags,
+            session.state.current_status.as_ref(),
+        );
+
+        let whole = per_run(|| app.view());
+        let explorer_pane = per_run(|| explorer::explorer_pane(&app, tokens, reading));
+        let index_started = Instant::now();
+        drop(history::history_table(&app, &selection, 1_200.0, tokens, reading));
+        let history_first = index_started.elapsed().as_secs_f64() * 1_000.0;
+        let history_cached = per_run(|| history::history_table(&app, &selection, 1_200.0, tokens, reading));
+        // What one streamed chunk costs the index today: every row again, text already measured.
+        let history_rebuilt = per_run(|| {
+            app.session_mut().history_generation += 1;
+            drop(history::history_table(&app, &selection, 1_200.0, tokens, reading));
+        });
+
+        eprintln!("perf_harness: {BRANCHES} branches, {COMMITS} commits, {WORKTREES} worktrees");
+        eprintln!("  whole window (history pane excluded, it lays out lazily): {whole:.2} ms");
+        eprintln!("  explorer pane:                                           {explorer_pane:.2} ms");
+        eprintln!("  history table, index built cold:                         {history_first:.2} ms");
+        eprintln!("  history table, index cached:                             {history_cached:.2} ms");
+        eprintln!("  history table, index rebuilt (text cache warm):          {history_rebuilt:.2} ms");
+    }
+}

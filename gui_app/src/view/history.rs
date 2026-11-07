@@ -68,7 +68,7 @@ pub(super) fn history_pane<'a>(
     iced::widget::responsive(move |size| history_table(app, &selection, size.width, tokens, reading)).into()
 }
 
-fn history_table<'a>(
+pub(super) fn history_table<'a>(
     app: &'a GitApp,
     selection: &Selection,
     width: f32,
