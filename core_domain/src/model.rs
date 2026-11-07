@@ -210,10 +210,11 @@ pub enum DomainError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeTabRetention {
-    /// Keep the commit message, file marks, and selection.
+    /// Keep the commit message, file marks, and selection. The default: returning to a tab
+    /// finds it as it was left.
+    #[default]
     Full,
     /// Keep the commit message and file marks; clear the selection.
-    #[default]
     Partial,
     /// Clear the commit message, file marks, and selection.
     PathOnly,

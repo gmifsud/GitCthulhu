@@ -225,15 +225,15 @@ mod tests {
             assert_eq!(settings.ui_size, AppSettings::DEFAULT_UI_SIZE);
             assert_eq!(settings.agent_token, "");
             assert_eq!(settings.agent_model, AppSettings::DEFAULT_AGENT_MODEL);
-            assert_eq!(settings.worktree_tab_retention, WorktreeTabRetention::Partial);
+            assert_eq!(settings.worktree_tab_retention, WorktreeTabRetention::Full);
         });
     }
 
     #[test]
-    fn worktree_tab_retention_defaults_to_partial_and_round_trips() {
+    fn worktree_tab_retention_defaults_to_full_and_round_trips() {
         with_store("retention", |store| {
             let mut settings = store.load_settings().expect("default");
-            assert_eq!(settings.worktree_tab_retention, WorktreeTabRetention::Partial);
+            assert_eq!(settings.worktree_tab_retention, WorktreeTabRetention::Full);
             for mode in [
                 WorktreeTabRetention::Full,
                 WorktreeTabRetention::PathOnly,

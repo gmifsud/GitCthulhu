@@ -315,6 +315,7 @@ pub(super) fn history_pane<'a>(
 
     container(
         scrollable(commit_rows.padding([2, 8]))
+            .id(scrollable::Id::new(crate::app::HISTORY_SCROLL_ID))
             .width(Length::Fill)
             .on_scroll(|viewport| Message::HistoryScrolled {
                 offset: viewport.absolute_offset().y,

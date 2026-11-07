@@ -62,6 +62,7 @@ pub(super) fn patch_pane<'a>(
     // scrolling scrollable. Long lines clip at the edge of their column.
     scrollable(body)
         .id(scrollable::Id::new(DIFF_SCROLL_ID))
+        .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

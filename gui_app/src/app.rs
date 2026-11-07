@@ -58,6 +58,10 @@ impl std::fmt::Debug for OpenedRepository {
 pub(crate) const HISTORY_SEARCH_ID: &str = "history-search";
 /// Scrollable id of the Diff pane, for jumping between differences.
 pub(crate) const DIFF_SCROLL_ID: &str = "diff-scroll";
+/// Scrollable id of the history list, for putting it back where a tab left it.
+pub(crate) const HISTORY_SCROLL_ID: &str = "history-scroll";
+/// Repositories kept parked (tabs, drafts, selections) after another one is opened.
+const MAX_PARKED_REPOSITORIES: usize = 8;
 /// Text-input id of the stash dialog's message.
 pub(crate) const STASH_MESSAGE_ID: &str = "stash-message";
 /// Text-input id of the branches popup filter.
@@ -196,6 +200,11 @@ pub(crate) struct GitApp {
     /// rows in view are built.
     pub(crate) history_scroll: f32,
     pub(crate) history_viewport: f32,
+    /// Repositories left for another one this run, each with its tabs exactly as they were.
+    /// Opening one again takes it back instead of starting from scratch.
+    parked: Vec<ParkedWorkspace>,
+    /// Scroll the history and diff back to where the active tab left them, after this update.
+    scroll_restore: bool,
     /// The Activity tab lists failures only.
     pub(crate) activity_failures_only: bool,
     /// Last error line of the running terminal command, for its activity entry.
@@ -396,6 +405,8 @@ pub(crate) enum Message {
     ActivityTick,
     /// The history list scrolled: its offset and visible height in px.
     HistoryScrolled { offset: f32, height: f32, content: f32 },
+    /// The Diff pane scrolled to this offset in px.
+    DiffScrolled(f32),
     CloseSettings,
     /// Disk write finished. No UI effect; keeps the task from being discarded silently.
     SettingsSaved,
@@ -579,6 +590,18 @@ pub(crate) enum Message {
     PaletteSubmit,
     /// Click on a palette row: its position among the ranked results.
     PaletteActivate(usize),
+}
+
+/// A repository left for another one, with its tabs exactly as they were. Each tab keeps
+/// its draft, marks, selection, filters, history depth and scroll positions.
+struct ParkedWorkspace {
+    /// [`core_domain::repository_key`] of its first tab's folder.
+    key: String,
+    sessions: Vec<WorktreeSession>,
+    active: usize,
+    worktree_catalogue: Vec<Worktree>,
+    ref_filter: String,
+    history_query: String,
 }
 
 /// The bottom panel's tabs.
@@ -797,6 +820,8 @@ impl GitApp {
             bottom_tab: BottomTab::Terminal,
             history_scroll: 0.0,
             history_viewport: 0.0,
+            parked: Vec::new(),
+            scroll_restore: false,
             activity_failures_only: false,
             shell_last_error: None,
             shell_stopped: false,
@@ -856,6 +881,9 @@ impl GitApp {
         self.active = index;
         self.inspect = None;
         self.reset_transient_ui();
+        self.history_scroll = self.sessions[index].history_offset;
+        self.sessions[index].diff_restore_pending = true;
+        self.scroll_restore = true;
     }
 
     /// Modal prompts and pop-overs are global; clear them so a tab change never carries one across.
@@ -1229,7 +1257,12 @@ impl GitApp {
         };
         let handled = self.handle(message);
         let loaded = self.load_activity_once();
-        Task::batch([saved, handled, loaded])
+        let restored = if std::mem::take(&mut self.scroll_restore) {
+            self.restore_scroll()
+        } else {
+            Task::none()
+        };
+        Task::batch([saved, handled, loaded, restored])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -1782,13 +1815,27 @@ impl GitApp {
                 let list_models = Arc::clone(&self.list_models);
                 let suggest_commit = Arc::clone(&self.suggest_commit);
                 let terminal = self.take_terminal();
+                // This repository's tabs are parked, not dropped, and the one being opened is
+                // taken back if it was parked earlier: A → B → A finds A as it was left.
+                let mut parked = std::mem::take(&mut self.parked);
+                if let Some(current) = self.park_current() {
+                    parked.retain(|entry| entry.key != current.key);
+                    parked.push(current);
+                }
+                let returning = parked
+                    .iter()
+                    .position(|entry| entry.key == core_domain::repository_key(&path))
+                    .map(|at| parked.remove(at));
+                while parked.len() > MAX_PARKED_REPOSITORIES {
+                    parked.remove(0);
+                }
                 // Every repository's log stays: switching back shows it again.
                 let activity = std::mem::take(&mut self.activity);
                 let activity_store = Arc::clone(&self.activity_store);
                 let activity_requested = std::mem::take(&mut self.activity_requested);
                 let bottom_tab = self.bottom_tab;
                 *self = Self::new(
-                    Some(repo),
+                    Some(Arc::clone(&repo)),
                     Some(path),
                     open_repository,
                     open_worktree,
@@ -1804,6 +1851,10 @@ impl GitApp {
                 self.activity_store = activity_store;
                 self.activity_requested = activity_requested;
                 self.bottom_tab = bottom_tab;
+                self.parked = parked;
+                if let Some(workspace) = returning {
+                    return self.take_back(workspace, repo, events);
+                }
                 let key = self.session().key();
                 let loaded = self.update(Message::RepositoryLoaded(key, events));
                 Task::batch([loaded, self.load_catalogue()])
@@ -2184,9 +2235,21 @@ impl GitApp {
                 Task::none()
             }
             Message::ActivitySaved | Message::ActivityTick => Task::none(),
+            Message::DiffScrolled(offset) => {
+                if let Some(session) = self.active_session_mut() {
+                    // A restore in flight owns the offset until it lands.
+                    if !session.diff_restore_pending {
+                        session.diff_offset = offset;
+                    }
+                }
+                Task::none()
+            }
             Message::HistoryScrolled { offset, height, content } => {
                 self.history_scroll = offset;
                 self.history_viewport = height;
+                if let Some(session) = self.active_session_mut() {
+                    session.note_history_scroll(offset);
+                }
                 // Within a few screens of the end: read the next page, once at a time.
                 if content - (offset + height) < height * 2.0 {
                     return self.load_more_history();
@@ -2251,16 +2314,26 @@ impl GitApp {
                     return Task::none();
                 }
                 session.patch_pending = false;
+                let restoring = std::mem::take(&mut session.diff_restore_pending);
                 match result {
                     Ok(patches) => {
                         session.patches = patches;
                         session.patch_error = None;
-                        session.diff_change = None;
+                        if !restoring {
+                            session.diff_change = None;
+                        }
                     }
                     Err(error) => {
                         session.patches.clear();
                         session.patch_error = Some(error_message(&error));
                     }
+                }
+                if restoring {
+                    let offset = session.diff_offset;
+                    return iced::widget::scrollable::scroll_to(
+                        iced::widget::scrollable::Id::new(DIFF_SCROLL_ID),
+                        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
+                    );
                 }
                 Task::none()
             }
@@ -3621,6 +3694,74 @@ impl GitApp {
         }
     }
 
+    /// The open repository's tabs and what goes with them, for [`Self::parked`].
+    fn park_current(&mut self) -> Option<ParkedWorkspace> {
+        let root = self.repository_root()?;
+        Some(ParkedWorkspace {
+            key: core_domain::repository_key(&root),
+            sessions: std::mem::take(&mut self.sessions),
+            active: self.active,
+            worktree_catalogue: std::mem::take(&mut self.worktree_catalogue),
+            ref_filter: std::mem::take(&mut self.ref_filter),
+            history_query: std::mem::take(&mut self.history_query),
+        })
+    }
+
+    /// Put a parked repository back on screen. Its first tab gets the adapter just opened and
+    /// the status just read; every tab is then reloaded, so what was remembered is checked
+    /// against git: a gone commit or file drops its selection, and nothing is checked out.
+    fn take_back(
+        &mut self,
+        workspace: ParkedWorkspace,
+        repo: SharedRepository,
+        events: Vec<ViewEvent>,
+    ) -> Task<Message> {
+        self.sessions = workspace.sessions;
+        self.active = workspace.active.min(self.sessions.len().saturating_sub(1));
+        self.worktree_catalogue = workspace.worktree_catalogue;
+        self.ref_filter = workspace.ref_filter;
+        self.history_query = workspace.history_query;
+        let mut tasks = Vec::new();
+        if let Some(first) = self.sessions.first_mut() {
+            first.adapter = repo;
+            first.state.loading = false;
+            let key = first.key();
+            tasks.push(self.update(Message::RepositoryLoaded(key, events)));
+        }
+        let others: Vec<SessionKey> = self.sessions.iter().skip(1).map(|session| session.key()).collect();
+        for key in others {
+            self.session_mut_for(&key).map(|session| session.state.loading = false);
+            tasks.push(self.begin_refresh_for(&key, false));
+        }
+        if let Some(session) = self.sessions.get_mut(self.active) {
+            session.diff_restore_pending = true;
+            self.history_scroll = session.history_offset;
+        }
+        self.scroll_restore = true;
+        tasks.push(self.load_catalogue());
+        Task::batch(tasks)
+    }
+
+    /// Scroll the history to the active tab's anchor commit and the diff to its offset.
+    fn restore_scroll(&mut self) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        let history = session.anchored_history_offset();
+        let diff = session.diff_offset;
+        self.history_scroll = history;
+        Task::batch([
+            iced::widget::scrollable::scroll_to(
+                iced::widget::scrollable::Id::new(HISTORY_SCROLL_ID),
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: history },
+            ),
+            iced::widget::scrollable::scroll_to(
+                iced::widget::scrollable::Id::new(DIFF_SCROLL_ID),
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: diff },
+            ),
+        ])
+    }
+
     /// Lift the terminal out before the window is rebuilt for another repository.
     fn take_terminal(&mut self) -> KeptTerminal {
         KeptTerminal {
@@ -4829,6 +4970,81 @@ mod tests {
         }
     }
 
+    /// The mandatory return-restores-context scenario: A → B → A brings back the draft,
+    /// selection, marks, graph anchor and diff position, and a late result for a tab of the
+    /// repository that is now parked cannot touch what is on screen.
+    #[test]
+    fn leaving_a_repository_and_coming_back_restores_its_context() {
+        const A: &str = r"D:\Repos\A";
+        const B: &str = r"D:\Repos\B";
+        let changed = || {
+            Arc::new(FakeGitRepository {
+                status_result: Ok(core_domain::RepoStatus {
+                    staged_files: vec![],
+                    unstaged_files: vec!["a.rs".into()],
+                    untracked_files: vec![],
+                    tracking: None,
+                    head_commit_id: None,
+                    kinds: Default::default(),
+                    operation: None,
+                    conflicted_files: vec![],
+                }),
+                ..populated_repo()
+            })
+        };
+        let mut app = GitApp::with_repo(changed());
+        let _ = app.update(Message::RepositoryOpened(A.to_string(), Ok(opened(changed()))));
+        assert_eq!(app.repository_root().as_deref(), Some(A));
+
+        let _ = app.update(Message::Select(Selection::Commit { id: "bbbbbbb2".into() }));
+        let _ = app.update(Message::CommitMessageChanged("half-written message".into()));
+        app.session_mut().marked_files =
+            vec![MarkedFile { path: "a.rs".into(), place: FileDisposition::Unstaged }];
+        let row = crate::commit_graph::ROW_HEIGHT;
+        let _ = app.update(Message::HistoryScrolled { offset: row + 5.0, height: 400.0, content: 100_000.0 });
+        let _ = app.update(Message::DiffScrolled(120.0));
+        let a_id = app.session().id;
+        assert_eq!(app.session().history_anchor.as_deref(), Some("bbbbbbb2"));
+
+        let _ = app.update(Message::RepositoryOpened(B.to_string(), Ok(opened(Arc::new(populated_repo())))));
+        assert_eq!(app.repository_root().as_deref(), Some(B));
+        assert!(app.session().commit_message.is_empty(), "B starts as B");
+        let b_key = app.session().key();
+
+        let _ = app.update(Message::RepositoryOpened(A.to_string(), Ok(opened(changed()))));
+        let session = app.session();
+        assert_eq!(app.repository_root().as_deref(), Some(A));
+        assert_eq!(session.id, a_id, "the same tab came back, not a fresh one");
+        assert_eq!(session.commit_message, "half-written message");
+        assert_eq!(session.selection, Some(Selection::Commit { id: "bbbbbbb2".into() }));
+        assert_eq!(session.marked_files.len(), 1);
+        assert_eq!(session.anchored_history_offset(), row + 5.0);
+        assert_eq!(session.diff_offset, 120.0);
+
+        // A diff for B's tab, finishing after B was left, is dropped.
+        let before = app.session().patches.clone();
+        let _ = app.update(Message::PatchLoaded {
+            session: b_key,
+            generation: 0,
+            result: Ok(vec![core_domain::Patch { path: "stale.rs".into(), hunks: vec![], binary: false }]),
+        });
+        assert_eq!(app.session().patches, before, "a parked repository's result never reaches A");
+    }
+
+    #[test]
+    fn the_history_anchor_follows_its_commit_when_newer_ones_arrive() {
+        let mut app = GitApp::with_repo(Arc::new(populated_repo()));
+        let key = app.active_key();
+        let _ = app.update(Message::RepositoryLoaded(key.clone(), load_repository(&populated_repo())));
+        let row = crate::commit_graph::ROW_HEIGHT;
+        let _ = app.update(Message::HistoryScrolled { offset: row, height: 400.0, content: 100_000.0 });
+        assert_eq!(app.session().history_anchor.as_deref(), Some("bbbbbbb2"));
+        let mut newer = vec![commit("ccccccc3")];
+        newer.extend([commit("aaaaaaa1"), commit("bbbbbbb2")]);
+        let _ = app.update(Message::RepositoryLoaded(key, vec![ViewEvent::LogUpdated(newer)]));
+        assert_eq!(app.session().anchored_history_offset(), 2.0 * row, "one row lower, same commit on top");
+    }
+
     #[test]
     fn repository_loaded_populates_app_state() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(populated_repo()));
@@ -4875,13 +5091,20 @@ mod tests {
 
     #[test]
     fn delayed_results_from_an_obsolete_session_are_dropped_after_reopening_the_same_folder() {
+        // Reopening the repository on screen takes its own tab back (context is kept), so the
+        // obsolete session here is one from a repository left behind and pushed out of the
+        // parked list: its tabs are gone for good, and so is anything they still had running.
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::RepositoryOpened(r"D:\gone".to_string(), Ok(opened(Arc::new(FakeGitRepository::ok())))));
         let obsolete = app.active_key();
-        let _ = app.update(Message::RepositoryOpened(
-            obsolete.path.clone(),
-            Ok(opened(Arc::new(FakeGitRepository::ok()))),
-        ));
-        assert_ne!(app.active_key().id, obsolete.id, "a reopen is a new session");
+        for index in 0..=MAX_PARKED_REPOSITORIES {
+            let _ = app.update(Message::RepositoryOpened(
+                format!(r"D:\other{index}"),
+                Ok(opened(Arc::new(FakeGitRepository::ok()))),
+            ));
+        }
+        let _ = app.update(Message::RepositoryOpened(obsolete.path.clone(), Ok(opened(Arc::new(FakeGitRepository::ok())))));
+        assert_ne!(app.active_key().id, obsolete.id, "evicted from the parked list: a new session");
         assert_eq!(app.active_key().path, obsolete.path);
         app.session_mut().commit_message = "draft".to_string();
         app.session_mut().state.loading = true;
@@ -6587,9 +6810,9 @@ mod tests {
         // The first session keeps its history; activating never reloaded it.
         assert_eq!(app.sessions[0].state.commits.len(), 1);
         assert!(!app.sessions[0].state.loading);
-        // Default Partial retention keeps message and marks, clears the selection.
+        // Default Full retention keeps message, marks and selection: coming back finds it.
         assert_eq!(app.sessions[0].commit_message, "draft");
-        assert!(app.sessions[0].selection.is_none());
+        assert_eq!(app.sessions[0].selection, Some(Selection::Commit { id: "aaaaaaa1".to_string() }));
         // The newly active session was not sent a load job.
         assert!(!app.sessions[1].state.loading);
     }

@@ -137,6 +137,15 @@ pub(crate) struct WorktreeSession {
     pub(crate) history_limit: usize,
     /// A next page of history is being read.
     pub(crate) history_more_pending: bool,
+    /// Where the history list was scrolled to, in px, and the commit at the top of the view
+    /// then. The commit is the anchor: when newer commits arrive above it, returning scrolls
+    /// to it rather than to a pixel offset that now shows something else.
+    pub(crate) history_offset: f32,
+    pub(crate) history_anchor: Option<String>,
+    /// Where the Diff pane was scrolled to, in px.
+    pub(crate) diff_offset: f32,
+    /// Put the Diff pane back at `diff_offset` once the diff loads (after a return to this tab).
+    pub(crate) diff_restore_pending: bool,
 }
 
 impl WorktreeSession {
@@ -170,7 +179,31 @@ impl WorktreeSession {
             selection_anchor: None,
             history_limit: crate::jobs::COMMIT_PAGE_SIZE,
             history_more_pending: false,
+            history_offset: 0.0,
+            history_anchor: None,
+            diff_offset: 0.0,
+            diff_restore_pending: false,
         }
+    }
+
+    /// Remember a history scroll: the offset and the commit then at the top of the view.
+    pub(crate) fn note_history_scroll(&mut self, offset: f32) {
+        self.history_offset = offset.max(0.0);
+        let row = (self.history_offset / crate::commit_graph::ROW_HEIGHT) as usize;
+        self.history_anchor = self.state.dag_nodes.get(row).map(|node| node.commit_id.clone());
+    }
+
+    /// The offset that puts the anchor commit back at the top of the view, keeping how far
+    /// into its row the view was. Falls back to the plain offset when the anchor is gone
+    /// (rewritten history, a reset) or was never set.
+    pub(crate) fn anchored_history_offset(&self) -> f32 {
+        let row_height = crate::commit_graph::ROW_HEIGHT;
+        let into_row = self.history_offset % row_height;
+        self.history_anchor
+            .as_ref()
+            .and_then(|anchor| self.state.dag_nodes.iter().position(|node| &node.commit_id == anchor))
+            .map(|row| row as f32 * row_height + into_row)
+            .unwrap_or(self.history_offset)
     }
 
     /// True when the last read filled the page, so older commits may exist.
