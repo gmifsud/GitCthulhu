@@ -50,7 +50,7 @@ pub(super) fn branch_popup<'a>(app: &'a GitApp, tokens: DesignTokens, reading: R
             container(label(&format!("{title} · {}", branches.len()), tokens.text_muted, reading)).padding([6, 8]),
         );
         for branch in branches.into_iter().take(MAX_ROWS) {
-            list = list.push(branch_row(branch, tokens, reading));
+            list = list.push(branch_row(branch, session.branch_counts(branch), tokens, reading));
         }
     }
 
@@ -120,7 +120,7 @@ fn action_row<'a>(icon: Icon, title: &'static str, message: Message, enabled: bo
         .into()
 }
 
-fn branch_row<'a>(branch: &Branch, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+fn branch_row<'a>(branch: &Branch, counts: (usize, usize), tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let current = branch.is_head && !branch.is_remote;
     let ink = if current { tokens.accent_primary } else { tokens.text_primary };
     let mut line = row![
@@ -130,7 +130,8 @@ fn branch_row<'a>(branch: &Branch, tokens: DesignTokens, reading: Reading) -> El
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    line = line.push(super::explorer::tracking_badges(branch.ahead, branch.behind, tokens, reading));
+    let (ahead, behind) = counts;
+    line = line.push(super::explorer::tracking_badges(ahead, behind, tokens, reading));
     if current {
         line = line.push(glyph(Icon::Check, reading.size, tokens.accent_primary, &reading));
     }

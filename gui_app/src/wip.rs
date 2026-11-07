@@ -22,6 +22,22 @@ pub(crate) fn wip_label(branch: Option<&str>, folder: &str) -> String {
     [WIP_WORD, branch, folder].join(WIP_SEPARATOR)
 }
 
+/// `text` in at most `max` characters, the middle replaced by `…` when it is longer. Both
+/// ends stay: branch and folder names here share long prefixes and differ at the end.
+pub(crate) fn middle_ellipsis(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max || max < 3 {
+        return text.to_string();
+    }
+    let keep = max - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
 /// `label` cut to at most `max` characters by shortening the middle of its longest part
 /// (parts are split on [`WIP_SEPARATOR`]). The start and end of each name stay readable:
 /// worktree and branch names often share a prefix and differ at the end.
@@ -190,6 +206,13 @@ pub(crate) struct WipRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn middle_ellipsis_keeps_both_ends() {
+        assert_eq!(middle_ellipsis("short", 10), "short");
+        assert_eq!(middle_ellipsis("4527-order-receipt-processes", 15), "4527-or…ocesses");
+        assert_eq!(middle_ellipsis("4527-order-receipt-processes", 15).chars().count(), 15);
+    }
 
     #[test]
     fn a_label_that_fits_is_left_alone() {

@@ -14,13 +14,12 @@ pub(crate) fn tracking_summary(status: Option<&RepoStatus>) -> String {
 
 fn describe(tracking: &TrackingStatus) -> String {
     let upstream = &tracking.upstream;
+    // The same ↓ incoming / ↑ outgoing words and order as every badge and button.
     match (tracking.ahead, tracking.behind) {
         (0, 0) => format!("Up to date with {upstream}"),
-        (ahead, 0) => format!("{ahead} ahead of {upstream}"),
-        (0, behind) => format!("{behind} behind {upstream}"),
-        (ahead, behind) => {
-            format!("Diverged from {upstream}, {ahead} ahead, {behind} behind")
-        }
+        (ahead, 0) => format!("↑{ahead} outgoing to {upstream}"),
+        (0, behind) => format!("↓{behind} incoming from {upstream}"),
+        (ahead, behind) => format!("↓{behind} incoming · ↑{ahead} outgoing · {upstream}"),
     }
 }
 
@@ -140,15 +139,15 @@ mod tests {
         );
         assert_eq!(
             tracking_summary(Some(&status(Some(tracked(2, 0))))),
-            "2 ahead of origin/main"
+            "↑2 outgoing to origin/main"
         );
         assert_eq!(
             tracking_summary(Some(&status(Some(tracked(0, 1))))),
-            "1 behind origin/main"
+            "↓1 incoming from origin/main"
         );
         assert_eq!(
             tracking_summary(Some(&status(Some(tracked(1, 3))))),
-            "Diverged from origin/main, 1 ahead, 3 behind"
+            "↓3 incoming · ↑1 outgoing · origin/main"
         );
     }
 

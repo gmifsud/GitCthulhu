@@ -47,7 +47,7 @@ const PILL_GAP: f32 = 3.0;
 /// One pill (the most important ref: HEAD, worktree, local, remote, tag) and a "+N" count.
 const MAX_PILLS_SHOWN: usize = 1;
 /// Widest the pill strip may grow; the subject keeps the rest of the cell.
-const PILL_STRIP_MAX: f32 = 180.0;
+const PILL_STRIP_MAX: f32 = 320.0;
 /// Description column split between the subject and the ref pills.
 const SUBJECT_PORTION: u16 = 3;
 const PILL_PORTION: u16 = 1;
@@ -238,12 +238,21 @@ pub(super) fn history_pane<'a>(
         let age = log_date(now, commit.timestamp);
         // Merge commits recede, as in the JetBrains log: the work is in their parents.
         let merge = commit.parent_ids.len() > 1;
-        let pills = refs_at(
+        let mut pills = refs_at(
             &commit.id,
             &app.session().state.branches,
             &app.session().state.tags,
             &app.worktree_catalogue,
         );
+        // The checked-out branch's counts come from the header's tracking state, like every
+        // other place they are shown.
+        if let Some(head) = session.state.branches.iter().find(|branch| branch.is_head && !branch.is_remote) {
+            let (ahead, behind) = session.branch_counts(head);
+            for pill in pills.iter_mut().filter(|pill| pill.name == head.name) {
+                pill.ahead = ahead;
+                pill.behind = behind;
+            }
+        }
         let mark = node_mark_for(&pills);
         let label = history_row(
             canvas(GraphCell {
@@ -578,7 +587,7 @@ fn wip_description_cell<'a>(
 
 /// Average glyph width of the UI font as a share of its size, for fitting WIP labels.
 /// A slight overestimate, so a fitted label never clips.
-const WIP_CHAR_WIDTH: f32 = 0.6;
+const WIP_CHAR_WIDTH: f32 = 0.55;
 
 /// Rows built either side of the view, so a fast scroll never shows a gap and the few rows
 /// above the commits (headers, summaries, WIP) need not be measured exactly.
@@ -705,29 +714,18 @@ fn ref_pill<'a>(pill: &RefPill, tokens: DesignTokens, reading: Reading) -> Eleme
     ]
     .spacing(3)
     .align_y(Alignment::Center);
-    if pill.ahead > 0 {
-        let ahead = pill.ahead;
-        body = body.push(
-            text(format!("+{ahead}"))
-                .font(reading.font)
-                .size((reading.size - 4.0).max(9.0))
-                .wrapping(Wrapping::None)
-                .style(move |_| text::Style {
-                    color: Some(tokens.added),
-                }),
-        );
-    }
-    if pill.behind > 0 {
-        let behind = pill.behind;
-        body = body.push(
-            text(format!("-{behind}"))
-                .font(reading.font)
-                .size((reading.size - 4.0).max(9.0))
-                .wrapping(Wrapping::None)
-                .style(move |_| text::Style {
-                    color: Some(tokens.removed),
-                }),
-        );
+    // The same ↓ incoming / ↑ outgoing badge as everywhere else. These used to read +n / -n
+    // in the diff's green and red, which says lines, not commits.
+    for (count, arrow, colour) in [(pill.behind, '↓', tokens.incoming), (pill.ahead, '↑', tokens.outgoing)] {
+        if count > 0 {
+            body = body.push(
+                text(format!("{arrow}{count}"))
+                    .font(reading.mono)
+                    .size((reading.size - 4.0).max(9.0))
+                    .wrapping(Wrapping::None)
+                    .style(move |_| text::Style { color: Some(colour) }),
+            );
+        }
     }
     container(body)
         .height(Length::Fixed(PILL_HEIGHT))

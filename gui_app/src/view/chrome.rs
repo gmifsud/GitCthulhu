@@ -48,6 +48,25 @@ pub(super) fn one_line<'a>(
         .into()
 }
 
+/// Average glyph width of the UI font as a share of its size, for fitting names to a width.
+/// Slightly generous, so a fitted name never clips.
+const FIT_CHAR_WIDTH: f32 = 0.55;
+
+/// One line of text that fits the width it is given: shortened in the middle only when it
+/// would not fit, so the end of a long branch or folder name is never what gets cut.
+pub(super) fn fitted_text<'a>(value: String, font: Font, size: f32, colour: Color) -> Element<'a, Message> {
+    iced::widget::responsive(move |space| {
+        let max = (space.width / (size * FIT_CHAR_WIDTH)).max(4.0) as usize;
+        text(crate::wip::middle_ellipsis(&value, max))
+            .font(font)
+            .size(size)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style { color: Some(colour) })
+            .into()
+    })
+    .into()
+}
+
 pub(super) fn reading(settings: &AppSettings) -> Reading {
     let family = font_family(&settings.ui_font);
     let font = Font {

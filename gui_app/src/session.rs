@@ -186,6 +186,18 @@ impl WorktreeSession {
         }
     }
 
+    /// Outgoing and incoming counts for `branch`. The checked-out branch reads the same
+    /// tracking state as the header (`git rev-list @{upstream}...HEAD`), so the two can never
+    /// disagree; other branches read git's `for-each-ref` tracking.
+    pub(crate) fn branch_counts(&self, branch: &core_domain::Branch) -> (usize, usize) {
+        if branch.is_head && !branch.is_remote {
+            if let Some(tracking) = self.state.current_status.as_ref().and_then(|status| status.tracking.as_ref()) {
+                return (tracking.ahead, tracking.behind);
+            }
+        }
+        (branch.ahead, branch.behind)
+    }
+
     /// Remember a history scroll: the offset and the commit then at the top of the view.
     pub(crate) fn note_history_scroll(&mut self, offset: f32) {
         self.history_offset = offset.max(0.0);

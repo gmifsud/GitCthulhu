@@ -28,7 +28,7 @@ pub(crate) struct RefPill {
 }
 
 /// Long enough for typical `feature/…` names; still caps pathological refs.
-const PILL_LABEL_MAX: usize = 48;
+const PILL_LABEL_MAX: usize = 44;
 
 /// Icon shown inside the pill for the ref kind.
 pub(crate) fn pill_mark(kind: RefPillKind) -> Icon {
@@ -143,12 +143,7 @@ pub(crate) fn primary_node_kind(pills: &[RefPill]) -> Option<RefPillKind> {
 }
 
 fn shorten_ref(name: &str, max: usize) -> String {
-    let count = name.chars().count();
-    if count <= max {
-        return name.to_string();
-    }
-    let keep = max.saturating_sub(1);
-    format!("{}…", name.chars().take(keep).collect::<String>())
+    crate::wip::middle_ellipsis(name, max)
 }
 
 #[cfg(test)]
@@ -251,7 +246,9 @@ mod tests {
         let long = "feature/very-long-branch-name-that-overflows-the-pill-gutter-limit";
         let pills = refs_at("id", &[branch(long, "id", false, false)], &[], &[]);
         assert_eq!(pills[0].label.chars().count(), PILL_LABEL_MAX);
-        assert!(pills[0].label.ends_with('…'));
+        assert!(pills[0].label.contains('…'), "shortened in the middle");
+        assert!(pills[0].label.starts_with("feature/"), "the start stays");
+        assert!(pills[0].label.ends_with("gutter-limit"), "and so does the end");
         assert_eq!(pills[0].name, long, "the full name stays for the hover text");
     }
 }

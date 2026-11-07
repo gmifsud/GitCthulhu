@@ -270,18 +270,14 @@ fn branch_tree_row<'a>(
             let mark = if remote { Icon::Cloud } else if in_worktree { Icon::Worktree } else { Icon::Branch };
             // The name takes the spare width and clips, so a long name never squeezes the
             // ahead/behind badge onto a second line.
-            let name_cell = one_line(
-                text(label.to_string())
-                    .font(reading.font)
-                    .size(reading.size)
-                    .wrapping(Wrapping::None)
-                    .style(move |_| iced::widget::text::Style { color: Some(ink) }),
-                reading.size,
-                Length::Fill,
-            );
+            let name_cell = container(super::chrome::fitted_text(label.to_string(), reading.font, reading.size, ink))
+                .width(Length::Fill)
+                .height(Length::Fixed(super::chrome::one_line_height(reading.size)))
+                .align_y(Alignment::Center);
             let mut content = row![name_cell].spacing(6).align_y(Alignment::Center);
             if let Some(branch) = branch {
-                content = content.push(tracking_badges(branch.ahead, branch.behind, tokens, reading));
+                let (ahead, behind) = session.branch_counts(branch);
+                content = content.push(tracking_badges(ahead, behind, tokens, reading));
             }
             let tip = branch.map(|branch| branch.tip.clone()).unwrap_or_default();
             let target = if remote {
@@ -377,19 +373,25 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
     let inspected = app.inspected_path().is_some_and(|path| same_path(path, &entry.path));
     let branch = if entry.branch.is_empty() { DETACHED.to_string() } else { entry.branch.clone() };
     let (ahead, behind) = tracking_for_worktree(app, entry);
-    // The names share the spare width and clip; the tags and counts after them keep their
-    // size. Without that, long names squeezed the counts to nothing and they wrapped one
-    // character per line.
-    let names = row![
+    // Two lines: the folder, then its branch, each with the full row width and shortened in
+    // the middle only when it truly does not fit. One line held both and cut them off.
+    let line_height = super::chrome::one_line_height(reading.size);
+    let small = (reading.size - 1.0).max(10.0);
+    let folder = container(super::chrome::fitted_text(
         // Two worktrees in folders of the same name read apart (`a/wt`, `b/wt`).
-        label_text(&app.worktree_folder(&entry.path), if open { tokens.text_primary } else { tokens.text_secondary }, reading),
-        label_text(&branch, tokens.accent_primary, reading),
-    ]
-    .spacing(6)
+        app.worktree_folder(&entry.path),
+        reading.font,
+        reading.size,
+        if open { tokens.text_primary } else { tokens.text_secondary },
+    ))
+    .width(Length::Fill)
+    .height(Length::Fixed(line_height))
     .align_y(Alignment::Center);
-    let mut content = row![container(names).width(Length::Fill).clip(true)]
-        .spacing(6)
+    let branch_line = container(super::chrome::fitted_text(branch.clone(), reading.font, small, tokens.accent_primary))
+        .width(Length::Fill)
+        .height(Length::Fixed(super::chrome::one_line_height(small)))
         .align_y(Alignment::Center);
+    let mut content = row![folder].spacing(6).align_y(Alignment::Center);
     if entry.is_main {
         content = content.push(wt_tag("main", tokens, reading));
     }
@@ -397,6 +399,7 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
         content = content.push(wt_tag("locked", tokens, reading));
     }
     content = content.push(tracking_badges(ahead, behind, tokens, reading));
+    let content = column![content, branch_line].spacing(0);
     tree_row(
         1,
         None,
@@ -457,7 +460,7 @@ fn tracking_for_worktree(app: &GitApp, entry: &Worktree) -> (usize, usize) {
             .iter()
             .find(|b| b.is_head && !b.is_remote)
         {
-            return (branch.ahead, branch.behind);
+            return session.branch_counts(branch);
         }
     }
     if entry.branch.is_empty() {
@@ -470,7 +473,7 @@ fn tracking_for_worktree(app: &GitApp, entry: &Worktree) -> (usize, usize) {
             .iter()
             .find(|b| !b.is_remote && b.name == entry.branch)
         {
-            return (branch.ahead, branch.behind);
+            return session.branch_counts(branch);
         }
     }
     (0, 0)

@@ -297,7 +297,7 @@ pub(super) fn upstream_name(status: Option<&RepoStatus>) -> String {
             (0, 0) => tracking.upstream.clone(),
             (ahead, 0) => format!("{} ↑{ahead}", tracking.upstream),
             (0, behind) => format!("{} ↓{behind}", tracking.upstream),
-            (ahead, behind) => format!("{} ↑{ahead} ↓{behind}", tracking.upstream),
+            (ahead, behind) => format!("{} ↓{behind} ↑{ahead}", tracking.upstream),
         },
     }
 }

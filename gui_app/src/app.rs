@@ -5032,6 +5032,28 @@ mod tests {
     }
 
     #[test]
+    fn the_checked_out_branch_shows_the_headers_counts_everywhere() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let mut main = branch("main", true);
+        (main.ahead, main.behind) = (9, 9);
+        let mut other = branch("feature/x", false);
+        (other.ahead, other.behind) = (4, 0);
+        app.session_mut().state.branches = vec![main.clone(), other.clone()];
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec![],
+            untracked_files: vec![],
+            tracking: Some(core_domain::TrackingStatus { upstream: "origin/main".into(), ahead: 1, behind: 3 }),
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        });
+        assert_eq!(app.session().branch_counts(&main), (1, 3), "the header's numbers, not a second read");
+        assert_eq!(app.session().branch_counts(&other), (4, 0), "other branches keep their own");
+    }
+
+    #[test]
     fn the_history_anchor_follows_its_commit_when_newer_ones_arrive() {
         let mut app = GitApp::with_repo(Arc::new(populated_repo()));
         let key = app.active_key();
