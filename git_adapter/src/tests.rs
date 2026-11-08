@@ -320,6 +320,113 @@ fn log_keeps_the_newest_commits_across_local_branches() {
 }
 
 #[test]
+fn log_cursor_continues_past_the_loaded_commits_in_pages_and_then_ends() {
+    let fixture = TestRepo::new();
+    for n in 0..7 {
+        fixture.commit(&format!("commit {n}"), &[("a.txt", &format!("{n}\n"))], n * 60);
+    }
+    let adapter = fixture.adapter();
+    let first_page = adapter.log(Some(2)).expect("first page");
+    let loaded: Vec<String> = first_page.iter().map(|commit| commit.id.clone()).collect();
+    let messages = |page: &[Commit]| page.iter().map(|commit| commit.message.clone()).collect::<Vec<_>>();
+
+    let mut cursor = adapter.log_cursor(loaded).expect("cursor");
+    assert_eq!(messages(&cursor.next_page(3).expect("page")), ["commit 4", "commit 3", "commit 2"]);
+    // Short: the start of history. Later pages are empty and ask git for nothing.
+    assert_eq!(messages(&cursor.next_page(3).expect("last page")), ["commit 1", "commit 0"]);
+    assert_eq!(cursor.next_page(3), Ok(vec![]));
+}
+
+#[test]
+fn log_cursor_of_an_unborn_repository_is_empty() {
+    let fixture = TestRepo::new();
+    let mut cursor = fixture.adapter().log_cursor(vec![]).expect("cursor");
+    assert_eq!(cursor.next_page(5), Ok(vec![]));
+}
+
+#[test]
+fn log_cursor_walks_every_local_branch_like_log_does() {
+    let fixture = TestRepo::new();
+    let base = fixture.commit("base", &[("a.txt", "a\n")], 0);
+    fixture.commit("main tip", &[("a.txt", "main\n")], 60);
+    fixture.commit_to("refs/heads/feature", "newest feature", &[("b.txt", "b\n")], base, 120);
+    let adapter = fixture.adapter();
+
+    let mut cursor = adapter.log_cursor(vec![]).expect("cursor");
+    let page = cursor.next_page(10).expect("page");
+
+    assert_eq!(page, adapter.log(None).expect("log"));
+}
+
+/// What streaming the first 5,000 commits costs git, chunk by chunk, re-reading from the top
+/// (how it was) against one walk continued (how it is), on a real repository:
+///
+/// ```text
+/// GITCTHULHU_BIG_REPO=D:/Repos/Backend cargo test --release -p git_adapter stream_timing -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a timing report on a real repository named by GITCTHULHU_BIG_REPO"]
+fn stream_timing_re_read_from_the_top_versus_one_walk() {
+    use std::time::{Duration, Instant};
+    const FIRST: usize = 100;
+    const CHUNK: usize = 300;
+    const CAP: usize = 5_000;
+    let Some(path) = std::env::var_os("GITCTHULHU_BIG_REPO") else {
+        eprintln!("GITCTHULHU_BIG_REPO is not set; nothing measured");
+        return;
+    };
+    let adapter = GitoxideAdapter::new(path.to_str().expect("utf-8 path"));
+    let first = adapter.log(Some(FIRST)).expect("first page");
+
+    let mut limit = FIRST;
+    let mut re_read = Duration::ZERO;
+    let mut chunks = 0;
+    let mut worst = Duration::ZERO;
+    while limit < CAP {
+        limit += CHUNK;
+        let started = Instant::now();
+        let page = adapter.log(Some(limit)).expect("re-read");
+        let cost = started.elapsed();
+        re_read += cost;
+        worst = worst.max(cost);
+        chunks += 1;
+        if page.len() < limit {
+            break;
+        }
+    }
+
+    let loaded: Vec<String> = first.iter().map(|commit| commit.id.clone()).collect();
+    let started = Instant::now();
+    let mut cursor = adapter.log_cursor(loaded).expect("cursor");
+    let mut one_walk = Duration::ZERO;
+    let mut worst_page = Duration::ZERO;
+    for _ in 0..chunks {
+        let started = Instant::now();
+        let page = cursor.next_page(CHUNK).expect("page");
+        let cost = started.elapsed();
+        one_walk += cost;
+        worst_page = worst_page.max(cost);
+        if page.len() < CHUNK {
+            break;
+        }
+    }
+    let one_walk_total = started.elapsed();
+
+    eprintln!("stream_timing: {chunks} chunks of {CHUNK} after a first page of {FIRST}");
+    eprintln!(
+        "  re-read from the top: {:.0} ms in all, worst chunk {:.0} ms",
+        re_read.as_secs_f64() * 1_000.0,
+        worst.as_secs_f64() * 1_000.0
+    );
+    eprintln!(
+        "  one walk continued:   {:.0} ms in all ({:.0} ms with the walk's start), worst page {:.0} ms",
+        one_walk.as_secs_f64() * 1_000.0,
+        one_walk_total.as_secs_f64() * 1_000.0,
+        worst_page.as_secs_f64() * 1_000.0
+    );
+}
+
+#[test]
 fn log_ignores_commits_that_are_only_on_a_remote() {
     let fixture = TestRepo::new();
     let base = fixture.commit("base", &[("a.txt", "a\n")], 0);

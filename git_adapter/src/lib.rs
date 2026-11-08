@@ -14,8 +14,8 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, Patch,
-    RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
+    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LogCursor,
+    Patch, RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
 use gix::bstr::BString;
@@ -96,19 +96,129 @@ fn walk_commits(
         .map_err(unknown)?;
 
     walk.take(limit)
-        .map(|info| {
-            let info = info.map_err(unknown)?;
-            let commit = info.object().map_err(unknown)?;
-            let author = commit.author().map_err(unknown)?;
-            Ok(Commit {
-                id: info.id.to_string(),
-                parent_ids: info.parent_ids.iter().map(|id| id.to_string()).collect(),
-                author: author.name.to_string(),
-                message: commit.message().map_err(unknown)?.summary().to_string(),
-                timestamp: commit.time().map_err(unknown)?.seconds,
-            })
-        })
+        .map(|info| commit_from_info(info.map_err(unknown)?))
         .collect()
+}
+
+/// The [`Commit`] a walk step points at.
+fn commit_from_info(info: gix::revision::walk::Info<'_>) -> Result<Commit, DomainError> {
+    let commit = info.object().map_err(unknown)?;
+    let author = commit.author().map_err(unknown)?;
+    Ok(Commit {
+        id: info.id.to_string(),
+        parent_ids: info.parent_ids.iter().map(|id| id.to_string()).collect(),
+        author: author.name.to_string(),
+        message: commit.message().map_err(unknown)?.summary().to_string(),
+        timestamp: commit.time().map_err(unknown)?.seconds,
+    })
+}
+
+/// A [`LogCursor`] whose walk lives on its own thread, which owns the repository handle and
+/// the walk (the walk borrows the handle, so they cannot be kept across calls otherwise).
+/// A page is asked for over `asks` and comes back over `pages`; dropping the cursor ends the
+/// thread at its next ask.
+struct WalkCursor {
+    asks: std::sync::mpsc::Sender<usize>,
+    pages: std::sync::mpsc::Receiver<Result<Vec<Commit>, DomainError>>,
+    ended: bool,
+}
+
+impl LogCursor for WalkCursor {
+    fn next_page(&mut self, count: usize) -> Result<Vec<Commit>, DomainError> {
+        if self.ended || count == 0 {
+            return Ok(vec![]);
+        }
+        if self.asks.send(count).is_err() {
+            // The walk thread is gone: it may have left why.
+            self.ended = true;
+            return match self.pages.try_recv() {
+                Ok(Err(error)) => Err(error),
+                _ => Ok(vec![]),
+            };
+        }
+        let page = self
+            .pages
+            .recv()
+            .unwrap_or_else(|_| Err(unknown("the history walk stopped unexpectedly")));
+        if page.as_ref().map_or(true, |page| page.len() < count) {
+            self.ended = true;
+        }
+        page
+    }
+}
+
+/// The walk thread: answers each ask with the next `count` commits not in `already_loaded`,
+/// and ends after an error, a short page, or the cursor going away.
+fn walk_pages(
+    path: &str,
+    already_loaded: Vec<String>,
+    asks: &std::sync::mpsc::Receiver<usize>,
+    pages: &std::sync::mpsc::SyncSender<Result<Vec<Commit>, DomainError>>,
+) {
+    let loaded: std::collections::HashSet<gix::ObjectId> = already_loaded
+        .iter()
+        .filter_map(|id| gix::ObjectId::from_hex(id.as_bytes()).ok())
+        .collect();
+    let repo = match gix::open(path) {
+        Ok(repo) => repo,
+        Err(error) => {
+            let _ = pages.send(Err(unknown(error)));
+            return;
+        }
+    };
+    let tips = match local_history_tips(&repo) {
+        Ok(tips) => tips,
+        Err(error) => {
+            let _ = pages.send(Err(error));
+            return;
+        }
+    };
+    if tips.is_empty() {
+        if asks.recv().is_ok() {
+            let _ = pages.send(Ok(vec![]));
+        }
+        return;
+    }
+    let mut walk = match repo
+        .rev_walk(tips)
+        .sorting(gix::traverse::commit::simple::Sorting::ByCommitTimeNewestFirst)
+        .all()
+    {
+        Ok(walk) => walk,
+        Err(error) => {
+            let _ = pages.send(Err(unknown(error)));
+            return;
+        }
+    };
+    while let Ok(count) = asks.recv() {
+        let mut page = Vec::with_capacity(count);
+        let mut outcome = Ok(());
+        while page.len() < count {
+            match walk.next() {
+                None => break,
+                Some(Err(error)) => {
+                    outcome = Err(unknown(error));
+                    break;
+                }
+                Some(Ok(info)) => {
+                    if loaded.contains(&info.id) {
+                        continue;
+                    }
+                    match commit_from_info(info) {
+                        Ok(commit) => page.push(commit),
+                        Err(error) => {
+                            outcome = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let stop = outcome.is_err() || page.len() < count;
+        if pages.send(outcome.map(|()| page)).is_err() || stop {
+            return;
+        }
+    }
 }
 
 /// Tips of every local branch, plus `HEAD` when it points at a commit.
@@ -223,6 +333,19 @@ impl GitRepository for GitoxideAdapter {
         }
 
         Ok(commits)
+    }
+
+    fn log_cursor(&self, already_loaded: Vec<String>) -> Result<Box<dyn LogCursor>, DomainError> {
+        // A repository that cannot be opened fails here, on the caller's thread.
+        self.open_repo()?;
+        let path = self.repo_path.clone();
+        let (asks, ask_receiver) = std::sync::mpsc::channel::<usize>();
+        let (page_sender, pages) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("history-walk".to_string())
+            .spawn(move || walk_pages(&path, already_loaded, &ask_receiver, &page_sender))
+            .map_err(unknown)?;
+        Ok(Box::new(WalkCursor { asks, pages, ended: false }))
     }
 
     fn branches(&self) -> Result<Vec<Branch>, DomainError> {

@@ -3,11 +3,43 @@ use super::{
     RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
+/// Older commits one page at a time, from a walk that continues where the last page ended.
+/// Made by [`GitRepository::log_cursor`]. A page shorter than asked means the history has
+/// ended; every page after that is empty.
+pub trait LogCursor: Send {
+    fn next_page(&mut self, count: usize) -> Result<Vec<Commit>, DomainError>;
+}
+
+/// The whole remaining log, served in pages. What [`GitRepository::log_cursor`] gives when an
+/// adapter has no walk to keep open.
+struct ListCursor {
+    rest: std::collections::VecDeque<Commit>,
+}
+
+impl LogCursor for ListCursor {
+    fn next_page(&mut self, count: usize) -> Result<Vec<Commit>, DomainError> {
+        let taken = count.min(self.rest.len());
+        Ok(self.rest.drain(..taken).collect())
+    }
+}
+
 /// The GitRepository port.
 /// Adapters such as `git_adapter` implement this trait.
 pub trait GitRepository {
     fn status(&self) -> Result<RepoStatus, DomainError>;
     fn log(&self, max_count: Option<usize>) -> Result<Vec<Commit>, DomainError>;
+    /// The same history as [`Self::log`], newest first, without the commits in
+    /// `already_loaded`, read in pages that continue one walk: nothing is read twice.
+    /// Adapters that cannot keep a walk open read the log once and page through that.
+    fn log_cursor(&self, already_loaded: Vec<String>) -> Result<Box<dyn LogCursor>, DomainError> {
+        let loaded: std::collections::HashSet<String> = already_loaded.into_iter().collect();
+        let rest = self
+            .log(None)?
+            .into_iter()
+            .filter(|commit| !loaded.contains(&commit.id))
+            .collect();
+        Ok(Box::new(ListCursor { rest }))
+    }
     fn branches(&self) -> Result<Vec<Branch>, DomainError>;
     /// Tags that peel to a commit, sorted by name. The section is empty when there are none.
     fn tags(&self) -> Result<Vec<Tag>, DomainError>;

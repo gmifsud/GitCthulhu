@@ -1275,7 +1275,9 @@ impl GitApp {
                     return Task::none();
                 };
                 if events.iter().any(|event| matches!(event, ViewEvent::LogUpdated(_))) {
+                    // The log was read again from the top: older pages continue from it.
                     session.history_more_pending = false;
+                    session.restart_history();
                 }
                 for event in events {
                     if let ViewEvent::ErrorOccurred(error) = &event {
@@ -2267,14 +2269,19 @@ impl GitApp {
                 };
                 session.history_more_pending = false;
                 match result {
-                    Ok(commits) => {
+                    Ok(page) => {
+                        if crate::perf::enabled() {
+                            let waited = session.history_asked_at.take().map_or(0.0, |asked| asked.elapsed().as_secs_f64() * 1_000.0);
+                            eprintln!("perf history-page commits={} loaded={} waited={waited:.1}ms", page.len(), session.state.commits.len());
+                        }
                         // Only the log changes: a git action running in this tab keeps its
                         // busy state (applying the log alone used to clear it).
                         let busy = session.state.loading;
-                        session.state.apply_event(ViewEvent::LogUpdated(commits));
-                        session.state.loading = busy;
-                        session.history_generation = session.history_generation.wrapping_add(1);
-                        session.reconcile_selection();
+                        if session.append_history(page) {
+                            session.state.loading = busy;
+                            session.history_generation = session.history_generation.wrapping_add(1);
+                            session.reconcile_selection();
+                        }
                         let urgent = std::mem::take(&mut session.history_urgent);
                         self.stream_history(&key, urgent)
                     }
@@ -3671,14 +3678,20 @@ impl GitApp {
         if session.history_limit >= STREAM_CAP && !asked {
             return Task::none();
         }
-        session.history_limit += if asked { STREAM_CHUNK_URGENT } else { STREAM_CHUNK };
+        let count = if asked { STREAM_CHUNK_URGENT } else { STREAM_CHUNK };
+        session.history_limit += count;
         session.history_more_pending = true;
+        session.history_asked_at = Some(std::time::Instant::now());
         let repo = session.adapter.clone();
         let key = session.key();
-        let limit = session.history_limit;
-        Task::perform(crate::jobs::history_in_background_up_to(repo, limit), move |result| {
-            Message::HistoryPageLoaded(key.clone(), result)
-        })
+        let cursor = Arc::clone(&session.history_cursor);
+        // A new walk must know what is loaded; a walk under way continues on its own.
+        let fresh = cursor.lock().map(|slot| slot.is_none()).unwrap_or(true);
+        let already_loaded = if fresh { session.loaded_commit_ids() } else { Vec::new() };
+        Task::perform(
+            crate::jobs::history_page_in_background(repo, cursor, already_loaded, count),
+            move |result| Message::HistoryPageLoaded(key.clone(), result),
+        )
     }
 
     /// Start the shell if there is none, then give it the keyboard.
@@ -8087,6 +8100,35 @@ mod tests {
         let _ = app.update(Message::HistoryPageLoaded(key, Ok(commits(COMMIT_PAGE_SIZE + STREAM_CHUNK + 7))));
         assert!(!app.session().history_more_pending);
         assert_eq!(app.session().history_limit, COMMIT_PAGE_SIZE + STREAM_CHUNK * 2);
+    }
+
+    #[test]
+    fn a_history_page_is_appended_once_and_a_reload_restarts_the_walk() {
+        use crate::jobs::COMMIT_PAGE_SIZE;
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let key = app.active_key();
+        let _ = app.update(Message::RepositoryLoaded(key.clone(), vec![ViewEvent::LogUpdated(commits(COMMIT_PAGE_SIZE))]));
+        let walk = Arc::clone(&app.session().history_cursor);
+
+        // A page overlapping what is loaded adds only its new commits, after the loaded ones.
+        let mut page = commits(COMMIT_PAGE_SIZE + 5);
+        page.drain(..COMMIT_PAGE_SIZE - 2);
+        let generation = app.session().history_generation;
+        let _ = app.update(Message::HistoryPageLoaded(key.clone(), Ok(page)));
+        let loaded = &app.session().state.commits;
+        assert_eq!(loaded.len(), COMMIT_PAGE_SIZE + 5);
+        assert_eq!(loaded.last().map(|commit| commit.id.as_str()), Some(format!("{:040x}", COMMIT_PAGE_SIZE + 4).as_str()));
+        assert!(app.session().history_generation > generation);
+        assert!(Arc::ptr_eq(&walk, &app.session().history_cursor), "the same walk goes on");
+
+        // A page with nothing new changes nothing.
+        let generation = app.session().history_generation;
+        let _ = app.update(Message::HistoryPageLoaded(key.clone(), Ok(commits(3))));
+        assert_eq!(app.session().history_generation, generation);
+
+        // Reloading the log from the top forgets the walk: the next page starts a new one.
+        let _ = app.update(Message::RepositoryLoaded(key, vec![ViewEvent::LogUpdated(commits(COMMIT_PAGE_SIZE))]));
+        assert!(!Arc::ptr_eq(&walk, &app.session().history_cursor));
     }
 
     #[test]

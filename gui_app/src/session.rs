@@ -156,6 +156,11 @@ pub(crate) struct WorktreeSession {
     pub(crate) history_limit: usize,
     /// A next page of history is being read.
     pub(crate) history_more_pending: bool,
+    /// The walk older pages come from. Replaced by [`Self::restart_history`] when the log is
+    /// reloaded from the top, so the next page continues from what is then loaded.
+    pub(crate) history_cursor: crate::jobs::HistoryCursor,
+    /// When the page under way was asked for, for the perf trace.
+    pub(crate) history_asked_at: Option<std::time::Instant>,
     /// The user reached the end of what has arrived while more was on its way: read bigger
     /// chunks until the history catches up.
     pub(crate) history_urgent: bool,
@@ -211,6 +216,8 @@ impl WorktreeSession {
             selection_anchor: None,
             history_limit: crate::jobs::COMMIT_PAGE_SIZE,
             history_more_pending: false,
+            history_cursor: crate::jobs::HistoryCursor::default(),
+            history_asked_at: None,
             history_urgent: false,
             history_generation: 0,
             history_index: std::cell::RefCell::new(None),
@@ -274,6 +281,32 @@ impl WorktreeSession {
     /// True when the last read filled the page, so older commits may exist.
     pub(crate) fn history_may_have_more(&self) -> bool {
         self.state.commits.len() >= self.history_limit
+    }
+
+    /// Forget the walk. The log was reloaded from the top, so the next page starts a new walk
+    /// that leaves out everything loaded by then. A page still on its way from the old walk
+    /// is harmless: what it brings is appended once and never twice.
+    pub(crate) fn restart_history(&mut self) {
+        self.history_cursor = crate::jobs::HistoryCursor::default();
+    }
+
+    /// Ids of every loaded commit, for a new walk to leave out.
+    pub(crate) fn loaded_commit_ids(&self) -> Vec<String> {
+        self.state.commits.iter().map(|commit| commit.id.clone()).collect()
+    }
+
+    /// Add the commits of `page` that are not loaded yet, in their order, after the loaded
+    /// ones. True when something was added (the graph and the row index then rebuild).
+    pub(crate) fn append_history(&mut self, page: Vec<core_domain::Commit>) -> bool {
+        let known: HashSet<&str> = self.state.commits.iter().map(|commit| commit.id.as_str()).collect();
+        let fresh: Vec<core_domain::Commit> = page.into_iter().filter(|commit| !known.contains(commit.id.as_str())).collect();
+        if fresh.is_empty() {
+            return false;
+        }
+        let mut all = std::mem::take(&mut self.state.commits);
+        all.extend(fresh);
+        self.state.apply_event(ViewEvent::LogUpdated(all));
+        true
     }
 
     /// Identity plus path, for a job this session starts.

@@ -445,13 +445,29 @@ pub(crate) fn load_repository_in_background(
     )
 }
 
-/// The newest `limit` commits only: the next page of history, without re-reading status.
-pub(crate) fn history_in_background_up_to(
+/// The walk a tab reads older history through, shared with the job advancing it. Empty until
+/// the first page is asked for; a tab replaces it when its log is reloaded from the top.
+pub(crate) type HistoryCursor = Arc<std::sync::Mutex<Option<Box<dyn core_domain::LogCursor>>>>;
+
+/// The next `count` older commits of a tab's history, off-thread. The first page makes the
+/// cursor, leaving out `already_loaded`; every later page continues the same walk, so a chunk
+/// never re-reads what is on screen.
+pub(crate) fn history_page_in_background(
     repo: SharedRepository,
-    limit: usize,
+    cursor: HistoryCursor,
+    already_loaded: Vec<String>,
+    count: usize,
 ) -> impl Future<Output = Result<Vec<core_domain::Commit>, DomainError>> {
     in_background(
-        move || repo.log(Some(limit)),
+        move || {
+            let mut slot = cursor
+                .lock()
+                .map_err(|_| DomainError::Unknown("the history cursor was poisoned".to_string()))?;
+            if slot.is_none() {
+                *slot = Some(repo.log_cursor(already_loaded)?);
+            }
+            slot.as_mut().expect("set above").next_page(count)
+        },
         || Err(DomainError::Unknown("history read was interrupted".to_string())),
     )
 }
