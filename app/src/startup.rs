@@ -20,7 +20,8 @@ pub fn launch_path(
     }
 }
 
-/// Store `path` as the last repository and move it to the front of the recent list.
+/// Store `path` as the last repository and add it to the end of the recent list when it is
+/// not there yet. A listed repository keeps its place.
 /// A failed load or save leaves the file unchanged apart from what the store itself
 /// already wrote, and never blocks opening. Nothing is written when neither changed.
 pub fn remember(store: &impl ConfigStore, path: &str) {
@@ -196,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_moves_the_path_to_the_front_of_the_recent_list() {
+    fn remember_adds_a_new_path_at_the_end_of_the_recent_list() {
         let store = MemoryStore::holding(settings_with(Some(r"D:\old")));
         remember(&store, r"D:\repo");
         let saved = store
@@ -207,7 +208,26 @@ mod tests {
             .expect("one save");
         assert_eq!(
             saved.recent_repositories,
-            vec![r"D:\repo".to_string(), r"D:\old".to_string()]
+            vec![r"D:\old".to_string(), r"D:\repo".to_string()]
+        );
+    }
+
+    #[test]
+    fn remember_keeps_a_listed_path_where_it_is() {
+        let mut settings = settings_with(Some(r"D:\b"));
+        settings.recent_repositories = vec![r"D:\a".to_string(), r"D:\b".to_string()];
+        let store = MemoryStore::holding(settings);
+        remember(&store, r"D:\a");
+        let saved = store
+            .saved
+            .lock()
+            .expect("saved settings")
+            .clone()
+            .expect("the last path changed, so one save");
+        assert_eq!(saved.last_repo_path.as_deref(), Some(r"D:\a"));
+        assert_eq!(
+            saved.recent_repositories,
+            vec![r"D:\a".to_string(), r"D:\b".to_string()]
         );
     }
 

@@ -42,6 +42,17 @@ pub(crate) struct FocusRestore {
     pub hunk_mode: HunkMode,
 }
 
+/// A repository held by its tile in the Repositories column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepositoryDrag {
+    /// The repository being moved.
+    pub(crate) path: String,
+    /// The row under the pointer: where the repository lands when let go.
+    pub(crate) over: Option<String>,
+    /// The pointer reached another row or left the list. Let go without that, it was a click.
+    pub(crate) moved: bool,
+}
+
 /// Repository handed from a background open into [`Message::RepositoryOpened`].
 ///
 /// Wraps the trait object so [`Message`] can stay `Debug`.
@@ -163,6 +174,8 @@ pub(crate) struct GitApp {
     pub(crate) terminal_height: f32,
     /// Dragging the terminal's top edge: pointer y and height when the drag began.
     terminal_drag: Option<(f32, f32)>,
+    /// A repository being dragged to a new place in the Repositories column.
+    pub(crate) repository_drag: Option<RepositoryDrag>,
     /// Draft line for the interactive terminal.
     pub(crate) shell_input: String,
     /// A shell command is running in the active worktree.
@@ -370,6 +383,12 @@ pub(crate) enum Message {
     RepositoryFilterChanged(String),
     /// Take a repository off the Repositories list. The folder is left alone.
     ForgetRepository(String),
+    /// The pointer went down on a repository's tile: a drag to reorder, or a click to open.
+    RepositoryDragStart(String),
+    /// While a drag is on, the pointer entered this repository's row.
+    RepositoryDragOver(String),
+    /// While a drag is on, the pointer left the Repositories list: letting go now drops nothing.
+    RepositoryDragLeft,
     /// Settings: how the header draws the app name.
     HeaderMarkChosen(core_domain::HeaderMark),
     /// Open the Compare window: a file (else the selected or first changed file), and
@@ -800,6 +819,7 @@ impl GitApp {
             terminal_open: false,
             terminal_height: TERMINAL_HEIGHT,
             terminal_drag: None,
+            repository_drag: None,
             shell_input: String::new(),
             shell_busy: false,
             shell_cwd: None,
@@ -2118,6 +2138,27 @@ impl GitApp {
             }
             Message::PointerReleased => {
                 self.terminal_drag = None;
+                match self.repository_drag.take() {
+                    Some(drag) => self.drop_repository(drag),
+                    None => Task::none(),
+                }
+            }
+            Message::RepositoryDragStart(path) => {
+                self.repository_drag = Some(RepositoryDrag { path, over: None, moved: false });
+                Task::none()
+            }
+            Message::RepositoryDragOver(path) => {
+                if let Some(drag) = &mut self.repository_drag {
+                    drag.moved |= !core_domain::same_repository_path(&path, &drag.path);
+                    drag.over = Some(path);
+                }
+                Task::none()
+            }
+            Message::RepositoryDragLeft => {
+                if let Some(drag) = &mut self.repository_drag {
+                    drag.moved = true;
+                    drag.over = None;
+                }
                 Task::none()
             }
             Message::ToggleRepositoriesPinned => {
@@ -2964,6 +3005,29 @@ impl GitApp {
     }
 
     /// Reload the catalogue through the active session.
+    /// Let go of a dragged repository. Over another row, it takes that row's place and the new
+    /// order is saved. Never moved off its own row, it was a click on the tile: open it, as a
+    /// click on its name would.
+    fn drop_repository(&mut self, drag: RepositoryDrag) -> Task<Message> {
+        if !drag.moved {
+            let current = self
+                .sessions
+                .first()
+                .is_some_and(|session| core_domain::same_repository_path(&session.path, &drag.path));
+            return if current || self.opening {
+                Task::none()
+            } else {
+                self.update(Message::OpenRepository(drag.path))
+            };
+        }
+        match drag.over {
+            Some(onto) if self.settings.move_repository(&drag.path, &onto) => {
+                self.persist_settings(self.settings.clone())
+            }
+            _ => Task::none(),
+        }
+    }
+
     fn load_catalogue(&mut self) -> Task<Message> {
         let Some(key) = self.active_session().map(WorktreeSession::key) else {
             return Task::none();
@@ -7812,17 +7876,69 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_repository_puts_it_first_in_the_recent_list() {
+    fn opening_a_repository_keeps_the_list_in_the_users_order() {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
-        app.settings.recent_repositories = vec![r"D:\old".to_string()];
+        app.settings.recent_repositories = vec![r"D:\a".to_string(), r"D:\b".to_string()];
+        // A listed one stays where it is.
+        let _ = app.update(Message::RepositoryOpened(
+            r"D:\b".to_string(),
+            Ok(opened(std::sync::Arc::new(FakeGitRepository::ok()))),
+        ));
+        assert_eq!(app.settings.recent_repositories, vec![r"D:\a".to_string(), r"D:\b".to_string()]);
+        // A new one joins at the end.
         let _ = app.update(Message::RepositoryOpened(
             r"D:\new".to_string(),
             Ok(opened(std::sync::Arc::new(FakeGitRepository::ok()))),
         ));
         assert_eq!(
             app.settings.recent_repositories,
-            vec![r"D:\new".to_string(), r"D:\old".to_string()]
+            vec![r"D:\a".to_string(), r"D:\b".to_string(), r"D:\new".to_string()]
         );
+    }
+
+    #[test]
+    fn dragging_a_repository_onto_another_row_moves_it_there() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.settings.recent_repositories = vec![r"D:\a".to_string(), r"D:\b".to_string(), r"D:\c".to_string()];
+        let _ = app.update(Message::RepositoryDragStart(r"D:\a".to_string()));
+        let _ = app.update(Message::RepositoryDragOver(r"D:\b".to_string()));
+        let _ = app.update(Message::RepositoryDragOver(r"D:\c".to_string()));
+        let _ = app.update(Message::PointerReleased);
+        assert_eq!(
+            app.settings.recent_repositories,
+            vec![r"D:\b".to_string(), r"D:\c".to_string(), r"D:\a".to_string()]
+        );
+        assert!(app.repository_drag.is_none());
+    }
+
+    #[test]
+    fn letting_go_outside_the_list_or_back_on_its_own_row_moves_nothing() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let order = vec![r"D:\a".to_string(), r"D:\b".to_string()];
+        app.settings.recent_repositories = order.clone();
+
+        let _ = app.update(Message::RepositoryDragStart(r"D:\a".to_string()));
+        let _ = app.update(Message::RepositoryDragOver(r"D:\b".to_string()));
+        let _ = app.update(Message::RepositoryDragLeft);
+        let _ = app.update(Message::PointerReleased);
+        assert_eq!(app.settings.recent_repositories, order);
+        assert!(!app.opening, "a drag that went somewhere is not a click");
+
+        let _ = app.update(Message::RepositoryDragStart(r"D:\a".to_string()));
+        let _ = app.update(Message::RepositoryDragOver(r"D:\b".to_string()));
+        let _ = app.update(Message::RepositoryDragOver(r"D:\a".to_string()));
+        let _ = app.update(Message::PointerReleased);
+        assert_eq!(app.settings.recent_repositories, order);
+        assert!(!app.opening);
+    }
+
+    #[test]
+    fn a_click_on_a_tile_opens_that_repository() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.settings.recent_repositories = vec![r"D:\elsewhere".to_string()];
+        let _ = app.update(Message::RepositoryDragStart(r"D:\elsewhere".to_string()));
+        let _ = app.update(Message::PointerReleased);
+        assert!(app.opening, "the open started");
     }
 
     #[test]

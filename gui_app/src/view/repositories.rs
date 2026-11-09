@@ -159,10 +159,27 @@ fn panel<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element
             .style(move |_| text::Style { color: Some(tokens.text_muted) }),
         );
     }
+    let drag = app.repository_drag.as_ref();
     for path in shown {
         let is_current = current.is_some_and(|current| same_path(current, path));
+        let landing = drag.and_then(|drag| landing_side(&app.settings.recent_repositories, drag, path));
+        if landing == Some(Landing::Before) {
+            list = list.push(drop_rule(tokens));
+        }
         list = list.push(repository_row(app, path, is_current, tokens, reading));
+        if landing == Some(Landing::After) {
+            list = list.push(drop_rule(tokens));
+        }
     }
+    // Leaving the list while dragging means "not here": letting go then drops nothing.
+    let list: Element<'a, Message> = if drag.is_some() {
+        mouse_area(list)
+            .on_exit(Message::RepositoryDragLeft)
+            .interaction(iced::mouse::Interaction::Grabbing)
+            .into()
+    } else {
+        list.into()
+    };
 
     column![
         header,
@@ -216,36 +233,35 @@ fn repository_row<'a>(
     ]
     .width(Length::Fill);
 
-    let open = button(
-        row![tile(&name, is_current, tokens, reading), labels]
-            .spacing(8)
-            .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .height(Length::Fixed(ROW_HEIGHT))
-    .padding([2, 6])
-    .on_press_maybe((!is_current && !app.opening).then(|| Message::OpenRepository(path.to_string())))
-    .style(move |_theme, status| {
-        let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: Some(Background::Color(if is_current {
-                tokens.bg_raised
-            } else if hot {
-                tokens.bg_raised
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: tokens.text_primary,
-            border: Border {
-                color: if is_current { tokens.accent_primary } else { Color::TRANSPARENT },
-                width: if is_current { 1.0 } else { 0.0 },
-                radius: 4.0.into(),
-            },
-            shadow: Shadow::default(),
-        }
-    });
+    let dragged = app
+        .repository_drag
+        .as_ref()
+        .is_some_and(|drag| same_path(&drag.path, path));
+    // The tile is the handle: press and drag to reorder, or click to open. It sits outside the
+    // name's button because a button keeps the press to itself.
+    let handle = mouse_area(container(tile(&name, is_current, tokens, reading)).padding(iced::Padding { left: 6.0, ..iced::Padding::ZERO }))
+        .on_press(Message::RepositoryDragStart(path.to_string()))
+        .interaction(iced::mouse::Interaction::Grab);
 
-    let mut line = row![open].align_y(Alignment::Center);
+    let open = button(labels)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding([2, 6])
+        .on_press_maybe((!is_current && !app.opening).then(|| Message::OpenRepository(path.to_string())))
+        .style(move |_theme, status| {
+            let hot = !is_current && matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: Some(Background::Color(if hot { tokens.bg_raised } else { Color::TRANSPARENT })),
+                text_color: tokens.text_primary,
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Border::default()
+                },
+                shadow: Shadow::default(),
+            }
+        });
+
+    let mut line = row![handle, open].spacing(2).align_y(Alignment::Center);
     if !is_current {
         line = line.push(
             button(glyph(Icon::Close, small, tokens.text_muted, &reading))
@@ -265,7 +281,55 @@ fn repository_row<'a>(
                 }),
         );
     }
-    line.into()
+    let framed = container(line)
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .align_y(Alignment::Center)
+        .style(move |_theme: &Theme| container::Style {
+            background: is_current.then_some(Background::Color(tokens.bg_raised)),
+            border: Border {
+                color: if is_current { tokens.accent_primary } else { Color::TRANSPARENT },
+                width: if is_current { 1.0 } else { 0.0 },
+                radius: 4.0.into(),
+            },
+            // The row being carried reads as lifted out of the list.
+            text_color: dragged.then_some(tokens.text_muted),
+            ..container::Style::default()
+        });
+    // Rows report the pointer entering only while a drag is on: never a message per move.
+    if app.repository_drag.is_some() {
+        mouse_area(framed).on_enter(Message::RepositoryDragOver(path.to_string())).into()
+    } else {
+        framed.into()
+    }
+}
+
+/// Which side of a row the dragged repository will land on, when that row is the one under
+/// the pointer: before it when coming from below, after it when coming from above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Landing {
+    Before,
+    After,
+}
+
+fn landing_side(order: &[String], drag: &crate::app::RepositoryDrag, row: &str) -> Option<Landing> {
+    let over = drag.over.as_deref()?;
+    if !same_path(over, row) || same_path(&drag.path, row) {
+        return None;
+    }
+    let from = order.iter().position(|path| same_path(path, &drag.path))?;
+    let onto = order.iter().position(|path| same_path(path, row))?;
+    Some(if from < onto { Landing::After } else { Landing::Before })
+}
+
+/// The line drawn where a dropped repository will go.
+fn drop_rule<'a>(tokens: DesignTokens) -> Element<'a, Message> {
+    container(Space::new(Length::Fill, Length::Fixed(2.0)))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.accent_primary)),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// The folded rail: a button that shows the list, then one initial per repository.
@@ -361,6 +425,21 @@ mod tests {
         assert_eq!(visible_repositories(&paths, ""), vec![r"D:\Repos\ISL-Backend", r"D:\Repos\GitCthulhu"]);
         assert_eq!(visible_repositories(&paths, "repos isl"), vec![r"D:\Repos\ISL-Backend"]);
         assert!(visible_repositories(&paths, "nothing").is_empty());
+    }
+
+    #[test]
+    fn the_drop_line_goes_on_the_side_the_repository_will_land() {
+        let order: Vec<String> = ["a", "b", "c"].iter().map(|name| (*name).to_string()).collect();
+        let drag = |path: &str, over: Option<&str>| crate::app::RepositoryDrag {
+            path: path.to_string(),
+            over: over.map(str::to_string),
+            moved: true,
+        };
+        assert_eq!(landing_side(&order, &drag("a", Some("c")), "c"), Some(Landing::After));
+        assert_eq!(landing_side(&order, &drag("c", Some("a")), "a"), Some(Landing::Before));
+        assert_eq!(landing_side(&order, &drag("a", Some("c")), "b"), None, "only the row under the pointer");
+        assert_eq!(landing_side(&order, &drag("a", Some("a")), "a"), None, "not on its own row");
+        assert_eq!(landing_side(&order, &drag("a", None), "c"), None);
     }
 
     #[test]

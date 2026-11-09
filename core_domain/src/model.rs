@@ -264,8 +264,9 @@ pub struct AppSettings {
     pub agent_model: String,
     /// What a worktree tab keeps when the user switches to another tab.
     pub worktree_tab_retention: WorktreeTabRetention,
-    /// Repositories opened with Open… or from the command line, newest first.
-    /// At most [`Self::MAX_RECENT_REPOSITORIES`]; linked worktree tabs are never added.
+    /// Repositories opened with Open… or from the command line, in the order the user keeps
+    /// them: a new one joins at the end, opening one never moves it, and only a drag in the
+    /// Repositories column reorders them. Linked worktree tabs are never added.
     pub recent_repositories: Vec<String>,
     /// How the header draws the app name.
     pub header_mark: HeaderMark,
@@ -279,23 +280,53 @@ impl AppSettings {
     pub const MIN_UI_SIZE: u8 = 12;
     pub const MAX_UI_SIZE: u8 = 18;
     pub const DEFAULT_AGENT_MODEL: &'static str = "kilo-auto/free";
-    pub const MAX_RECENT_REPOSITORIES: usize = 24;
 
-    /// Move `path` to the front of [`Self::recent_repositories`], dropping an earlier entry
-    /// for the same folder and the oldest entries beyond the cap. Blank paths are ignored.
-    /// Returns true when the list changed.
+    /// Add `path` to the end of [`Self::recent_repositories`] unless the folder is already
+    /// there. A folder already listed keeps its place; only its spelling is refreshed.
+    /// Blank paths are ignored. Returns true when the list changed.
+    ///
+    /// There is no cap and nothing is dropped: the list is the user's, kept in their order,
+    /// and shortened only by Forget.
     pub fn remember_recent(&mut self, path: &str) -> bool {
         let path = path.trim();
         if path.is_empty() {
             return false;
         }
-        let before = self.recent_repositories.clone();
-        self.recent_repositories
-            .retain(|known| !same_repository_path(known, path));
-        self.recent_repositories.insert(0, path.to_string());
-        self.recent_repositories
-            .truncate(Self::MAX_RECENT_REPOSITORIES);
-        before != self.recent_repositories
+        match self
+            .recent_repositories
+            .iter_mut()
+            .find(|known| same_repository_path(known, path))
+        {
+            Some(known) if known == path => false,
+            Some(known) => {
+                *known = path.to_string();
+                true
+            }
+            None => {
+                self.recent_repositories.push(path.to_string());
+                true
+            }
+        }
+    }
+
+    /// Put the repository at `from` where `onto` is now, shifting the rest: dropped on a row
+    /// above, it lands before that row; on a row below, after it. Returns true when the order
+    /// changed. Unknown or equal folders change nothing.
+    pub fn move_repository(&mut self, from: &str, onto: &str) -> bool {
+        let position = |path: &str| {
+            self.recent_repositories
+                .iter()
+                .position(|known| same_repository_path(known, path))
+        };
+        let (Some(source), Some(target)) = (position(from), position(onto)) else {
+            return false;
+        };
+        if source == target {
+            return false;
+        }
+        let moving = self.recent_repositories.remove(source);
+        self.recent_repositories.insert(target, moving);
+        true
     }
 
     /// Drop `path` from [`Self::recent_repositories`]. Returns true when it was there.
@@ -380,14 +411,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remember_recent_puts_the_newest_first_without_duplicates() {
+    fn remember_recent_adds_new_folders_at_the_end_and_never_moves_a_known_one() {
         let mut settings = AppSettings::default();
         assert!(settings.remember_recent("/r/a"));
         assert!(settings.remember_recent("/r/b"));
-        assert!(settings.remember_recent("/r/a/"));
-        // The newest spelling of a folder replaces the older one.
-        assert_eq!(settings.recent_repositories, vec!["/r/a/", "/r/b"]);
-        assert!(!settings.remember_recent("/r/a/"));
+        assert!(settings.remember_recent("/r/c"));
+        // Opening a listed folder again leaves the order alone.
+        assert!(!settings.remember_recent("/r/b"));
+        assert_eq!(settings.recent_repositories, vec!["/r/a", "/r/b", "/r/c"]);
+        // A new spelling of a listed folder is kept, in the same place.
+        assert!(settings.remember_recent("/r/b/"));
+        assert_eq!(settings.recent_repositories, vec!["/r/a", "/r/b/", "/r/c"]);
     }
 
     #[test]
@@ -398,19 +432,31 @@ mod tests {
     }
 
     #[test]
-    fn remember_recent_keeps_at_most_the_cap() {
+    fn remember_recent_drops_nothing_however_long_the_list() {
         let mut settings = AppSettings::default();
-        for index in 0..AppSettings::MAX_RECENT_REPOSITORIES + 3 {
+        for index in 0..40 {
             settings.remember_recent(&format!("/r/{index}"));
         }
-        assert_eq!(
-            settings.recent_repositories.len(),
-            AppSettings::MAX_RECENT_REPOSITORIES
-        );
-        assert_eq!(
-            settings.recent_repositories[0],
-            format!("/r/{}", AppSettings::MAX_RECENT_REPOSITORIES + 2)
-        );
+        assert_eq!(settings.recent_repositories.len(), 40);
+        assert_eq!(settings.recent_repositories[0], "/r/0");
+    }
+
+    #[test]
+    fn move_repository_takes_the_place_of_the_row_it_is_dropped_on() {
+        let mut settings = AppSettings::default();
+        for path in ["/r/a", "/r/b", "/r/c", "/r/d"] {
+            settings.remember_recent(path);
+        }
+        // Down: lands after the row dropped on.
+        assert!(settings.move_repository("/r/a", "/r/c"));
+        assert_eq!(settings.recent_repositories, vec!["/r/b", "/r/c", "/r/a", "/r/d"]);
+        // Up: lands before it. Spelling does not matter.
+        assert!(settings.move_repository("/r/d/", "/r/b"));
+        assert_eq!(settings.recent_repositories, vec!["/r/d", "/r/b", "/r/c", "/r/a"]);
+        // Onto itself, or an unknown folder: nothing changes.
+        assert!(!settings.move_repository("/r/b", "/r/b"));
+        assert!(!settings.move_repository("/r/b", "/r/zzz"));
+        assert_eq!(settings.recent_repositories, vec!["/r/d", "/r/b", "/r/c", "/r/a"]);
     }
 
     #[test]

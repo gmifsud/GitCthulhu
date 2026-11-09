@@ -85,7 +85,8 @@ pub(super) fn welcome<'a>(
         .into()
 }
 
-/// Recent repositories, newest first. One click opens through the same path as Open….
+/// Known repositories, in the order kept in the Repositories column. One click opens through
+/// the same path as Open….
 fn recent_list<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let mut list = column![text("Recent")
         .font(reading.font)
