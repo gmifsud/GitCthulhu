@@ -7,6 +7,7 @@ use crate::app::{GitApp, Message};
 use crate::session::{basename, same_path, WorktreeSession};
 use crate::icons::Icon;
 use crate::theme::DesignTokens;
+use crate::worktree_ink::WorktreeInks;
 use core_domain::Worktree;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
@@ -24,8 +25,9 @@ pub(super) fn tab_strip<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let mut strip = row![].align_y(Alignment::Center).spacing(4);
+    let inks = WorktreeInks::for_catalogue(&app.worktree_catalogue);
     for (index, session) in app.sessions.iter().enumerate() {
-        strip = strip.push(tab(app, index, session, tokens, reading));
+        strip = strip.push(tab(app, index, session, inks.colour(&session.path), tokens, reading));
     }
     strip = strip.push(add_button(app.tab_picker_open, tokens, reading));
 
@@ -51,10 +53,13 @@ pub(super) fn tab_strip<'a>(
         .into()
 }
 
+/// One tab. The worktree mark and branch are in the worktree's colour, as in the Explorer and
+/// the history; the accent border alone says which tab is active.
 fn tab<'a>(
     app: &'a GitApp,
     index: usize,
     session: &'a WorktreeSession,
+    colour: Color,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -78,15 +83,12 @@ fn tab<'a>(
             .font(reading.font)
             .size((reading.size - 2.0).max(10.0))
             .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(if active {
-                    tokens.accent_primary
-                } else {
-                    tokens.text_muted
-                }),
-            }),
+            .style(move |_| text::Style { color: Some(colour) }),
     ]
     .spacing(1);
+    let label = row![glyph(Icon::Worktree, (reading.size - 2.0).max(9.0), colour, &reading), label]
+        .spacing(6)
+        .align_y(Alignment::Center);
 
     let close = button(glyph(
         Icon::Close,
@@ -250,6 +252,7 @@ fn unopened(app: &GitApp) -> Vec<&Worktree> {
 fn picker<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let mut list = column![].spacing(2).padding([6, 12]);
     let closed = unopened(app);
+    let inks = WorktreeInks::for_catalogue(&app.worktree_catalogue);
     if closed.is_empty() {
         let note = match &app.catalogue_error {
             Some(error) => format!("Could not list worktrees: {error}"),
@@ -270,9 +273,11 @@ fn picker<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Elemen
         } else {
             entry.branch.clone()
         };
+        let colour = inks.colour(&entry.path);
         list = list.push(
             button(
                 row![
+                    glyph(Icon::Worktree, (reading.size - 2.0).max(9.0), colour, &reading),
                     text(basename(&entry.path).to_string())
                         .font(reading.font)
                         .size(reading.size)
@@ -282,9 +287,7 @@ fn picker<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Elemen
                     text(branch)
                         .font(reading.font)
                         .size(reading.size)
-                        .style(move |_| text::Style {
-                            color: Some(tokens.accent_primary),
-                        }),
+                        .style(move |_| text::Style { color: Some(colour) }),
                     text(entry.path.clone())
                         .font(reading.mono)
                         .size((reading.size - 2.0).max(11.0))

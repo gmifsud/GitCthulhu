@@ -128,6 +128,9 @@ pub fn code_colours() -> Vec<(String, Color)> {
     for (lane, hex) in LANE_COLOURS.iter().enumerate() {
         colours.push((format!("lane-{lane}"), hex_color(*hex)));
     }
+    for (slot, hex) in crate::worktree_ink::WORKTREE_COLOURS.iter().enumerate() {
+        colours.push((format!("worktree-{slot}"), hex_color(*hex)));
+    }
     colours
 }
 
@@ -515,8 +518,8 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), colours.len());
-        // 27 DesignTokens fields + on-accent + 6 lanes.
-        assert_eq!(colours.len(), 34);
+        // 27 DesignTokens fields + on-accent + 6 lanes + 10 worktrees.
+        assert_eq!(colours.len(), 44);
     }
 
     #[test]

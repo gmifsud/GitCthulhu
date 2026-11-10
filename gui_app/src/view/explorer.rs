@@ -11,6 +11,7 @@ use crate::ref_tree::{ref_rows, RefRow};
 use crate::selection::Selection;
 use crate::session::{same_path, ExplorerSection};
 use crate::theme::DesignTokens;
+use crate::worktree_ink::WorktreeInks;
 use core_domain::{Branch, Worktree};
 use iced::widget::button::Status;
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -42,6 +43,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
         .iter()
         .map(|branch| ((branch.is_remote, branch.name.as_str()), branch))
         .collect();
+    let inks = WorktreeInks::for_catalogue(&app.worktree_catalogue);
     let selected = session.selection.as_ref();
 
     let mut tree = column![].spacing(0).width(Length::Fill);
@@ -69,7 +71,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     if !collapsed.local {
         let rows = ref_rows("local", locals.iter().map(|branch| branch.name.as_str()), filter, |key| session.ref_folder_open(key));
         for row_data in rows {
-            tree = tree.push(branch_tree_row(app, &row_data, false, &by_name, selected, tokens, reading));
+            tree = tree.push(branch_tree_row(app, &row_data, false, &by_name, &inks, selected, tokens, reading));
         }
         if locals.is_empty() {
             tree = tree.push(hint_row("No local branches", tokens, reading));
@@ -81,7 +83,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     if !collapsed.remote {
         let rows = ref_rows("remote", remotes.iter().map(|branch| branch.name.as_str()), filter, |key| session.ref_folder_open(key));
         for row_data in rows {
-            tree = tree.push(branch_tree_row(app, &row_data, true, &by_name, selected, tokens, reading));
+            tree = tree.push(branch_tree_row(app, &row_data, true, &by_name, &inks, selected, tokens, reading));
         }
         if remotes.is_empty() {
             tree = tree.push(hint_row("No remote branches", tokens, reading));
@@ -104,7 +106,7 @@ pub(super) fn explorer_pane<'a>(app: &'a GitApp, tokens: DesignTokens, reading: 
     tree = tree.push(group_header("Worktrees", worktrees.len(), ExplorerSection::Worktrees, collapsed.worktrees, Some(new_worktree), tokens, reading));
     if !collapsed.worktrees {
         for entry in worktrees.iter().filter(|entry| matches_filter(filter, &[&entry.path, &entry.branch])) {
-            tree = tree.push(worktree_row(app, entry, tokens, reading));
+            tree = tree.push(worktree_row(app, entry, inks.colour(&entry.path), tokens, reading));
         }
         if worktrees.is_empty() {
             tree = tree.push(hint_row("No worktrees loaded", tokens, reading));
@@ -239,6 +241,7 @@ fn branch_tree_row<'a>(
     data: &RefRow,
     remote: bool,
     by_name: &BranchesByName<'_>,
+    inks: &WorktreeInks,
     selected: Option<&Selection>,
     tokens: DesignTokens,
     reading: Reading,
@@ -270,6 +273,15 @@ fn branch_tree_row<'a>(
                     .worktree_catalogue
                     .iter()
                     .any(|entry| entry.branch == *name && !same_path(&entry.path, &session.path));
+            // A branch checked out somewhere has that worktree's colour on its mark, the same
+            // as its pill, line and tab; the current branch has the current worktree's.
+            let worktree_ink = if remote {
+                None
+            } else if current {
+                Some(inks.colour(&session.path))
+            } else {
+                inks.colour_of_branch(&app.worktree_catalogue, name)
+            };
             let is_selected = match selected {
                 Some(Selection::Branch { name: chosen, .. }) => !remote && chosen == name,
                 Some(Selection::Remote { name: chosen }) => remote && chosen == name,
@@ -296,7 +308,7 @@ fn branch_tree_row<'a>(
             tree_row(
                 depth + 1,
                 None,
-                Some(glyph(mark, reading.size, ink, &reading)),
+                Some(glyph(mark, reading.size, worktree_ink.unwrap_or(ink), &reading)),
                 content.into(),
                 is_selected,
                 Message::RefClicked { name: name.clone(), remote },
@@ -374,8 +386,15 @@ fn hint_row<'a>(label: &'static str, tokens: DesignTokens, reading: Reading) -> 
 
 /// One line per worktree: folder name, its branch, main/locked tags. A click inspects it
 /// (the active tab and the terminal stay where they are), a double-click opens its tab;
-/// right-click offers open, new, folder, copy and remove.
-fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+/// right-click offers open, new, folder, copy and remove. Its mark and branch are in the
+/// worktree's colour, as its tab, pill and graph line are.
+fn worktree_row<'a>(
+    app: &'a GitApp,
+    entry: &'a Worktree,
+    colour: Color,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
     let open = app.sessions.iter().any(|session| same_path(&session.path, &entry.path));
     let active = app.sessions.get(app.active).is_some_and(|session| same_path(&session.path, &entry.path));
     let inspected = app.inspected_path().is_some_and(|path| same_path(path, &entry.path));
@@ -392,7 +411,7 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
     ))
     .width(Length::Fill)
     .align_y(Alignment::Center);
-    let branch_line = container(super::chrome::full_text(branch.clone(), reading.font, small, tokens.accent_primary))
+    let branch_line = container(super::chrome::full_text(branch.clone(), reading.font, small, colour))
         .width(Length::Fill)
         .align_y(Alignment::Center);
     let mut content = row![folder].spacing(6).align_y(Alignment::Center);
@@ -407,12 +426,7 @@ fn worktree_row<'a>(app: &'a GitApp, entry: &'a Worktree, tokens: DesignTokens, 
     tree_row(
         1,
         None,
-        Some(glyph(
-            Icon::Worktree,
-            (reading.size - 2.0).max(9.0),
-            if open { tokens.accent_primary } else { tokens.text_muted },
-            &reading,
-        )),
+        Some(glyph(Icon::Worktree, (reading.size - 2.0).max(9.0), colour, &reading)),
         content.into(),
         active || inspected,
         Message::WorktreeClicked(entry.path.clone()),

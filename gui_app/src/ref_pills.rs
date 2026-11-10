@@ -25,6 +25,9 @@ pub(crate) struct RefPill {
     pub kind: RefPillKind,
     pub ahead: usize,
     pub behind: usize,
+    /// The worktree that has this branch checked out: the current one for the HEAD pill,
+    /// another for a worktree pill. Its colour is the pill's.
+    pub worktree: Option<String>,
 }
 
 
@@ -41,32 +44,38 @@ pub(crate) fn pill_mark(kind: RefPillKind) -> Icon {
 /// Refs whose tip is `commit_id`, ordered head → worktree → local → remote → tag.
 ///
 /// A local branch whose name appears in `worktrees` is classified as [`RefPillKind::Worktree`]
-/// (unless it is HEAD, which stays Head).
+/// (unless it is HEAD, which stays Head). `current` is the folder whose history this is: the
+/// HEAD pill belongs to it.
 pub(crate) fn refs_at(
     commit_id: &str,
     branches: &[Branch],
     tags: &[Tag],
     worktrees: &[Worktree],
+    current: &str,
 ) -> Vec<RefPill> {
-    let worktree_branches: std::collections::HashSet<&str> = worktrees
-        .iter()
-        .filter(|wt| !wt.branch.is_empty())
-        .map(|wt| wt.branch.as_str())
-        .collect();
+    let checked_out_in = |name: &str| {
+        worktrees
+            .iter()
+            .find(|wt| !wt.branch.is_empty() && wt.branch == name)
+            .map(|wt| wt.path.clone())
+    };
 
     let mut pills = Vec::new();
     for branch in branches {
         if branch.tip != commit_id {
             continue;
         }
-        let kind = if branch.is_head {
-            RefPillKind::Head
+        let elsewhere = (!branch.is_head && !branch.is_remote)
+            .then(|| checked_out_in(&branch.name))
+            .flatten();
+        let (kind, worktree) = if branch.is_head {
+            (RefPillKind::Head, Some(current.to_string()))
         } else if branch.is_remote {
-            RefPillKind::Remote
-        } else if worktree_branches.contains(branch.name.as_str()) {
-            RefPillKind::Worktree
+            (RefPillKind::Remote, None)
+        } else if elsewhere.is_some() {
+            (RefPillKind::Worktree, elsewhere)
         } else {
-            RefPillKind::Local
+            (RefPillKind::Local, None)
         };
         pills.push(RefPill {
             label: branch.name.clone(),
@@ -74,6 +83,7 @@ pub(crate) fn refs_at(
             kind,
             ahead: branch.ahead,
             behind: branch.behind,
+            worktree,
         });
     }
     for tag in tags {
@@ -84,6 +94,7 @@ pub(crate) fn refs_at(
                 kind: RefPillKind::Tag,
                 ahead: 0,
                 behind: 0,
+                worktree: None,
             });
         }
     }
@@ -124,6 +135,15 @@ pub(crate) fn pill_tooltip(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The worktree whose tip this commit is, if any: the current one's before another's. Its
+/// colour is the commit's dot and the line below it.
+pub(crate) fn tip_worktree(pills: &[RefPill]) -> Option<&str> {
+    pills
+        .iter()
+        .filter(|pill| matches!(pill.kind, RefPillKind::Head | RefPillKind::Worktree))
+        .find_map(|pill| pill.worktree.as_deref())
 }
 
 /// Dominant tip kind for canvas node styling (local/worktree beat remote).
@@ -185,7 +205,7 @@ mod tests {
         let mut branches = branches;
         branches[1].ahead = 2;
         branches[1].behind = 1;
-        let pills = refs_at("abc", &branches, &tags, &[]);
+        let pills = refs_at("abc", &branches, &tags, &[], "/r");
         let labels: Vec<_> = pills
             .iter()
             .map(|p| (p.label.as_str(), p.kind, p.ahead, p.behind))
@@ -209,8 +229,24 @@ mod tests {
             &branches,
             &[],
             &[wt(r"D:\repo-feature", "feature/x")],
+            r"D:\repo",
         );
         assert_eq!(pills[0].kind, RefPillKind::Worktree);
+        assert_eq!(pills[0].worktree.as_deref(), Some(r"D:\repo-feature"));
+    }
+
+    #[test]
+    fn the_head_pill_belongs_to_the_current_folder_and_names_the_tip_worktree() {
+        let branches = vec![
+            branch("feature/x", "abc", false, false),
+            branch("main", "abc", false, true),
+            branch("origin/main", "abc", true, false),
+        ];
+        let pills = refs_at("abc", &branches, &[], &[wt("/wt/x", "feature/x")], "/repo");
+        assert_eq!(pills[0].worktree.as_deref(), Some("/repo"), "HEAD sorts first and is this folder's");
+        assert_eq!(tip_worktree(&pills), Some("/repo"));
+        assert_eq!(tip_worktree(&pills[1..]), Some("/wt/x"));
+        assert_eq!(tip_worktree(&pills[2..]), None, "a remote is no worktree's");
     }
 
     #[test]
@@ -222,7 +258,7 @@ mod tests {
             branch("origin/main", "abc", true, false),
         ];
         let worktrees = vec![wt("D:/repo", "main"), wt("D:/wt/Knowl-analy-3bd5e", long)];
-        let pills = refs_at("abc", &branches, &[], &worktrees);
+        let pills = refs_at("abc", &branches, &[], &worktrees, "D:/repo");
         let folder = |path: &str| crate::session::basename(path).to_string();
 
         let tip = pill_tooltip(&pills, &worktrees, &folder);
@@ -238,7 +274,7 @@ mod tests {
     #[test]
     fn long_ref_names_are_shown_whole() {
         let long = "feature/very-long-branch-name-that-overflows-the-pill-gutter-limit";
-        let pills = refs_at("id", &[branch(long, "id", false, false)], &[], &[]);
+        let pills = refs_at("id", &[branch(long, "id", false, false)], &[], &[], "/r");
         assert_eq!(pills[0].label, long, "a cut name could read as another branch");
         assert_eq!(pills[0].name, long);
     }

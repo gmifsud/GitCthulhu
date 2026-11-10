@@ -4,11 +4,12 @@
 //! The top-bar search narrows the table to matching loaded commits.
 
 use crate::app::{GitApp, Message};
-use crate::commit_graph::{graph_rows, graph_width, lane_colour, GraphCell, GraphRow, NodeMark, ROW_HEIGHT};
+use crate::commit_graph::{graph_rows, graph_width, lane_colour, row_inks, GraphCell, GraphRow, NodeMark, RowInks, ROW_HEIGHT};
+use crate::worktree_ink::WorktreeInks;
 use crate::context_menu::ContextTarget;
 use crate::palette::commit_matches;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
-use crate::ref_pills::{pill_mark, pill_tooltip, primary_node_kind, refs_at, RefPill, RefPillKind};
+use crate::ref_pills::{pill_mark, pill_tooltip, primary_node_kind, refs_at, tip_worktree, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
 use crate::session::WorktreeSession;
 use crate::wip::WipRow;
@@ -130,6 +131,7 @@ pub(super) fn history_table<'a>(
 
     let wip_rows = app.wip_rows();
     let inspecting = app.inspected_path().is_some();
+    let worktree_inks = WorktreeInks::for_catalogue(&app.worktree_catalogue);
     for wip in &wip_rows {
         // The inspected worktree is always drawn, so inspecting never needs a filter cleared.
         // Otherwise working changes belong to a worktree's HEAD: hide other worktrees under
@@ -154,7 +156,7 @@ pub(super) fn history_table<'a>(
                 && matches!(selection, Selection::Branch { current: true, .. } | Selection::File { .. }));
         let line = button(history_row(
             graph_cell_empty(graph_w),
-            wip_description_cell(wip, tokens, reading),
+            wip_description_cell(wip, worktree_inks.colour(&wip.path), tokens, reading),
             "",
             "",
             "",
@@ -179,12 +181,14 @@ pub(super) fn history_table<'a>(
         let selected = matches!(selection, Selection::Commit { id } if id == &row.commit_id);
         let age = log_date(now, row.timestamp);
         let mark = node_mark_for(&row.pills);
+        // Pills without a worktree of their own match the line their commit sits on.
+        let line = row.inks.dot.unwrap_or_else(|| lane_colour(row.graph.lane));
         let label = history_row(
-            canvas(GraphCell { row: row.graph.clone(), mark })
+            canvas(GraphCell { row: row.graph.clone(), mark, inks: row.inks.clone() })
                 .width(Length::Fixed(graph_w))
                 .height(Length::Fixed(row.height))
                 .into(),
-            description_cell(app, &row.subject, &row.pills, row.merge, row.height, lane_colour(row.graph.lane), tokens, reading),
+            description_cell(app, &row.subject, &row.pills, row.merge, row.height, line, &worktree_inks, tokens, reading),
             &row.author,
             &age,
             short_hash(&row.commit_id),
@@ -286,7 +290,7 @@ fn index_key(app: &GitApp, session: &WorktreeSession, width: f32, reading: Readi
         author: session.author_filter.clone(),
         branch_filter: session.branch_filter.clone(),
         focus: session.focus_current_branch,
-        worktrees: app.worktree_catalogue.len(),
+        worktrees: crate::worktree_ink::catalogue_fingerprint(&app.worktree_catalogue),
         head_counts,
     }
 }
@@ -390,7 +394,7 @@ fn build_index(
         };
         let mut pills = tips
             .get(commit.id.as_str())
-            .map(|(branches, tags)| refs_at(&commit.id, branches, tags, &app.worktree_catalogue))
+            .map(|(branches, tags)| refs_at(&commit.id, branches, tags, &app.worktree_catalogue, &session.path))
             .unwrap_or_default();
         // The checked-out branch's counts come from the header's tracking state, like every
         // other place they are shown.
@@ -409,11 +413,22 @@ fn build_index(
             timestamp: commit.timestamp,
             merge: commit.parent_ids.len() > 1,
             graph,
+            inks: RowInks::default(),
             pills,
             height,
             top,
         });
         top += height;
+    }
+    // Each worktree's colour from its tip down its lane, worked out once with the rest.
+    let inks = WorktreeInks::for_catalogue(&app.worktree_catalogue);
+    let tip_colours: Vec<Option<Color>> = out
+        .iter()
+        .map(|row| tip_worktree(&row.pills).map(|path| inks.colour(path)))
+        .collect();
+    let graphs: Vec<GraphRow> = out.iter().map(|row| row.graph.clone()).collect();
+    for (row, ink) in out.iter_mut().zip(row_inks(&graphs, &tip_colours)) {
+        row.inks = ink;
     }
     crate::history_index::HistoryIndex {
         key,
@@ -513,6 +528,7 @@ fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
 
 /// The worktree and branch names on top, then the subject, both whole and wrapping. Hovering
 /// the names lists every ref at the commit by its full name.
+#[allow(clippy::too_many_arguments)]
 fn description_cell<'a>(
     app: &GitApp,
     message: &str,
@@ -520,6 +536,7 @@ fn description_cell<'a>(
     muted: bool,
     height: f32,
     lane: Color,
+    worktree_inks: &WorktreeInks,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -533,7 +550,7 @@ fn description_cell<'a>(
     if !pills.is_empty() {
         let folder_of = |path: &str| app.worktree_folder(path);
         let names = pill_tooltip(pills, &app.worktree_catalogue, &folder_of);
-        cell = cell.push(hover_tip(pill_strip(pills, lane, tokens, reading), names, tokens, reading));
+        cell = cell.push(hover_tip(pill_strip(pills, lane, worktree_inks, tokens, reading), names, tokens, reading));
     }
     cell = cell.push(subject);
     container(cell)
@@ -674,6 +691,7 @@ fn ref_names_at<'s>(commit_id: &str, session: &'s WorktreeSession) -> Vec<&'s st
 fn pill_strip<'a>(
     pills: &[RefPill],
     lane: Color,
+    worktree_inks: &WorktreeInks,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -681,24 +699,25 @@ fn pill_strip<'a>(
     // hides behind a "+N": a hidden worktree is exactly the mix-up this row must prevent.
     let mut pill_row = row![].spacing(PILL_GAP).align_y(Alignment::Center);
     for pill in pills {
-        pill_row = pill_row.push(ref_pill(pill, lane, tokens, reading));
+        // A branch checked out in a worktree wears that worktree's colour, as everywhere else.
+        let ink = pill.worktree.as_deref().map_or(lane, |path| worktree_inks.colour(path));
+        pill_row = pill_row.push(ref_pill(pill, ink, tokens, reading));
     }
     pill_row.wrap().into()
 }
 
 /// "Working changes · n files" and the WIP pill. The pill is outlined, never filled, and
-/// carries the edit mark, so it cannot pass for a branch or tag pill; the active
-/// worktree's pill is in the accent colour and says so.
+/// carries the edit mark, so it cannot pass for a branch or tag pill. It is drawn in its
+/// worktree's colour; the active worktree's says so in words.
 fn wip_description_cell<'a>(
     wip: &WipRow,
+    worktree: Color,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
     let files = if wip.changes == 1 { "1 file".to_string() } else { format!("{} files", wip.changes) };
-    let ink = if wip.active { tokens.accent_primary } else { tokens.text_secondary };
-    let edge = if wip.active { tokens.accent_primary } else { tokens.text_muted };
     let small = (reading.size - 3.0).max(10.0);
-    wip_cell(wip.label.clone(), files, wip.active, ink, edge, small, tokens, reading)
+    wip_cell(wip.label.clone(), files, wip.active, worktree, worktree, small, tokens, reading)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -791,8 +810,9 @@ fn hover_tip<'a>(
     .into()
 }
 
-/// A ref at a commit, in the colour of the lane it sits on, so a coloured line in the graph
-/// can be told by name: the orange line is the branch whose pill is orange. The shape says
+/// A ref at a commit, in the colour of the line it sits on, so a coloured line in the graph
+/// can be told by name: the blue line is the branch whose pill is blue. A branch checked out
+/// in a worktree is in that worktree's colour, and so is its line below. The shape says
 /// the kind: filled for the checkout, outlined for a worktree or branch, faint for a remote
 /// (with its cloud mark), neutral for a tag.
 fn ref_pill<'a>(pill: &RefPill, lane: Color, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -911,7 +931,7 @@ mod measured_rows_tests {
     }
 
     fn pill(name: &str) -> RefPill {
-        RefPill { label: name.into(), name: name.into(), kind: RefPillKind::Worktree, ahead: 0, behind: 0 }
+        RefPill { label: name.into(), name: name.into(), kind: RefPillKind::Worktree, ahead: 0, behind: 0, worktree: None }
     }
 
     #[test]

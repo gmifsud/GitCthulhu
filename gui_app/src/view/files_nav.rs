@@ -189,7 +189,7 @@ fn details<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, rea
     for (label, value) in commit_fields(commit) {
         body = body.push(field(label, value, tokens, reading));
     }
-    let refs: Vec<String> = refs_at(&commit.id, &session.state.branches, &session.state.tags, &app.worktree_catalogue)
+    let refs: Vec<String> = refs_at(&commit.id, &session.state.branches, &session.state.tags, &app.worktree_catalogue, &session.path)
         .into_iter()
         .map(|pill| pill.label)
         .collect();

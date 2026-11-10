@@ -32,6 +32,7 @@ mod text_measure;
 mod tracking;
 mod view;
 mod wip;
+mod worktree_ink;
 
 pub use opening::redact as redact_credentials;
 pub use terminal::{CommitSuggestion, ModelList, ProviderExchange};

@@ -77,6 +77,55 @@ pub(crate) fn graph_rows(nodes: &[DagNode]) -> Vec<GraphRow> {
         .collect()
 }
 
+/// Colours that replace a lane's own on one row, segment by segment, parallel to the lists in
+/// its [`GraphRow`]. `None` keeps [`lane_colour`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RowInks {
+    pub dot: Option<Color>,
+    pub incoming: Vec<Option<Color>>,
+    pub passing: Vec<Option<Color>>,
+    pub outgoing: Vec<Option<Color>>,
+}
+
+/// Carry worktree colours down the graph. `tips[i]` is the colour of the worktree whose branch
+/// tips at row `i`, if any. That row's dot takes it, and so does its lane from there down along
+/// first parents, until the lane ends or another worktree's tip takes it over. Lanes no
+/// worktree started keep their own colour.
+pub(crate) fn row_inks(rows: &[GraphRow], tips: &[Option<Color>]) -> Vec<RowInks> {
+    // `held[lane]`: the colour the line in that lane carries below the current row.
+    let mut held: Vec<Option<Color>> = Vec::new();
+    let read = |held: &[Option<Color>], lane: usize| held.get(lane).copied().flatten();
+    let write = |held: &mut Vec<Option<Color>>, lane: usize, ink: Option<Color>| {
+        if held.len() <= lane {
+            held.resize(lane + 1, None);
+        }
+        held[lane] = ink;
+    };
+    rows.iter()
+        .zip(tips.iter().chain(std::iter::repeat(&None)))
+        .map(|(row, tip)| {
+            let incoming: Vec<Option<Color>> = row.incoming.iter().map(|&lane| read(&held, lane)).collect();
+            let passing: Vec<Option<Color>> = row.passing.iter().map(|&lane| read(&held, lane)).collect();
+            let inherited = row.incoming.contains(&row.lane).then(|| read(&held, row.lane)).flatten();
+            let dot = tip.or(inherited);
+            // Lanes ending at this commit drop what they carried; a lane claimed afresh below
+            // starts plain.
+            for &lane in &row.incoming {
+                write(&mut held, lane, None);
+            }
+            let outgoing: Vec<Option<Color>> = row
+                .outgoing
+                .iter()
+                .map(|&lane| if lane == row.lane { dot } else { read(&held, lane) })
+                .collect();
+            if row.outgoing.contains(&row.lane) {
+                write(&mut held, row.lane, dot);
+            }
+            RowInks { dot, incoming, passing, outgoing }
+        })
+        .collect()
+}
+
 /// Width needed to draw every lane used by `rows`.
 pub(crate) fn graph_width(rows: &[GraphRow]) -> f32 {
     let lanes = rows
@@ -122,6 +171,7 @@ pub(crate) enum NodeMark {
 pub(crate) struct GraphCell {
     pub row: GraphRow,
     pub mark: NodeMark,
+    pub inks: RowInks,
 }
 
 /// Tessellated geometry kept between frames, with the row it was built from.
@@ -131,7 +181,7 @@ pub(crate) struct GraphCell {
 #[derive(Default)]
 pub(crate) struct GraphCache {
     geometry: canvas::Cache,
-    drawn: RefCell<Option<(GraphRow, NodeMark)>>,
+    drawn: RefCell<Option<(GraphRow, NodeMark, RowInks)>>,
 }
 
 impl<Message> canvas::Program<Message> for GraphCell {
@@ -145,48 +195,54 @@ impl<Message> canvas::Program<Message> for GraphCell {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let key = (self.row.clone(), self.mark);
+        let key = (self.row.clone(), self.mark, self.inks.clone());
         if state.drawn.borrow().as_ref() != Some(&key) {
             state.geometry.clear();
             *state.drawn.borrow_mut() = Some(key);
         }
         let geometry = state.geometry.draw(renderer, bounds.size(), |frame| {
-            paint_row(frame, &self.row, self.mark, bounds.width, bounds.height);
+            paint_row(frame, &self.row, self.mark, &self.inks, bounds.width, bounds.height);
         });
         vec![geometry]
     }
+}
+
+/// A segment's colour: its worktree's when one carries it, else its lane's.
+fn ink_or_lane(inks: &[Option<Color>], index: usize, lane: usize) -> Color {
+    inks.get(index).copied().flatten().unwrap_or_else(|| lane_colour(lane))
 }
 
 fn paint_row(
     frame: &mut canvas::Frame,
     row: &GraphRow,
     mark: NodeMark,
+    inks: &RowInks,
     width: f32,
     bottom: f32,
 ) {
-    let colour = lane_colour(row.lane);
+    let colour = inks.dot.unwrap_or_else(|| lane_colour(row.lane));
     let dot = Point::new(lane_x(row.lane, width), bottom / 2.0);
-    let mut segment = |from: Point, to: Point, lane: usize| {
+    let mut segment = |from: Point, to: Point, ink: Color| {
         frame.stroke(
             &canvas::Path::line(from, to),
             canvas::Stroke::default()
-                .with_color(lane_colour(lane))
+                .with_color(ink)
                 .with_width(LINE_WIDTH),
         );
     };
 
-    for &lane in &row.passing {
+    for (index, &lane) in row.passing.iter().enumerate() {
         segment(
             Point::new(lane_x(lane, width), 0.0),
             Point::new(lane_x(lane, width), bottom),
-            lane,
+            ink_or_lane(&inks.passing, index, lane),
         );
     }
-    for &lane in &row.incoming {
-        segment(Point::new(lane_x(lane, width), 0.0), dot, lane);
+    for (index, &lane) in row.incoming.iter().enumerate() {
+        segment(Point::new(lane_x(lane, width), 0.0), dot, ink_or_lane(&inks.incoming, index, lane));
     }
-    for &lane in &row.outgoing {
-        segment(dot, Point::new(lane_x(lane, width), bottom), lane);
+    for (index, &lane) in row.outgoing.iter().enumerate() {
+        segment(dot, Point::new(lane_x(lane, width), bottom), ink_or_lane(&inks.outgoing, index, lane));
     }
 
     match mark {
@@ -273,6 +329,49 @@ mod tests {
                 row(0, &[0, 1], &[], &[]), // base: both lanes end here
             ]
         );
+    }
+
+    #[test]
+    fn a_worktree_colour_runs_down_its_lane_and_stops_where_the_lane_ends() {
+        let blue = Color::from_rgb(0.0, 0.0, 1.0);
+        // T1 (lane 0) and T2 (lane 1) both lead to base; T2 is a worktree's tip.
+        let nodes = build_dag(&[commit("T1", &["base"]), commit("T2", &["base"]), commit("base", &[])]);
+        let rows = graph_rows(&nodes);
+        let inks = row_inks(&rows, &[None, Some(blue), None]);
+
+        assert_eq!(inks[0], RowInks { dot: None, incoming: vec![], passing: vec![], outgoing: vec![None] });
+        // T2: its dot and the line below it are the worktree's; lane 0 passes by in its own colour.
+        assert_eq!(inks[1], RowInks { dot: Some(blue), incoming: vec![], passing: vec![None], outgoing: vec![Some(blue)] });
+        // base: lane 1 arrives blue and ends; base itself sits in lane 0, which no worktree started.
+        assert_eq!(inks[2].incoming, vec![None, Some(blue)]);
+        assert_eq!(inks[2].dot, None);
+    }
+
+    #[test]
+    fn a_worktree_lower_down_a_lane_takes_it_over_from_its_tip() {
+        let blue = Color::from_rgb(0.0, 0.0, 1.0);
+        let green = Color::from_rgb(0.0, 1.0, 0.0);
+        let nodes = build_dag(&[commit("c3", &["c2"]), commit("c2", &["c1"]), commit("c1", &[])]);
+        let inks = row_inks(&graph_rows(&nodes), &[Some(blue), Some(green), None]);
+        assert_eq!(inks[0].outgoing, vec![Some(blue)]);
+        assert_eq!(inks[1].incoming, vec![Some(blue)], "the line above the second tip is still the first's");
+        assert_eq!((inks[1].dot, inks[1].outgoing.clone()), (Some(green), vec![Some(green)]));
+        assert_eq!(inks[2].dot, Some(green));
+    }
+
+    #[test]
+    fn a_merge_keeps_the_worktree_colour_on_its_first_parent_only() {
+        let blue = Color::from_rgb(0.0, 0.0, 1.0);
+        let nodes = build_dag(&[
+            commit("M", &["A", "B"]),
+            commit("A", &["base"]),
+            commit("B", &["base"]),
+            commit("base", &[]),
+        ]);
+        let inks = row_inks(&graph_rows(&nodes), &[Some(blue)]);
+        assert_eq!(inks[0].outgoing, vec![Some(blue), None], "the merged-in side keeps its own colour");
+        assert_eq!(inks[1].dot, Some(blue));
+        assert_eq!(inks[2].dot, None);
     }
 
     #[test]

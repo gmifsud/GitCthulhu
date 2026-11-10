@@ -7,7 +7,7 @@
 //! depends on; a redraw only finds the rows in view (a binary search over row tops) and builds
 //! those. No widget outlives its frame, so memory holds this plain data and nothing else.
 
-use crate::commit_graph::GraphRow;
+use crate::commit_graph::{GraphRow, RowInks};
 use crate::ref_pills::RefPill;
 
 pub(crate) const COL_GAP: f32 = 10.0;
@@ -29,8 +29,9 @@ pub(crate) struct IndexKey {
     pub(crate) author: Option<String>,
     pub(crate) branch_filter: Option<String>,
     pub(crate) focus: bool,
-    /// Worktrees decide which pills read as worktrees.
-    pub(crate) worktrees: usize,
+    /// Worktrees decide which pills read as worktrees, and their colours: see
+    /// [`crate::worktree_ink::catalogue_fingerprint`].
+    pub(crate) worktrees: u64,
     /// The checked-out branch's counts, drawn on its pill.
     pub(crate) head_counts: Option<(usize, usize)>,
 }
@@ -44,6 +45,8 @@ pub(crate) struct IndexRow {
     pub(crate) timestamp: i64,
     pub(crate) merge: bool,
     pub(crate) graph: GraphRow,
+    /// Worktree colours on this row's dot and lines.
+    pub(crate) inks: RowInks,
     pub(crate) pills: Vec<RefPill>,
     /// Height in px, from measured text.
     pub(crate) height: f32,
@@ -126,6 +129,7 @@ mod tests {
             timestamp: 0,
             merge: false,
             graph: GraphRow { lane: 0, incoming: vec![], passing: vec![], outgoing: vec![] },
+            inks: RowInks::default(),
             pills: vec![],
             height,
             top,
