@@ -1,8 +1,11 @@
 using System.Globalization;
+using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
+using Resolve.App.Editor;
 using Resolve.Core.Cli;
 using Resolve.Core.Merge;
 using Resolve.Core.Resolution;
@@ -16,7 +19,13 @@ public sealed partial class MergeToolWindow
     private const string DiscardPrompt = "Discard your changes and leave the file untouched?";
     private const string ExternalChangePrompt = "The file changed on disk since it was opened. Overwrite it?";
 
-    /// <summary>Runs a command. Region commands act on the navigator's current region; the outcome is announced.</summary>
+    /// <summary>Ruling R32: what the user hears when a command fails unexpectedly.</summary>
+    internal static string FailureMessage(string reason) => $"Something went wrong: {reason}. Your changes are still here.";
+
+    /// <summary>
+    /// Runs a command. Region commands act on the region at the RESULT caret when RESULT has focus, else on the
+    /// navigator's current region (ruling R30); the outcome is announced.
+    /// </summary>
     public void Run(WindowCommand command) => Observe(RunAsync(command));
 
     internal Task RunAsync(WindowCommand command) => Guarded(() => Dispatch(command));
@@ -38,10 +47,16 @@ public sealed partial class MergeToolWindow
         WindowCommand.Undo => HistoryAsync(undo: true),
         WindowCommand.Redo => HistoryAsync(undo: false),
         WindowCommand.Save => SaveAsync(),
+        WindowCommand.SaveAndExit => SaveAndExitAsync(),
+        WindowCommand.ExitUnresolved => ExitUnresolvedAsync(),
+        WindowCommand.Cancel => CancelAsync(),
         _ => throw new ArgumentOutOfRangeException(nameof(command), command, "Unknown window command."),
     };
 
-    /// <summary>Runs one command at a time and nothing once the window has a result, so a pending confirmation cannot be overtaken.</summary>
+    /// <summary>
+    /// Runs one command at a time and nothing once the window has a result, so a pending confirmation cannot be
+    /// overtaken. Ruling R32: a command that fails unexpectedly is announced and the window stays, with the resolution.
+    /// </summary>
     private async Task Guarded(Func<Task> body)
     {
         if (_busy || Result is not null)
@@ -53,19 +68,53 @@ public sealed partial class MergeToolWindow
         {
             await body();
         }
+        catch (Exception error)
+        {
+            AnnounceFailure(error);
+        }
         finally
         {
             _busy = false;
         }
     }
 
-    private void Fire(Func<Task> body) => Observe(Guarded(body));
+    /// <summary>Awaits a fire-and-forget task on the UI thread; nothing it throws may end the session.</summary>
+    private async void Observe(Task task)
+    {
+        try
+        {
+            await task;
+        }
+        catch (Exception error)
+        {
+            AnnounceFailure(error);
+        }
+    }
 
-    /// <summary>Surfaces a failure on the UI thread instead of losing it in a discarded task.</summary>
-    private static async void Observe(Task task) => await task;
+    /// <summary>Runs an event handler's work; nothing it throws may escape into Avalonia's input handling or the editor.</summary>
+    private void Safely(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception error)
+        {
+            AnnounceFailure(error);
+        }
+    }
+
+    private void AnnounceFailure(Exception error) =>
+        Announce(FailureMessage(error.Message));
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
+        if (FocusMoveFor(e) is { } forward)
+        {
+            e.Handled = true;
+            Safely(() => MoveFocus(forward));
+            return;
+        }
         if (Keymap.For(e.Key, e.KeyModifiers) is { } command)
         {
             e.Handled = true;
@@ -73,18 +122,89 @@ public sealed partial class MergeToolWindow
         }
     }
 
+    // ---- focus (ruling R29) ----
+
+    /// <summary>
+    /// F6 / Shift+F6 cycle the panes and bars from anywhere; Tab / Shift+Tab do the same out of the read-only panes,
+    /// whose editors would otherwise keep focus. RESULT keeps Tab as a character. Null when the key is not a focus move.
+    /// </summary>
+    private bool? FocusMoveFor(KeyEventArgs e)
+    {
+        var shift = e.KeyModifiers == KeyModifiers.Shift;
+        if (e.KeyModifiers != KeyModifiers.None && !shift)
+        {
+            return null;
+        }
+        if (e.Key == Key.F6)
+        {
+            return !shift;
+        }
+        return e.Key == Key.Tab && FocusedGroup() is 0 or 2 ? !shift : null;
+    }
+
+    /// <summary>LEFT, RESULT, RIGHT, the navigator, the action bar, the footer: the F6 order.</summary>
+    private Control?[] FocusGroups() => [View.Left.View, View.Result.View, View.Right.View, Navigator, _actionBar, _footer];
+
+    /// <summary>The index in the F6 order (LEFT 0 … footer 5) of the group holding keyboard focus, or -1.</summary>
+    internal int FocusedGroup()
+    {
+        if (FocusManager?.GetFocusedElement() is not Visual focused)
+        {
+            return -1;
+        }
+        var groups = FocusGroups();
+        for (var index = 0; index < groups.Length; index++)
+        {
+            if (groups[index] is { } group && (group == focused || group.IsVisualAncestorOf(focused)))
+            {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private void MoveFocus(bool forward)
+    {
+        var count = FocusGroups().Length;
+        var current = FocusedGroup();
+        var start = current < 0 ? (forward ? count - 1 : 0) : current;
+        // Skip a group that cannot take focus (say, every footer button disabled) rather than stopping on it.
+        for (var step = 1; step <= count; step++)
+        {
+            var next = (((start + (forward ? step : -step)) % count) + count) % count;
+            if (FocusGroup(next))
+            {
+                return;
+            }
+        }
+    }
+
+    private bool FocusGroup(int index) => index switch
+    {
+        0 => ((AvaloniaEditSurface)View.Left).Focus(),
+        1 => ((AvaloniaEditSurface)View.Result).Focus(),
+        2 => ((AvaloniaEditSurface)View.Right).Focus(),
+        3 => Navigator.FocusCurrent(),
+        4 => FirstEnabled(_actionBar)?.Focus(NavigationMethod.Tab) ?? false,
+        _ => FirstEnabled(_footer)?.Focus(NavigationMethod.Tab) ?? false,
+    };
+
+    private static Button? FirstEnabled(Panel? bar) => bar?.Children.OfType<Button>().FirstOrDefault(button => button.IsEffectivelyEnabled);
+
     // ---- navigation ----
 
     private Task Navigate(bool conflictsOnly, bool forward)
     {
         var regions = _session.Document.Regions;
         var from = Navigator.CurrentRegionId is { } current ? IndexOf(regions, current) : -1;
+        // Spec §4.6: F8 visits the conflicts still to resolve (unresolved, or edited by hand and not yet marked
+        // resolved); F7 every non-equal region.
         var candidates = Enumerable.Range(0, regions.Count)
-            .Where(index => conflictsOnly ? regions[index].Kind == RegionKind.Conflict : regions[index].Kind != RegionKind.Equal)
+            .Where(index => conflictsOnly ? IsUnresolvedConflict(regions[index]) : regions[index].Kind != RegionKind.Equal)
             .ToList();
         if (candidates.Count == 0)
         {
-            Announce(conflictsOnly ? "No conflicts" : "No changes");
+            Announce(conflictsOnly ? "No unresolved conflicts" : "No changes");
             return Task.CompletedTask;
         }
         // The next candidate after the current region, or the previous one before it; past either end, wrap.
@@ -94,6 +214,10 @@ public sealed partial class MergeToolWindow
         GoTo(regions[target].RegionId, announce: true);
         return Task.CompletedTask;
     }
+
+    private static bool IsUnresolvedConflict(RegionView region) =>
+        region.Kind == RegionKind.Conflict
+        && (region.Choice == ResolutionChoice.Unresolved || region is { Choice: ResolutionChoice.Manual, Acknowledged: false });
 
     private static int IndexOf(IReadOnlyList<RegionView> regions, int regionId)
     {
@@ -125,11 +249,31 @@ public sealed partial class MergeToolWindow
 
     // ---- region commands, undo, redo ----
 
-    /// <summary>The current region, or — when the navigator is on none — the first conflict, which becomes current.</summary>
+    /// <summary>
+    /// Ruling R30: the region at the RESULT caret when RESULT has focus and the caret is in a non-equal region — the
+    /// navigator follows it — else the navigator's current region, else the first conflict, which becomes current.
+    /// The target is revealed before the command runs, so a resolution is never applied out of sight.
+    /// </summary>
     private async Task OnCurrent(Func<int, RegionCommand> make)
     {
-        var id = Navigator.CurrentRegionId;
-        if (id is null)
+        int id;
+        if (CaretRegion() is { } atCaret)
+        {
+            id = atCaret;
+            if (Navigator.CurrentRegionId != id)
+            {
+                Navigator.Select(id);
+                if (Navigator.NameOf(id) is { } name)
+                {
+                    Announce(name);
+                }
+            }
+        }
+        else if (Navigator.CurrentRegionId is { } current)
+        {
+            id = current;
+        }
+        else
         {
             var first = _session.Document.Regions.FirstOrDefault(r => r.Kind == RegionKind.Conflict);
             if (first is null)
@@ -138,9 +282,40 @@ public sealed partial class MergeToolWindow
                 return;
             }
             id = first.RegionId;
-            GoTo(id.Value, announce: false);
+            GoTo(id, announce: false);
         }
-        await ApplyAsync(make(id.Value), id);
+        if (_session.Document.Regions.FirstOrDefault(r => r.RegionId == id) is { } target)
+        {
+            View.RevealLine(target.ResultLines.Start);
+        }
+        await ApplyAsync(make(id), id);
+    }
+
+    /// <summary>
+    /// The non-equal region holding the RESULT caret, when RESULT has keyboard focus. A caret exactly at a region's end
+    /// belongs to it only when that end is not a line start (an empty region, or text without a final newline).
+    /// </summary>
+    private int? CaretRegion()
+    {
+        var result = (AvaloniaEditSurface)View.Result;
+        if (!result.HasFocus)
+        {
+            return null;
+        }
+        var caret = result.CaretOffset;
+        var text = _session.Document.Text;
+        foreach (var region in _session.Document.Regions)
+        {
+            if (region.Kind == RegionKind.Equal || caret < region.Start || caret > region.End)
+            {
+                continue;
+            }
+            if (caret < region.End || region.Start == region.End || text[region.End - 1] != '\n')
+            {
+                return region.RegionId;
+            }
+        }
+        return null;
     }
 
     private async Task ApplyAsync(RegionCommand command, int? regionId)

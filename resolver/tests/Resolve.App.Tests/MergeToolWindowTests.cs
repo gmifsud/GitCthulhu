@@ -14,6 +14,7 @@ using Resolve.App.Tests.Support;
 using Resolve.Core.Cli;
 using Resolve.Core.Merge;
 using Resolve.Core.Resolution;
+using Resolve.Core.Session;
 
 namespace Resolve.App.Tests;
 
@@ -385,7 +386,13 @@ public class MergeToolWindowTests
     public void Buttons_carry_the_role_labels()
     {
         var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
-        var labels = w.GetVisualDescendants().OfType<Button>().Select(b => b.Content as string).ToList();
+        var buttons = w.GetVisualDescendants().OfType<Button>().ToList();
+        // A footer button's content carries its access-key marker; its accessible name is the plain label.
+        var labels = buttons.Select(b => AutomationProperties.GetName(b) is { Length: > 0 } name ? name : b.Content as string).ToList();
+        Assert.Equal("_Save & exit (0)", w.SaveAndExitButton.Content);
+        Assert.Equal("Exit _unresolved (1)", w.ExitUnresolvedButton.Content);
+        Assert.Equal("_Cancel — leave file untouched (1)", w.CancelButton.Content);
+        Assert.Equal("Alt+S", AutomationProperties.GetAccessKey(w.SaveAndExitButton));
         Assert.Contains("Accept LEFT · Current branch", labels);
         Assert.Contains("Accept RIGHT · Incoming branch", labels);
         Assert.Contains("Both, LEFT first", labels);
@@ -583,6 +590,9 @@ public class MergeToolWindowTests
             (Key.Y, KeyModifiers.Control, WindowCommand.Redo),
             (Key.Z, KeyModifiers.Control | KeyModifiers.Shift, WindowCommand.Redo),
             (Key.S, KeyModifiers.Control, WindowCommand.Save),
+            (Key.S, KeyModifiers.Alt, WindowCommand.SaveAndExit),
+            (Key.U, KeyModifiers.Alt, WindowCommand.ExitUnresolved),
+            (Key.C, KeyModifiers.Alt, WindowCommand.Cancel),
         ];
         foreach (var (key, mods, command) in rows)
         {
@@ -596,32 +606,243 @@ public class MergeToolWindowTests
         Assert.Null(Keymap.For(Key.Z, KeyModifiers.None));
     }
 
+    private static object? Focused(MergeToolWindow window) => window.FocusManager?.GetFocusedElement();
+
+    private static AvaloniaEditSurface Pane(IEditorSurface surface) => (AvaloniaEditSurface)surface;
+
+    /// <summary>A real key press and release; no release once the press closed the window (an exit key).</summary>
+    private static void Press(MergeToolWindow window, PhysicalKey key, RawInputModifiers modifiers = RawInputModifiers.None)
+    {
+        window.KeyPressQwerty(key, modifiers);
+        if (window.Result is null)
+        {
+            window.KeyReleaseQwerty(key, modifiers);
+        }
+    }
+
+    private static List<RegionView> Conflicts(MergeToolWindow window) =>
+        [.. window.Session.Document.Regions.Where(region => region.Kind == RegionKind.Conflict)];
+
+    private static RegionView Region(MergeToolWindow window, int regionId) =>
+        window.Session.Document.Regions.Single(region => region.RegionId == regionId);
+
     [AvaloniaFact]
-    public void Tab_order_runs_left_result_right_navigator_actions_footer()
+    public void F6_and_Shift_F6_cycle_focus_through_the_panes_navigator_actions_and_footer()   // ruling R29
     {
         var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
-        var tree = w.GetVisualDescendants().ToList();
-        int IndexOf(Visual visual) => tree.IndexOf(visual);
-        TextArea AreaOf(IEditorSurface surface) => ((AvaloniaEdit.TextEditor)surface.View).TextArea;
+        Pane(w.View.Left).Focus();
+        Assert.Equal(0, w.FocusedGroup());
 
-        Visual[] order =
-        [
-            AreaOf(w.View.Left),
-            AreaOf(w.View.Result),
-            AreaOf(w.View.Right),
-            w.Navigator,
-            w.AcceptLeftButton,
-            w.ApplyAllButton,
-            w.SaveButton,
-            w.SaveAndExitButton,
-            w.ExitUnresolvedButton,
-            w.CancelButton,
-        ];
-        var positions = order.Select(IndexOf).ToList();
-        Assert.All(positions, position => Assert.True(position >= 0));
-        Assert.Equal(positions.Order().ToList(), positions);
-        Assert.Equal(positions.Distinct().Count(), positions.Count);
-        Assert.All(order.OfType<InputElement>(), e => Assert.True(e.Focusable || e is ConflictNavigator));
+        // LEFT → RESULT → RIGHT → navigator → action bar → footer, wrapping; Shift+F6 runs it backwards.
+        foreach (var expected in new[] { 1, 2, 3, 4, 5, 0 })
+        {
+            Press(w, PhysicalKey.F6);
+            Assert.Equal(expected, w.FocusedGroup());
+        }
+        Assert.True(Pane(w.View.Left).HasFocus);
+        foreach (var expected in new[] { 5, 4, 3, 2, 1, 0 })
+        {
+            Press(w, PhysicalKey.F6, RawInputModifiers.Shift);
+            Assert.Equal(expected, w.FocusedGroup());
+        }
+
+        // Where each stop lands: the navigator's item, the first action, the first footer button.
+        Press(w, PhysicalKey.F6);
+        Press(w, PhysicalKey.F6);
+        Press(w, PhysicalKey.F6);
+        Assert.IsType<ListBoxItem>(Focused(w));
+        Press(w, PhysicalKey.F6);
+        Assert.Same(w.AcceptLeftButton, Focused(w));
+        Press(w, PhysicalKey.F6);
+        Assert.Same(w.SaveButton, Focused(w));
+    }
+
+    [AvaloniaFact]
+    public void Tab_leaves_the_read_only_panes_and_result_keeps_tab_as_a_character()   // ruling R29
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        Pane(w.View.Left).Focus();
+        Press(w, PhysicalKey.Tab);
+        Assert.Equal(1, w.FocusedGroup());   // out of LEFT, into RESULT
+
+        var before = Result(w).Text;
+        Press(w, PhysicalKey.Tab);
+        Assert.Equal(1, w.FocusedGroup());   // RESULT keeps focus and takes the Tab as text
+        Assert.NotEqual(before, Result(w).Text);
+        Assert.Equal(w.Session.Document.Text, Result(w).Text);
+
+        Pane(w.View.Right).Focus();
+        Press(w, PhysicalKey.Tab);
+        Assert.Equal(3, w.FocusedGroup());   // out of RIGHT, into the navigator
+        Pane(w.View.Right).Focus();
+        Press(w, PhysicalKey.Tab, RawInputModifiers.Shift);
+        Assert.Equal(1, w.FocusedGroup());   // back to RESULT
+        Pane(w.View.Left).Focus();
+        Press(w, PhysicalKey.Tab, RawInputModifiers.Shift);
+        Assert.Equal(5, w.FocusedGroup());   // wraps to the footer
+    }
+
+    [AvaloniaFact]
+    public void Alt_S_on_a_complete_document_saves_and_exits_with_0()   // ruling R29
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        w.Run(WindowCommand.AcceptLeft);
+        Assert.True(w.Session.Document.IsComplete);
+        Pane(w.View.Result).Focus();
+
+        Press(w, PhysicalKey.S, RawInputModifiers.Alt);
+
+        Assert.Equal(ExitCode.Resolved, w.Result);
+        Assert.Equal(w.Session.Document.Text, File.ReadAllText(w.Session.Inputs.MergedPath));
+    }
+
+    [AvaloniaFact]
+    public void Alt_U_and_Alt_C_reach_exit_unresolved_and_cancel()   // ruling R29
+    {
+        var asked = new List<string>();
+        var w = MergeWindows.Criterion1(MergeWindows.Answering(false, asked));
+        var before = File.ReadAllBytes(w.Session.Inputs.MergedPath);
+
+        Press(w, PhysicalKey.U, RawInputModifiers.Alt);
+        Assert.Equal(["Saves exactly what RESULT shows; 1 region still unresolved."], asked);
+        Assert.Null(w.Result);
+
+        Press(w, PhysicalKey.C, RawInputModifiers.Alt);
+        Assert.Equal(ExitCode.Unresolved, w.Result);   // no edits, so Cancel asks nothing
+        Assert.True(w.Session.IsCancelled);
+        Assert.Equal(before, File.ReadAllBytes(w.Session.Inputs.MergedPath));
+    }
+
+    [AvaloniaFact]
+    public void A_command_keeps_focus_on_the_navigator_item_and_renames_it_in_place()   // final review I1
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        w.Run(WindowCommand.NextConflict);
+        Assert.True(w.Navigator.FocusCurrent());
+        var item = Assert.IsType<ListBoxItem>(Focused(w));
+
+        Press(w, PhysicalKey.ArrowLeft, RawInputModifiers.Control | RawInputModifiers.Alt);
+
+        Assert.Equal(ResolutionChoice.Left, Conflict(w).Choice);
+        Assert.Same(item, Focused(w));
+        Assert.Same(item, w.Navigator.Items()[0]);
+        Assert.Equal("Conflict 1 of 1, lines 20–20, taken from Current branch", AutomationProperties.GetName(item));
+    }
+
+    [AvaloniaFact]
+    public void A_region_command_acts_on_the_conflict_at_the_result_caret()   // ruling R30 (final review I2)
+    {
+        var w = MergeWindows.Show(Sessions.Long(), _ => Task.FromResult(true));
+        var conflicts = Conflicts(w);
+        Assert.Equal(4, conflicts.Count);
+        w.Run(WindowCommand.NextConflict);
+        Assert.Equal(conflicts[0].RegionId, w.Navigator.CurrentRegionId);
+
+        // The caret is in conflict 3, which is scrolled out of sight; the navigator is still on conflict 1.
+        Pane(w.View.Result).Focus();
+        Pane(w.View.Result).CaretOffset = conflicts[2].Start + 2;
+        w.View.Result.ScrollTo(0);
+        w.UpdateLayout();
+
+        Press(w, PhysicalKey.ArrowRight, RawInputModifiers.Control | RawInputModifiers.Alt);
+        w.UpdateLayout();
+
+        Assert.Equal(ResolutionChoice.Right, Region(w, conflicts[2].RegionId).Choice);
+        Assert.Equal(ResolutionChoice.Unresolved, Region(w, conflicts[0].RegionId).Choice);
+        Assert.Equal(conflicts[2].RegionId, w.Navigator.CurrentRegionId);
+        Assert.Equal("Conflict 3 of 4: taken from Incoming branch", Status(w));
+        var line = Region(w, conflicts[2].RegionId).ResultLines.Start;
+        var first = w.View.Result.YToLine(w.View.Result.VerticalOffset);
+        var last = w.View.Result.YToLine(w.View.Result.VerticalOffset + w.View.Result.ViewportHeight);
+        Assert.InRange(line, first, last);
+    }
+
+    [AvaloniaFact]
+    public void With_the_result_caret_in_an_equal_region_a_command_acts_on_the_navigators_region()   // ruling R30
+    {
+        var w = MergeWindows.Show(Sessions.Long(), _ => Task.FromResult(true));
+        var conflicts = Conflicts(w);
+        w.Run(WindowCommand.NextConflict);
+        Pane(w.View.Result).Focus();
+        Pane(w.View.Result).CaretOffset = 0;   // line 1 is unchanged everywhere
+
+        Press(w, PhysicalKey.ArrowRight, RawInputModifiers.Control | RawInputModifiers.Alt);
+
+        Assert.Equal(ResolutionChoice.Right, Region(w, conflicts[0].RegionId).Choice);
+        Assert.All(conflicts.Skip(1), conflict => Assert.Equal(ResolutionChoice.Unresolved, Region(w, conflict.RegionId).Choice));
+    }
+
+    [AvaloniaFact]
+    public void F8_visits_only_unresolved_conflicts_and_F7_every_change()   // spec §4.6
+    {
+        var w = MergeWindows.Show(Sessions.Long(), _ => Task.FromResult(true));
+        var conflicts = Conflicts(w);
+        w.Run(WindowCommand.NextConflict);
+        w.Run(WindowCommand.NextConflict);
+        Assert.Equal(conflicts[1].RegionId, w.Navigator.CurrentRegionId);
+        w.Run(WindowCommand.AcceptLeft);
+
+        Press(w, PhysicalKey.F8);
+        Assert.Equal(conflicts[2].RegionId, w.Navigator.CurrentRegionId);
+        Press(w, PhysicalKey.F8, RawInputModifiers.Shift);
+        Assert.Equal(conflicts[0].RegionId, w.Navigator.CurrentRegionId);   // skips the resolved conflict 2
+
+        var visited = new HashSet<int>();
+        for (var step = 0; step < w.Session.Document.Regions.Count; step++)
+        {
+            Press(w, PhysicalKey.F7);
+            visited.Add(w.Navigator.CurrentRegionId!.Value);
+        }
+        Assert.Contains(conflicts[1].RegionId, visited);
+    }
+
+    [AvaloniaFact]
+    public void F8_with_every_conflict_resolved_says_so()
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        w.Run(WindowCommand.AcceptLeft);
+        Press(w, PhysicalKey.F8);
+        Assert.Equal("No unresolved conflicts", Status(w));
+    }
+
+    [AvaloniaFact]
+    public void An_unexpected_failure_in_a_command_is_announced_and_the_window_stays()   // ruling R32 (final review I4)
+    {
+        var w = MergeWindows.Criterion1(_ => throw new InvalidOperationException("boom"));
+        var before = File.ReadAllBytes(w.Session.Inputs.MergedPath);
+
+        Press(w, PhysicalKey.U, RawInputModifiers.Alt);   // Exit unresolved asks first, and asking throws
+
+        Assert.Equal("Something went wrong: boom. Your changes are still here.", Status(w));
+        Assert.Null(w.Result);
+        Assert.False(w.Session.IsCancelled);
+        Assert.Equal(before, File.ReadAllBytes(w.Session.Inputs.MergedPath));
+        w.Run(WindowCommand.NextConflict);   // and the window still takes commands
+        Assert.Equal("Conflict 1 of 1, lines 20–20, unresolved", Status(w));
+    }
+
+    [AvaloniaFact]
+    public void A_result_that_cannot_be_encoded_keeps_the_window_open_on_save_and_exit()   // ruling R32
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        w.Run(WindowCommand.AcceptLeft);
+        w.View.Refresh(w.Session.Document.Edit(new TextChange(0, 0, "\uD800")));   // a lone surrogate
+        Assert.True(w.Session.Document.IsComplete);
+        var before = File.ReadAllBytes(w.Session.Inputs.MergedPath);
+
+        Press(w, PhysicalKey.S, RawInputModifiers.Alt);
+
+        Assert.Null(w.Result);
+        Assert.Equal("Could not write the file. Your changes are still here.", Status(w));
+        Assert.Equal(before, File.ReadAllBytes(w.Session.Inputs.MergedPath));
+    }
+
+    [AvaloniaFact]
+    public void An_empty_stage_base_is_a_real_ancestor_so_there_is_no_no_common_ancestor_banner()
+    {
+        var w = MergeWindows.Show(Sessions.EmptyStageBase(), _ => Task.FromResult(true));
+        Assert.Equal(BaseKind.EmptyStage, w.Session.Inputs.BaseKind);
+        Assert.DoesNotContain(w.GetVisualDescendants().OfType<TextBlock>(), block => block.Text?.StartsWith("No common ancestor", StringComparison.Ordinal) == true);
     }
 
     [AvaloniaFact]

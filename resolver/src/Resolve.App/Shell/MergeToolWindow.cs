@@ -28,6 +28,8 @@ public sealed partial class MergeToolWindow : Window
     private readonly Func<string, Task<bool>> _confirm;
     private readonly TextWriter _warnings;
     private readonly TextBlock _counter = new();
+    private WrapPanel? _actionBar;
+    private StackPanel? _footer;
     private bool _busy;
     private bool _closing;
 
@@ -48,10 +50,11 @@ public sealed partial class MergeToolWindow : Window
         Navigator = new ConflictNavigator(session);
         AcceptLeftButton = Action($"Accept LEFT · {labels.LeftRole}", WindowCommand.AcceptLeft);
         ApplyAllButton = Action("Apply all non-conflicting", WindowCommand.ApplyAllNonConflicting);
-        SaveButton = Footer("Save", () => Fire(SaveAsync));
-        SaveAndExitButton = Footer(FooterLabel("Save & exit", ExitCode.Resolved), () => Fire(SaveAndExitAsync));
-        ExitUnresolvedButton = Footer(FooterLabel("Exit unresolved", ExitCode.Unresolved), () => Fire(ExitUnresolvedAsync));
-        CancelButton = Footer(FooterLabel("Cancel — leave file untouched", ExitCode.Unresolved), () => Fire(CancelAsync));
+        SaveButton = Footer("Save", accessKey: null, WindowCommand.Save);
+        // Ruling R29: the three exits have access keys (Alt+S, Alt+U, Alt+C), handled through the key table.
+        SaveAndExitButton = Footer(FooterLabel("Save & exit", ExitCode.Resolved), 'S', WindowCommand.SaveAndExit);
+        ExitUnresolvedButton = Footer(FooterLabel("Exit unresolved", ExitCode.Unresolved), 'U', WindowCommand.ExitUnresolved);
+        CancelButton = Footer(FooterLabel("Cancel — leave file untouched", ExitCode.Unresolved), 'C', WindowCommand.Cancel);
 
         var root = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(Gap) };
         Place(root, BuildHeader(session), 0);
@@ -62,8 +65,9 @@ public sealed partial class MergeToolWindow : Window
 
         AddHandler(KeyDownEvent, OnKeyDown, RoutingStrategies.Tunnel);
         Closing += OnClosing;
-        Navigator.RegionChosen += id => GoTo(id, announce: false);
-        View.Result.Edited += _ => Update(refreshNavigator: true);
+        Navigator.RegionChosen += id => Safely(() => GoTo(id, announce: false));
+        View.ResultEdited += () => Safely(() => Update(refreshNavigator: true));
+        View.Problem += reason => Announce(FailureMessage(reason));
         Update(refreshNavigator: false);
     }
 
@@ -141,7 +145,8 @@ public sealed partial class MergeToolWindow : Window
         {
             header.Children.Add(new TextBlock { Text = banner, TextWrapping = TextWrapping.Wrap });
         }
-        if (session.Inputs.BaseKind != BaseKind.Present)
+        // An empty stage-1 file is a real (empty) common ancestor; only a missing one means "no common ancestor".
+        if (session.Inputs.BaseKind is BaseKind.Absent or BaseKind.AbsentAssumed)
         {
             header.Children.Add(new TextBlock { Text = NoCommonAncestor, TextWrapping = TextWrapping.Wrap });
         }
@@ -189,6 +194,7 @@ public sealed partial class MergeToolWindow : Window
     private WrapPanel BuildActionBar(SideLabels labels)
     {
         var bar = new WrapPanel { Margin = new Thickness(0, Gap, 0, 0) };
+        _actionBar = bar;
         bar.Children.Add(AcceptLeftButton);
         bar.Children.Add(Action($"Accept RIGHT · {labels.RightRole}", WindowCommand.AcceptRight));
         bar.Children.Add(Action("Both, LEFT first", WindowCommand.BothLeftFirst));
@@ -199,7 +205,7 @@ public sealed partial class MergeToolWindow : Window
         return bar;
     }
 
-    private StackPanel BuildFooter() => new()
+    private StackPanel BuildFooter() => _footer = new()
     {
         Orientation = Orientation.Horizontal,
         Spacing = Gap,
@@ -215,10 +221,20 @@ public sealed partial class MergeToolWindow : Window
         return button;
     }
 
-    private static Button Footer(string text, Action onClick)
+    /// <summary>
+    /// A footer button. With an access key, the content carries Avalonia's underscore marker so the key is shown
+    /// underlined, while the accessible name stays the plain label.
+    /// </summary>
+    private Button Footer(string text, char? accessKey, WindowCommand command)
     {
-        var button = new Button { Content = text };
-        button.Click += (_, _) => onClick();
+        var content = accessKey is { } key && text.IndexOf(key, StringComparison.OrdinalIgnoreCase) is var at and >= 0 ? text.Insert(at, "_") : text;
+        var button = new Button { Content = content };
+        AutomationProperties.SetName(button, text);
+        if (accessKey is { } shortcut)
+        {
+            AutomationProperties.SetAccessKey(button, $"Alt+{shortcut}");
+        }
+        button.Click += (_, _) => Run(command);
         return button;
     }
 }

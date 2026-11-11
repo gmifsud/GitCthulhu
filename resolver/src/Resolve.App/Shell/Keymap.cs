@@ -20,6 +20,9 @@ public enum WindowCommand
     Redo,
     Save,
     ApplyAllNonConflicting,
+    SaveAndExit,
+    ExitUnresolved,
+    Cancel,
 }
 
 /// <summary>The key table as pure data: modifiers must match exactly, so Ctrl+Shift+Z is Redo and never Undo.</summary>
@@ -44,6 +47,9 @@ public static class Keymap
         (Key.Y, KeyModifiers.Control) => WindowCommand.Redo,
         (Key.Z, KeyModifiers.Control | KeyModifiers.Shift) => WindowCommand.Redo,
         (Key.S, KeyModifiers.Control) => WindowCommand.Save,
+        (Key.S, KeyModifiers.Alt) => WindowCommand.SaveAndExit,      // ruling R29: the footer's access keys
+        (Key.U, KeyModifiers.Alt) => WindowCommand.ExitUnresolved,
+        (Key.C, KeyModifiers.Alt) => WindowCommand.Cancel,
         _ => null,
     };
 }

@@ -24,6 +24,7 @@ public sealed class ConflictNavigator : UserControl
     private readonly List<int> _regionIds = [];
     private readonly Dictionary<int, string> _names = [];
     private readonly Dictionary<int, string> _summaries = [];
+    private List<ListBoxItem> _items = [];
 
     public ConflictNavigator(MergeToolSession session)
     {
@@ -85,52 +86,89 @@ public sealed class ConflictNavigator : UserControl
     /// <summary>A short "Conflict 1 of 1: taken from Current branch" for announcing the outcome of a command.</summary>
     internal string? SummaryOf(int regionId) => _summaries.GetValueOrDefault(regionId);
 
-    /// <summary>Rebuilds every item name from the current document, keeping the current region.</summary>
+    /// <summary>
+    /// Brings every item name in line with the current document. Items are keyed by region id and updated in place,
+    /// so selection and keyboard focus stay where they are; the item set is rebuilt only if the regions changed.
+    /// </summary>
     public void Refresh()
     {
-        var current = CurrentRegionId;
         var labels = _session.Inputs.Labels;
         var regions = _session.Document.Regions.Where(region => region.Kind != RegionKind.Equal).ToList();
-        var conflicts = regions.Where(region => region.Kind == RegionKind.Conflict).ToList();
-        var changes = regions.Where(region => region.Kind != RegionKind.Conflict).ToList();
+        var entries = new List<(int RegionId, string Name, string Summary)>(regions.Count);
+        AddEntries(regions.Where(region => region.Kind == RegionKind.Conflict).ToList(), "Conflict", labels, entries);
+        AddEntries(regions.Where(region => region.Kind != RegionKind.Conflict).ToList(), "Change", labels, entries);
 
-        var items = new List<ListBoxItem>(regions.Count);
-        _regionIds.Clear();
         _names.Clear();
         _summaries.Clear();
-        AddItems(conflicts, "Conflict", labels, items);
-        AddItems(changes, "Change", labels, items);
+        foreach (var (regionId, name, summary) in entries)
+        {
+            _names[regionId] = name;
+            _summaries[regionId] = summary;
+        }
 
-        _list.ItemsSource = items;
+        if (entries.Select(entry => entry.RegionId).SequenceEqual(_regionIds))
+        {
+            for (var index = 0; index < entries.Count; index++)
+            {
+                Rename(_items[index], entries[index].Name);
+            }
+            return;
+        }
+
+        var current = CurrentRegionId;
+        _regionIds.Clear();
+        _items = new List<ListBoxItem>(entries.Count);
+        foreach (var (regionId, name, _) in entries)
+        {
+            _items.Add(NewItem(regionId, name));
+            _regionIds.Add(regionId);
+        }
+        _list.ItemsSource = _items;
         _list.SelectedIndex = current is { } id ? _regionIds.IndexOf(id) : -1;
     }
 
-    internal IReadOnlyList<Control> Items() => _list.ItemsSource is IEnumerable<ListBoxItem> items ? [.. items] : [];
+    /// <summary>Moves keyboard focus to the current item (the first one when none is current), or the list when it is empty.</summary>
+    public bool FocusCurrent()
+    {
+        var index = _list.SelectedIndex >= 0 ? _list.SelectedIndex : 0;
+        return index < _items.Count ? _items[index].Focus(NavigationMethod.Tab) : _list.Focus(NavigationMethod.Tab);
+    }
 
-    private void AddItems(List<RegionView> regions, string noun, SideLabels labels, List<ListBoxItem> items)
+    internal IReadOnlyList<Control> Items() => [.. _items];
+
+    private static void AddEntries(List<RegionView> regions, string noun, SideLabels labels, List<(int RegionId, string Name, string Summary)> entries)
     {
         for (var position = 0; position < regions.Count; position++)
         {
             var region = regions[position];
             var heading = string.Create(CultureInfo.InvariantCulture, $"{noun} {position + 1} of {regions.Count}");
             var state = State(region, labels);
-            var name = $"{heading}, {Lines(region)}, {state}";
-            var item = new ListBoxItem { Content = new TextBlock { Text = name }, Focusable = true };
-            AutomationProperties.SetName(item, name);
-            var regionId = region.RegionId;
-            _names[regionId] = name;
-            _summaries[regionId] = $"{heading}: {state}";
-            // ListBoxItem marks the press handled when it selects itself, so listen to handled events too.
-            item.AddHandler(PointerPressedEvent, (_, e) =>
-            {
-                if (e.GetCurrentPoint(item).Properties.IsLeftButtonPressed)
-                {
-                    Choose(regionId);
-                }
-            }, RoutingStrategies.Bubble, handledEventsToo: true);
-            items.Add(item);
-            _regionIds.Add(regionId);
+            entries.Add((region.RegionId, $"{heading}, {Lines(region)}, {state}", $"{heading}: {state}"));
         }
+    }
+
+    private static void Rename(ListBoxItem item, string name)
+    {
+        if (item.Content is TextBlock text && text.Text != name)
+        {
+            text.Text = name;
+            AutomationProperties.SetName(item, name);
+        }
+    }
+
+    private ListBoxItem NewItem(int regionId, string name)
+    {
+        var item = new ListBoxItem { Content = new TextBlock { Text = name }, Focusable = true };
+        AutomationProperties.SetName(item, name);
+        // ListBoxItem marks the press handled when it selects itself, so listen to handled events too.
+        item.AddHandler(PointerPressedEvent, (_, e) =>
+        {
+            if (e.GetCurrentPoint(item).Properties.IsLeftButtonPressed)
+            {
+                Choose(regionId);
+            }
+        }, RoutingStrategies.Bubble, handledEventsToo: true);
+        return item;
     }
 
     private static string Lines(RegionView region)
