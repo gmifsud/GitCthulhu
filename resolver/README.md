@@ -12,7 +12,7 @@ Phase 0 (foundation and spikes) is done; its table is further down.
 | Phase 1 item | State | Where |
 |---|---|---|
 | Command line and exit codes (`cthulhu-resolve merge …`) | ✅ | `src/Resolve.Core/Cli/CommandLine.cs` |
-| Input loading, role labels (merge, rebase, cherry-pick, revert, stash) | ✅ | `Session/MergeInputs.cs`, `Session/OperationRoles.cs` |
+| Input loading, role labels (merge, rebase, cherry-pick, revert; stash roles are not detected yet) | ✅ | `Session/MergeInputs.cs`, `Session/OperationRoles.cs` |
 | Planning from git's own diffs | ✅ | `Merge/MergePlanning.cs`, `Diff/GitLineDiff.cs` |
 | Resolution document, region commands, undo | ✅ | `Resolution/ResolutionDocument.cs`, `Resolution/RegionCommands.cs` |
 | Merge-tool session: atomic save, backups, exit codes, marker scan | ✅ | `Session/MergeToolSession.cs`, `Persistence/AtomicFileWriter.cs` |
