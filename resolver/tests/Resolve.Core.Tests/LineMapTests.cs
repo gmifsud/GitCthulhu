@@ -15,6 +15,22 @@ public class LineMapTests
     private static int LineCount(string text) =>
         text.Length == 0 ? 0 : text.Count(character => character == '\n') + (text.EndsWith('\n') ? 0 : 1);
 
+
+    /// <summary>A side line past 0 that maps to the pinned result 0, which <c>ToSide</c> maps back to side 0.</summary>
+    private static bool IsPinnedEnd(LineMap map, double line) => line > 0 && map.ToResult(line) == 0;
+
+    [Fact]
+    public void A_leading_collapsed_block_pins_the_start_so_the_next_block_does_not_round_trip_from_zero()
+    {
+        // Shrunk case [0,1,0, 0,1,1] from seed 40ybIj7opN64: side [0,1)->result [0,0) then side [1,2)->result [0,1).
+        var map = LineMap.Build([Block(0, 1, 0, 0), Block(1, 2, 0, 1)], 2, 1);
+        Assert.Equal(0, map.ToResult(0), Tolerance);
+        Assert.Equal(0, map.ToResult(1), Tolerance);
+        Assert.Equal(1, map.ToResult(2), Tolerance);
+        Assert.Equal(0, map.ToSide(0), Tolerance);
+        Assert.Equal(1.5, map.ToSide(0.5), Tolerance);
+        Assert.Equal(2, map.ToSide(1), Tolerance);
+    }
     [Fact]
     public void Equal_runs_map_one_to_one_and_blocks_proportionally()
     {
@@ -91,7 +107,7 @@ public class LineMapTests
                 for (var step = start * 4; step < end * 4; step++)
                 {
                     var line = step / 4.0;
-                    if (map.ToResult(line) > 0)   // the ends of each pane are pinned to the ends of the other (0 maps to 0)
+                    if (!IsPinnedEnd(map, line))   // the ends of each pane are pinned to the ends of the other
                     {
                         Assert.Equal(line, map.ToSide(map.ToResult(line)), Tolerance);
                     }
@@ -102,7 +118,10 @@ public class LineMapTests
                 for (var step = 0; step < 4; step++)
                 {
                     var line = blockSide.Start + (blockSide.Length * step / 4.0);
-                    Assert.Equal(line, map.ToSide(map.ToResult(line)), Tolerance);
+                    if (!IsPinnedEnd(map, line))
+                    {
+                        Assert.Equal(line, map.ToSide(map.ToResult(line)), Tolerance);
+                    }
                 }
             }
         });
