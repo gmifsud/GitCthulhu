@@ -124,7 +124,9 @@ public static class PaneMaps
 {
     /// <summary>
     /// Pairs every plan region's range on a side with its current lines in the result. Non-equal regions are blocks,
-    /// and so is an equal region whose text was edited to a different length. No caching: this is O(regions).
+    /// and so is an equal region whose lines no longer match one to one. No caching: this is O(regions).
+    /// Never throws for any state of a document built from <paramref name="plan"/> (ruling R27): two regions can share
+    /// a line in the result when a boundary sits mid-line, so the result ranges are first made a monotone tiling.
     /// </summary>
     public static (LineMap Left, LineMap Right) For(MergePlan plan, ResolutionDocument document)
     {
@@ -135,28 +137,66 @@ public static class PaneMaps
         {
             throw new ArgumentException("The document does not belong to this plan.", nameof(document));
         }
-        var left = new List<(LineRange Side, LineRange Result)>();
-        var right = new List<(LineRange Side, LineRange Result)>();
         for (var index = 0; index < views.Count; index++)
         {
-            var planned = plan.Regions[index];
-            var result = views[index].ResultLines;
-            if (views[index].RegionId != planned.Id)
+            if (views[index].RegionId != plan.Regions[index].Id)
             {
                 throw new ArgumentException("The document does not belong to this plan.", nameof(document));
             }
-            if (planned.Kind != RegionKind.Equal || planned.Left.Length != result.Length)
-            {
-                left.Add((planned.Left, result));
-            }
-            if (planned.Kind != RegionKind.Equal || planned.Right.Length != result.Length)
-            {
-                right.Add((planned.Right, result));
-            }
         }
-        PlanRegion? last = plan.Regions.Length == 0 ? null : plan.Regions[^1];
         var resultLines = LineCount(document.Text);
-        return (LineMap.Build(left, last?.Left.End ?? 0, resultLines), LineMap.Build(right, last?.Right.End ?? 0, resultLines));
+        var bounds = ResultBounds(views, resultLines);
+        return (Build(plan, bounds, resultLines, static region => region.Left), Build(plan, bounds, resultLines, static region => region.Right));
+    }
+
+    /// <summary>
+    /// Region <c>i</c> owns result lines [<c>bounds[i]</c>, <c>bounds[i + 1]</c>): a line shared by two regions belongs to
+    /// the later one, and an empty region sits where the next non-empty one starts. Monotone by construction.
+    /// </summary>
+    private static int[] ResultBounds(IReadOnlyList<RegionView> views, int resultLines)
+    {
+        var bounds = new int[views.Count + 1];
+        var next = resultLines;
+        bounds[views.Count] = resultLines;
+        for (var index = views.Count - 1; index >= 1; index--)
+        {
+            var view = views[index];
+            if (view.End > view.Start)
+            {
+                next = Math.Clamp(view.ResultLines.Start, 0, next);
+            }
+            bounds[index] = next;
+        }
+        return bounds;
+    }
+
+    /// <summary>
+    /// Side ranges are clamped into a gap-free tiling too, so every stretch between two blocks is a run of equal regions
+    /// of matching lengths on both sides — exactly what <see cref="LineMap.Build"/> accepts.
+    /// </summary>
+    private static LineMap Build(MergePlan plan, int[] bounds, int resultLines, Func<PlanRegion, LineRange> sideOf)
+    {
+        var blocks = new List<(LineRange Side, LineRange Result)>();
+        var sideEnd = 0;
+        for (var index = 0; index < plan.Regions.Length; index++)
+        {
+            var planned = plan.Regions[index];
+            var range = sideOf(planned);
+            var start = Math.Max(range.Start, sideEnd);
+            var side = new LineRange(start, Math.Max(range.End, start));
+            var result = new LineRange(bounds[index], bounds[index + 1]);
+            if (planned.Kind != RegionKind.Equal || side.Length != result.Length)
+            {
+                blocks.Add((side, result));
+            }
+            sideEnd = side.End;
+        }
+        if (plan.Regions.Length == 0 && resultLines > 0)
+        {
+            // Nothing was planned (three empty inputs) but text was typed: the whole result is one block.
+            blocks.Add((new LineRange(0, 0), new LineRange(0, resultLines)));
+        }
+        return LineMap.Build(blocks, sideEnd, resultLines);
     }
 
     private static int LineCount(string text) =>

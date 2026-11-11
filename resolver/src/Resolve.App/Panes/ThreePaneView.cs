@@ -71,12 +71,28 @@ public sealed class ThreePaneView : Grid
 
     internal BandCanvas RightBand { get; }
 
+    /// <summary>
+    /// Raised after RESULT and the document absorbed a user edit, so the window can refresh what depends on the
+    /// document. Raised outside the editor's own change handling; it never feeds back into the edit.
+    /// </summary>
+    public event Action? ResultEdited;
+
+    /// <summary>Raised with the reason when an edit or refresh failed and RESULT was resynchronised from the document.</summary>
+    public event Action<string>? Problem;
+
     /// <summary>Applies document-driven changes (a region action, undo, redo) to RESULT, then refreshes maps, tints and bands.</summary>
     public void Refresh(IReadOnlyList<TextChange> changes)
     {
         ArgumentNullException.ThrowIfNull(changes);
-        _result.ApplyChanges(changes);
-        Decorate();
+        try
+        {
+            _result.ApplyChanges(changes);
+            Decorate();
+        }
+        catch (Exception error)
+        {
+            Recover(error);
+        }
     }
 
     /// <summary>Brings a RESULT line into view, a third of the way down the viewport unless it is already comfortably visible.</summary>
@@ -109,7 +125,8 @@ public sealed class ThreePaneView : Grid
 
     /// <summary>
     /// RESULT already holds the user's change; the document may have rewritten it (typed newlines become its own),
-    /// so bring RESULT in line. Never throws: anything unexpected resyncs RESULT from the document text instead.
+    /// so bring RESULT in line. Never throws (ruling R27): this runs inside AvaloniaEdit's input handling, so anything
+    /// unexpected — in the document, the maps or the decorations — resyncs RESULT from the document text and is announced.
     /// </summary>
     internal void HandleResultEdit(TextChange change)
     {
@@ -125,12 +142,29 @@ public sealed class ThreePaneView : Grid
                 // The surface holds change.InsertedText at the offset now; swap it for the document's text.
                 _result.ApplyChanges([new TextChange(change.Offset, change.InsertedText.Length, applied[0].InsertedText)]);
             }
+            Decorate();
         }
-        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+        catch (Exception error)
+        {
+            Recover(error);
+        }
+        ResultEdited?.Invoke();
+    }
+
+    /// <summary>The document is the truth: show its text again, redraw what can be redrawn, and tell the user.</summary>
+    private void Recover(Exception error)
+    {
+        try
         {
             _result.Resync(_session.Document.Text);
+            Decorate();
         }
-        Decorate();
+        catch (Exception again)
+        {
+            // Nothing more can be done here; the text is still the document's and the next edit tries again.
+            error = new AggregateException(error, again);
+        }
+        Problem?.Invoke(error.Message);
     }
 
     private void Decorate()

@@ -229,4 +229,24 @@ public class ThreePaneViewTests
         ((TextEditor)view.Result.View).Document.Insert(session.Document.Regions[conflict].Start, "x");
         Check(RegionTint.Manual);
     }
+
+    [AvaloniaFact]
+    public void A_failure_in_the_edit_path_resyncs_result_and_reports_without_throwing()   // ruling R27
+    {
+        var session = Sessions.Criterion1();
+        var (_, view) = Host(session);
+        var problems = new List<string>();
+        var edited = 0;
+        view.Problem += problems.Add;
+        view.ResultEdited += () => edited++;
+        view.Result.ApplyChanges([new TextChange(0, 0, "abc")]);   // RESULT now differs from the document's text
+        Assert.NotEqual(session.Document.Text, ((AvaloniaEditSurface)view.Result).Text);
+
+        // An edit the document refuses (past its end): nothing escapes, and RESULT shows the document's text again.
+        view.HandleResultEdit(new TextChange(1_000_000, 0, "x"));
+
+        Assert.Equal(session.Document.Text, ((AvaloniaEditSurface)view.Result).Text);
+        Assert.Single(problems);
+        Assert.Equal(1, edited);
+    }
 }

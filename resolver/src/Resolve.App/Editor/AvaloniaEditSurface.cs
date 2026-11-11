@@ -72,6 +72,19 @@ public sealed class AvaloniaEditSurface : IEditorSurface
 
     public int CaretLine => _editor.TextArea.Caret.Line - 1;
 
+    /// <summary>The caret as a character offset into the text.</summary>
+    internal int CaretOffset
+    {
+        get => _editor.CaretOffset;
+        set => _editor.CaretOffset = Math.Clamp(value, 0, _editor.Document.TextLength);
+    }
+
+    /// <summary>True while keyboard focus is in this pane's text area.</summary>
+    internal bool HasFocus => _editor.TextArea.IsKeyboardFocusWithin;
+
+    /// <summary>Selects [<paramref name="start"/>, <paramref name="start"/> + <paramref name="length"/>) and puts the caret at its end.</summary>
+    internal void Select(int start, int length) => _editor.Select(start, length);
+
     public void MoveCaretToLine(int line)
     {
         var document = _editor.Document;

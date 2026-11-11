@@ -208,4 +208,99 @@ public class LineMapTests
         var block = Assert.Single(edited.Blocks, candidate => candidate.Side.Start == 0);
         Assert.Equal(block.Side.Length + 1, block.Result.Length);
     }
+
+    /// <summary>Both maps are monotone over half-line steps and pinned at both ends.</summary>
+    private static void AssertMonotone(LineMap map, int sideLines, int resultLines)
+    {
+        var previous = 0.0;
+        for (var step = 0; step <= sideLines * 2; step++)
+        {
+            var mapped = map.ToResult(step / 2.0);
+            Assert.True(mapped >= previous - Tolerance, $"ToResult fell at side line {step / 2.0}");
+            previous = mapped;
+        }
+        Assert.Equal(resultLines, map.ToResult(sideLines), Tolerance);
+        previous = 0;
+        for (var step = 0; step <= resultLines * 2; step++)
+        {
+            var mapped = map.ToSide(step / 2.0);
+            Assert.True(mapped >= previous - Tolerance, $"ToSide fell at result line {step / 2.0}");
+            previous = mapped;
+        }
+    }
+
+    private static void AssertMapsHold(ResolutionDocument doc)
+    {
+        var (left, right) = PaneMaps.For(doc.Plan, doc);
+        var resultLines = LineCount(doc.Text);
+        AssertMonotone(left, doc.Plan.Regions[^1].Left.End, resultLines);
+        AssertMonotone(right, doc.Plan.Regions[^1].Right.End, resultLines);
+    }
+
+    [Fact]
+    public void Typing_one_character_into_an_empty_insert_insert_conflict_keeps_the_maps_valid()
+    {
+        // Final review C1: the conflict and the equal region after it shared a line, and LineMap.Build threw.
+        var doc = InsertInsert();
+        var conflict = doc.Regions.First(view => view.Kind == RegionKind.Conflict);
+        Assert.Equal(conflict.Start, conflict.End);
+        doc.Edit(new TextChange(conflict.Start, 0, "x"));
+        AssertMapsHold(doc);
+    }
+
+    [Fact]
+    public void Joining_lines_at_region_boundaries_keeps_the_maps_valid()
+    {
+        foreach (var make in new Func<ResolutionDocument>[] { () => Criterion1(), InsertInsert, NoFinalNewline })
+        {
+            var boundaries = make().Regions.Skip(1).Select(view => view.Start).Where(start => start > 0).Distinct().ToList();
+            foreach (var boundary in boundaries)
+            {
+                // Backspace at the first column of the region's line, then Delete at the end of the line before it.
+                var backspace = make();
+                backspace.Edit(new TextChange(boundary - 1, 1, ""));
+                AssertMapsHold(backspace);
+                var delete = make();
+                if (boundary < delete.Text.Length)
+                {
+                    delete.Edit(new TextChange(boundary, 1, ""));
+                    AssertMapsHold(delete);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void Deleting_at_the_end_of_a_conflict_line_and_of_an_applied_change_line_keeps_the_maps_valid()
+    {
+        var doc = Criterion1();
+        var conflict = doc.Regions.Single(view => view.Kind == RegionKind.Conflict);
+        doc.Edit(new TextChange(conflict.End - 1, 1, ""));
+        AssertMapsHold(doc);
+
+        var change = Criterion1();
+        var applied = change.Regions.First(view => view.Kind == RegionKind.LeftOnly);
+        change.Edit(new TextChange(applied.End - 1, 1, ""));
+        AssertMapsHold(change);
+    }
+
+    [Fact]
+    public void Pane_maps_never_throw_and_stay_monotone_under_random_edits() =>   // ruling R27
+        Gen.Int[0, 2].SelectMany(fixture => Gen.Select(Gen.Int[0, 500], Gen.Int[0, 12], Gen.Int[0, 4]).Array[1, 30].Select(edits => (fixture, edits)))
+            .Sample(sample =>
+            {
+                string[] texts = ["", "x", "\n", "xy\n", "\r\nz"];
+                var doc = sample.fixture switch { 0 => Criterion1(), 1 => InsertInsert(), _ => NoFinalNewline() };
+                foreach (var (offset, removed, text) in sample.edits)
+                {
+                    var at = offset % (doc.Text.Length + 1);
+                    var length = Math.Min(removed, doc.Text.Length - at);
+                    if (length == 0 && texts[text].Length == 0)
+                    {
+                        continue;
+                    }
+                    doc.Edit(new TextChange(at, length, texts[text]));
+                    AssertMapsHold(doc);
+                }
+            });
 }

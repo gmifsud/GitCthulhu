@@ -21,6 +21,16 @@ internal static class Docs
         return Build(Lf(baseLines), Lf(left), Lf(right), clock);
     }
 
+    /// <summary>
+    /// An empty-base (insert/insert) conflict after "c" — empty in the initial result — between a LEFT change of "b"
+    /// and a RIGHT change of "e", plus a modify/modify conflict on "g".
+    /// </summary>
+    public static ResolutionDocument InsertInsert() =>
+        Build(
+            Lf("a", "b", "c", "d", "e", "f", "g", "h"),
+            Lf("a", "left b", "c", "left new", "d", "e", "f", "left g", "h"),
+            Lf("a", "b", "c", "right new", "d", "right e", "f", "right g", "h"));
+
     /// <summary>One conflict on the last line; the right side's last line has no terminator.</summary>
     public static ResolutionDocument NoFinalNewline() =>
         Build(Lf("a", "b", "c"), Lf("a", "b", "left c"), [.. Lf("a", "b"), new Line("right c", LineEnding.None)]);

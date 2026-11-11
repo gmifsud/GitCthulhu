@@ -48,6 +48,29 @@ internal static class Sessions
             }
         });
 
+    /// <summary>
+    /// An empty-base (insert/insert) conflict after "c" — empty in the initial RESULT — between a LEFT change of "b"
+    /// and a RIGHT change of "e", plus a modify/modify conflict on "g".
+    /// </summary>
+    public static MergeToolSession InsertInsert() => FromTexts(
+        "a\nb\nc\nd\ne\nf\ng\nh\n",
+        "a\nleft b\nc\nleft new\nd\ne\nf\nleft g\nh\n",
+        "a\nb\nc\nright new\nd\nright e\nf\nright g\nh\n");
+
+    /// <summary>Stage 1 exists but is an empty file (both sides filled an empty file): the base is real and empty.</summary>
+    public static MergeToolSession EmptyStageBase() => FromTexts("", "left\n", "right\n");
+
+    private static MergeToolSession FromTexts(string baseText, string left, string right) =>
+        Block(async () =>
+        {
+            var fixture = await GitFixture.CreateAsync();
+            await fixture.ConflictAsync(
+                f => f.Write(FileName, baseText),
+                f => f.Write(FileName, left),
+                f => f.Write(FileName, right));
+            return fixture;
+        });
+
     private static MergeToolSession FromLines(string newLine, int lineCount, Action<string[]> left, Action<string[]> right) =>
         Block(async () =>
         {
