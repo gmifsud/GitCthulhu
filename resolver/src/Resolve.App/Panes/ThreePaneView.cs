@@ -2,7 +2,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
-using Avalonia.Threading;
 using Resolve.App.Editor;
 using Resolve.Core.Merge;
 using Resolve.Core.Resolution;
@@ -55,7 +54,7 @@ public sealed class ThreePaneView : Grid
         _left.Scrolled += _ => OnScrolled(_left);
         _result.Scrolled += _ => OnScrolled(_result);
         _right.Scrolled += _ => OnScrolled(_right);
-        _result.Edited += OnResultEdited;
+        _result.Edited += HandleResultEdit;
         Decorate();
     }
 
@@ -108,20 +107,28 @@ public sealed class ThreePaneView : Grid
         ResizeBehavior = GridResizeBehavior.PreviousAndNext,
     };
 
-    /// <summary>RESULT already holds the user's change; the document may have rewritten it (typed newlines become its own), so bring RESULT in line.</summary>
-    private void OnResultEdited(TextChange change)
+    /// <summary>
+    /// RESULT already holds the user's change; the document may have rewritten it (typed newlines become its own),
+    /// so bring RESULT in line. Never throws: anything unexpected resyncs RESULT from the document text instead.
+    /// </summary>
+    internal void HandleResultEdit(TextChange change)
     {
-        var applied = _session.Document.Edit(change);
-        if (applied.Count != 1 || applied[0].Offset != change.Offset || applied[0].RemovedLength != change.RemovedLength)
+        try
         {
-            throw new InvalidOperationException("The document applied an edit other than a rewrite of the inserted text.");
+            var applied = _session.Document.Edit(change);
+            if (applied.Count != 1 || applied[0].Offset != change.Offset || applied[0].RemovedLength != change.RemovedLength)
+            {
+                _result.Resync(_session.Document.Text);
+            }
+            else if (applied[0] != change)
+            {
+                // The surface holds change.InsertedText at the offset now; swap it for the document's text.
+                _result.ApplyChanges([new TextChange(change.Offset, change.InsertedText.Length, applied[0].InsertedText)]);
+            }
         }
-        if (applied[0] != change)
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
         {
-            // The surface holds change.InsertedText at the offset now; swap it for the document's text. The editor
-            // refuses a change made inside its own change notification, so this runs right after it, before any input.
-            var correction = new TextChange(change.Offset, change.InsertedText.Length, applied[0].InsertedText);
-            Dispatcher.UIThread.Post(() => _result.ApplyChanges([correction]), DispatcherPriority.Send);
+            _result.Resync(_session.Document.Text);
         }
         Decorate();
     }

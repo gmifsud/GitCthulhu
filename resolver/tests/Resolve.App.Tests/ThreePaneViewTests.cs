@@ -3,6 +3,8 @@ using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
 using Avalonia.Threading;
+using Resolve.Core.Resolution;
+using Resolve.Core.Merge;
 using AvaloniaEdit;
 using Resolve.App.Editor;
 using Resolve.App.Panes;
@@ -96,7 +98,7 @@ public class ThreePaneViewTests
         Assert.Equal("\r\n", session.Document.NewLine);
 
         ((TextEditor)view.Result.View).Document.Insert(0, "a\nb");
-        Dispatcher.UIThread.RunJobs(); // the correction is posted: the editor cannot change inside its own change event
+        // No dispatcher turn: the correction is made synchronously inside the editor's UpdateFinished.
 
         var surface = (AvaloniaEditSurface)view.Result;
         Assert.Equal(session.Document.Text, surface.Text);
@@ -116,5 +118,115 @@ public class ThreePaneViewTests
         Assert.Equal(RegionTint.Unresolved, result.TintAt(19));
         Assert.Equal(RegionTint.Unresolved, right.TintAt(19));
         Assert.Equal(RegionTint.Applied, right.TintAt(39));
+    }
+
+    [AvaloniaFact]
+    public void Two_inserts_in_one_editor_update_reach_the_document_as_one_corrected_edit()
+    {
+        var session = Sessions.Crlf();
+        var (_, view) = Host(session);
+        var surface = (AvaloniaEditSurface)view.Result;
+        var edits = new List<TextChange>();
+        surface.Edited += edits.Add;
+        var editor = ((TextEditor)view.Result.View).Document;
+
+        editor.BeginUpdate();
+        editor.Insert(0, "\n");
+        editor.Insert(1, "  ");
+        editor.EndUpdate();
+
+        Assert.Equal([new TextChange(0, 0, "\n  ")], edits);
+        Assert.Equal(session.Document.Text, surface.Text);
+        Assert.StartsWith("\r\n  line 1", surface.Text, StringComparison.Ordinal);
+    }
+
+    [AvaloniaFact]
+    public void An_unexpected_edit_resyncs_result_from_the_document_instead_of_throwing()
+    {
+        var session = Sessions.Criterion1();
+        var (_, view) = Host(session);
+        var surface = (AvaloniaEditSurface)view.Result;
+        ((TextEditor)view.Result.View).Document.Insert(0, "stray");   // editor now differs from the document
+        session.Document.Edit(new TextChange(0, 5, ""));               // ...whose own text is back to the original
+
+        view.HandleResultEdit(new TextChange(99999, 0, "x"));         // the document rejects it
+
+        Assert.Equal(session.Document.Text, surface.Text);
+    }
+
+    [AvaloniaFact]
+    public void Sync_off_clamps_band_endpoints_to_the_viewport()
+    {
+        var (window, view) = Host(Sessions.Long());
+        view.SyncScroll = false;
+        view.Left.ScrollTo(0);
+        view.Result.ScrollTo(view.Result.LineToY(1000));
+        window.UpdateLayout();
+
+        var height = view.LeftBand.Bounds.Height;
+        var quads = view.LeftBand.Quads().ToList();
+        Assert.NotEmpty(quads);
+        Assert.All(quads, quad => Assert.All(
+            [quad.SideStart, quad.SideEnd, quad.ResultStart, quad.ResultEnd],
+            y => Assert.InRange(y, 0, height)));
+        Assert.Contains(quads, quad => quad.SideStart == 0 || quad.ResultStart == height || quad.ResultStart == 0);
+    }
+
+    [AvaloniaFact]
+    public void Sync_off_counts_blocks_in_both_windows_only()
+    {
+        var (window, view) = Host(Sessions.Long());
+        view.SyncScroll = false;
+        view.Left.ScrollTo(0);
+        view.Result.ScrollTo(view.Result.LineToY(1000));
+        window.UpdateLayout();
+
+        int Visible(IEditorSurface pane, Func<BandBlock, LineRange> range)
+        {
+            var first = pane.YToLine(pane.VerticalOffset);
+            var last = pane.YToLine(pane.VerticalOffset + pane.ViewportHeight);
+            return view.LeftBand.Blocks.Select((block, index) => (block, index))
+                .Count(entry => range(entry.block).End >= first && range(entry.block).Start <= last);
+        }
+        var inBoth = view.LeftBand.Blocks.Count(block =>
+            Overlaps(view.Left, block.Side) && Overlaps(view.Result, block.Result));
+        Assert.Equal(Visible(view.Left, b => b.Side) + Visible(view.Result, b => b.Result) - inBoth, view.LeftBand.VisibleBlockCount);
+
+        static bool Overlaps(IEditorSurface pane, LineRange range) =>
+            range.End >= pane.YToLine(pane.VerticalOffset) && range.Start <= pane.YToLine(pane.VerticalOffset + pane.ViewportHeight);
+    }
+
+    [AvaloniaFact]
+    public void Accepting_left_right_both_and_editing_manually_tint_all_three_panes()
+    {
+        var session = Sessions.Criterion1();
+        var (_, view) = Host(session);
+        var conflict = session.Document.Regions.First(region => region.Kind == RegionKind.Conflict).RegionId;
+
+        void Check(RegionTint tint)
+        {
+            var region = session.Document.Regions[conflict];
+            var planned = session.Plan.Regions[conflict];
+            Assert.Equal(tint, ((AvaloniaEditSurface)view.Result).TintAt(region.ResultLines.Start));
+            Assert.Equal(tint, ((AvaloniaEditSurface)view.Left).TintAt(planned.Left.Start));
+            Assert.Equal(tint, ((AvaloniaEditSurface)view.Right).TintAt(planned.Right.Start));
+            Assert.All(view.LeftBand.Blocks.Concat(view.RightBand.Blocks).Where(block => block.Tint == tint), _ => { });
+            Assert.Contains(view.LeftBand.Blocks, block => block.Tint == tint);
+        }
+
+        foreach (var (choice, tint) in new[]
+        {
+            (ResolutionChoice.Left, RegionTint.FromLeft),
+            (ResolutionChoice.Right, RegionTint.FromRight),
+            (ResolutionChoice.LeftThenRight, RegionTint.Both),
+        })
+        {
+            var outcome = Assert.IsType<CommandOutcome.Changed>(session.Document.Apply(new RegionCommand.Accept(conflict, choice)));
+            view.Refresh(outcome.Changes);
+            Check(tint);
+        }
+
+        ((TextEditor)view.Result.View).Document.Insert(session.Document.Regions[conflict].Start, "x");
+        Check(RegionTint.Manual);
     }
 }

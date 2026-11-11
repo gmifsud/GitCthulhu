@@ -47,61 +47,77 @@ internal sealed class BandCanvas : Control
         InvalidateVisual();
     }
 
-    public override void Render(DrawingContext context)
+    /// <summary>Where a band's four corners sit on the canvas, each clamped to the canvas height.</summary>
+    internal readonly record struct Quad(double SideStart, double SideEnd, double ResultStart, double ResultEnd, RegionTint Tint);
+
+    /// <summary>The quads that would be drawn now. With sync off the panes can be far apart, so endpoints clamp to the viewport.</summary>
+    internal IEnumerable<Quad> Quads()
     {
-        ArgumentNullException.ThrowIfNull(context);
         var sideTop = _side.VerticalOffset;
         var resultTop = _result.VerticalOffset;
-        var (sideX, resultX) = _sideIsLeft ? (0.0, Bounds.Width) : (Bounds.Width, 0.0);
-        var middle = Bounds.Width / 2;
+        var height = Bounds.Height;
+        double Clamp(double y) => Math.Clamp(y, 0, height);
         foreach (var block in VisibleBlocks())
         {
             var sideStart = _side.LineToY(block.Side.Start) - sideTop;
             var sideEnd = Math.Max(_side.LineToY(block.Side.End) - sideTop, sideStart + 1);
             var resultStart = _result.LineToY(block.Result.Start) - resultTop;
             var resultEnd = Math.Max(_result.LineToY(block.Result.End) - resultTop, resultStart + 1);
+            yield return new Quad(Clamp(sideStart), Clamp(sideEnd), Clamp(resultStart), Clamp(resultEnd), block.Tint);
+        }
+    }
+
+    public override void Render(DrawingContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var (sideX, resultX) = _sideIsLeft ? (0.0, Bounds.Width) : (Bounds.Width, 0.0);
+        var middle = Bounds.Width / 2;
+        foreach (var quad in Quads())
+        {
             var geometry = new StreamGeometry();
             using (var figure = geometry.Open())
             {
-                figure.BeginFigure(new Point(sideX, sideStart), true);
-                figure.CubicBezierTo(new Point(middle, sideStart), new Point(middle, resultStart), new Point(resultX, resultStart));
-                figure.LineTo(new Point(resultX, resultEnd));
-                figure.CubicBezierTo(new Point(middle, resultEnd), new Point(middle, sideEnd), new Point(sideX, sideEnd));
+                figure.BeginFigure(new Point(sideX, quad.SideStart), true);
+                figure.CubicBezierTo(new Point(middle, quad.SideStart), new Point(middle, quad.ResultStart), new Point(resultX, quad.ResultStart));
+                figure.LineTo(new Point(resultX, quad.ResultEnd));
+                figure.CubicBezierTo(new Point(middle, quad.ResultEnd), new Point(middle, quad.SideEnd), new Point(sideX, quad.SideEnd));
                 figure.EndFigure(true);
             }
-            context.DrawGeometry(RegionBackground.WashFor(block.Tint), Outlines[(int)block.Tint], geometry);
+            context.DrawGeometry(RegionBackground.WashFor(quad.Tint), Outlines[(int)quad.Tint], geometry);
         }
     }
 
+    /// <summary>
+    /// Blocks on screen in the side pane or in RESULT: one window scan per pane (binary search, then walk while on
+    /// screen), united by block index. O(log n + visible) however far apart the panes are scrolled.
+    /// </summary>
     private IEnumerable<BandBlock> VisibleBlocks()
     {
-        var sideFirst = _side.YToLine(_side.VerticalOffset);
-        var sideLast = _side.YToLine(_side.VerticalOffset + _side.ViewportHeight);
-        var resultFirst = _result.YToLine(_result.VerticalOffset);
-        var resultLast = _result.YToLine(_result.VerticalOffset + _result.ViewportHeight);
-        var start = Math.Min(FirstEndingAtOrAfter(sideFirst, static block => block.Side.End), FirstEndingAtOrAfter(resultFirst, static block => block.Result.End));
-        for (var index = start; index < _blocks.Length; index++)
+        var (sideFrom, sideTo) = Window(_side, static block => block.Side);
+        var (resultFrom, resultTo) = Window(_result, static block => block.Result);
+        for (var index = sideFrom; index < sideTo; index++)
         {
-            var block = _blocks[index];
-            if (block.Side.Start > sideLast && block.Result.Start > resultLast)
+            yield return _blocks[index];
+        }
+        for (var index = resultFrom; index < resultTo; index++)
+        {
+            if (index < sideFrom || index >= sideTo)
             {
-                yield break;
-            }
-            if ((block.Side.End >= sideFirst && block.Side.Start <= sideLast) || (block.Result.End >= resultFirst && block.Result.Start <= resultLast))
-            {
-                yield return block;
+                yield return _blocks[index];
             }
         }
     }
 
-    /// <summary>Binary search: the first block whose end (non-decreasing) is at or after the line.</summary>
-    private int FirstEndingAtOrAfter(int line, Func<BandBlock, int> end)
+    /// <summary>The contiguous index range of blocks whose range in <paramref name="pane"/> touches its viewport.</summary>
+    private (int From, int To) Window(IEditorSurface pane, Func<BandBlock, LineRange> range)
     {
+        var first = pane.YToLine(pane.VerticalOffset);
+        var last = pane.YToLine(pane.VerticalOffset + pane.ViewportHeight);
         int low = 0, high = _blocks.Length;
         while (low < high)
         {
             var middle = (low + high) / 2;
-            if (end(_blocks[middle]) >= line)
+            if (range(_blocks[middle]).End >= first)
             {
                 high = middle;
             }
@@ -110,6 +126,11 @@ internal sealed class BandCanvas : Control
                 low = middle + 1;
             }
         }
-        return low;
+        var to = low;
+        while (to < _blocks.Length && range(_blocks[to]).Start <= last)
+        {
+            to++;
+        }
+        return (low, to);
     }
 }

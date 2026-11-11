@@ -23,6 +23,9 @@ public sealed class AvaloniaEditSurface : IEditorSurface
     private double? _pendingOffset;
     private double _lastOffset;
     private bool _applying;
+    private ITextSource? _before;
+    private int _touchedStart;
+    private int _untouchedTail;
 
     public AvaloniaEditSurface(string text, bool readOnly, string newLine)
     {
@@ -40,7 +43,9 @@ public sealed class AvaloniaEditSurface : IEditorSurface
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
         _editor.TextArea.TextView.BackgroundRenderers.Add(_background);
+        document.UpdateStarted += OnUpdateStarted;
         document.Changed += OnDocumentChanged;
+        document.UpdateFinished += OnUpdateFinished;
         _editor.AddHandler(InputElement.KeyDownEvent, OnKeyDown, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         _editor.TemplateApplied += OnTemplateApplied;
         _editor.TextArea.TextView.ScrollOffsetChanged += OnScrollOffsetChanged;
@@ -120,12 +125,82 @@ public sealed class AvaloniaEditSurface : IEditorSurface
         _editor.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
     }
 
+    /// <summary>The text as it was when the outermost update began: an O(1) snapshot of the rope.</summary>
+    private void OnUpdateStarted(object? sender, EventArgs e)
+    {
+        if (_applying)
+        {
+            return;
+        }
+        _before = _editor.Document.CreateSnapshot();
+        _touchedStart = int.MaxValue;
+        _untouchedTail = int.MaxValue;
+    }
+
+    /// <summary>
+    /// Every change moves the bounds of what can differ: nothing before the lowest offset touched, and nothing in the
+    /// longest tail that no change reached, so the final diff only reads the span in between.
+    /// </summary>
     private void OnDocumentChanged(object? sender, DocumentChangeEventArgs e)
     {
-        if (!_applying)
+        if (_applying || _before is null)
         {
-            Edited?.Invoke(new TextChange(e.Offset, e.RemovalLength, e.InsertedText.Text));
+            return;
         }
+        _touchedStart = Math.Min(_touchedStart, e.Offset);
+        _untouchedTail = Math.Min(_untouchedTail, _editor.Document.TextLength - (e.Offset + e.InsertionLength));
+    }
+
+    /// <summary>One <see cref="Edited"/> per update: the minimal replacement between the text before and after it.</summary>
+    private void OnUpdateFinished(object? sender, EventArgs e)
+    {
+        var before = _before;
+        if (_applying || before is null)
+        {
+            return;
+        }
+        _before = null;
+        var document = _editor.Document;
+        var start = Math.Min(_touchedStart, Math.Min(before.TextLength, document.TextLength));
+        var tail = Math.Max(0, Math.Min(_untouchedTail, Math.Min(before.TextLength, document.TextLength) - start));
+        var removed = before.GetText(start, before.TextLength - tail - start);
+        var inserted = document.GetText(start, document.TextLength - tail - start);
+        var prefix = CommonPrefix(removed, inserted);
+        var suffix = CommonSuffix(removed.AsSpan(prefix), inserted.AsSpan(prefix));
+        var change = new TextChange(start + prefix, removed.Length - prefix - suffix, inserted[prefix..(inserted.Length - suffix)]);
+        if (change.RemovedLength > 0 || change.InsertedText.Length > 0)
+        {
+            Edited?.Invoke(change);
+        }
+    }
+
+    private static int CommonPrefix(ReadOnlySpan<char> a, ReadOnlySpan<char> b) => a.CommonPrefixLength(b);
+
+    private static int CommonSuffix(ReadOnlySpan<char> a, ReadOnlySpan<char> b)
+    {
+        var count = 0;
+        while (count < a.Length && count < b.Length && a[^(count + 1)] == b[^(count + 1)])
+        {
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>Replaces the whole text with <paramref name="text"/> without raising <see cref="Edited"/>, keeping the caret where it was (clamped).</summary>
+    internal void Resync(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        var caret = _editor.CaretOffset;
+        _applying = true;
+        try
+        {
+            _editor.Document.Text = text;
+        }
+        finally
+        {
+            _applying = false;
+        }
+        _editor.CaretOffset = Math.Min(caret, text.Length);
     }
 
     /// <summary>Enter inserts the configured line ending; AvaloniaEdit would insert the document's own default.</summary>
