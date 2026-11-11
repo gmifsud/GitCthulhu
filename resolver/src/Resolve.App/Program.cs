@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -21,11 +22,15 @@ internal static class Program
     /// Everything before the window: parse, check git, open the session. Separate from <see cref="Main"/> because
     /// the Avalonia lifetime must start on the main thread, which these awaits do not resume on.
     /// </summary>
-    internal static async Task<Prepared> PrepareAsync(string[] args, TextWriter stdout, TextWriter stderr)
+    internal static Task<Prepared> PrepareAsync(string[] args, TextWriter stdout, TextWriter stderr) =>
+        PrepareAsync(args, stdout, stderr, new GitRunner());
+
+    internal static async Task<Prepared> PrepareAsync(string[] args, TextWriter stdout, TextWriter stderr, IGitRunner runner)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(stdout);
         ArgumentNullException.ThrowIfNull(stderr);
+        ArgumentNullException.ThrowIfNull(runner);
 
         switch (CommandLine.Parse(args))
         {
@@ -40,22 +45,52 @@ internal static class Program
                 await stdout.WriteLineAsync(version.Text);
                 return new Prepared(0, null);
             case ParseOutcome.Parsed parsed:
-                return await OpenAsync(parsed.Arguments, stderr);
+                return await OpenAsync(parsed.Arguments, stderr, runner);
             default:
                 throw new InvalidOperationException("Unhandled parse outcome.");
+        }
+    }
+
+    /// <summary>Shows the window and returns its exit code. If the window fails, nothing more is written and the file stays unresolved (1).</summary>
+    internal static int RunWindow(MergeToolSession session, Func<MergeToolSession, ExitCode?> show, TextWriter stderr)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(show);
+        ArgumentNullException.ThrowIfNull(stderr);
+        try
+        {
+            return ExitCodeOf(show(session));
+        }
+#pragma warning disable CA1031 // Any failure of the UI stack must map to the unresolved exit code.
+        catch (Exception error)
+#pragma warning restore CA1031
+        {
+            stderr.WriteLine($"The window failed: {error.Message}");
+            session.Cancel();
+            return (int)ExitCode.Unresolved;
         }
     }
 
     [STAThread]
     public static int Main(string[] args)
     {
-        var prepared = PrepareAsync(args, Console.Out, Console.Error).GetAwaiter().GetResult();
-        return prepared.ExitCode ?? Show(args, prepared.Session!);
+        try
+        {
+            var prepared = PrepareAsync(args, Console.Out, Console.Error).GetAwaiter().GetResult();
+            return prepared.ExitCode ?? RunWindow(prepared.Session!, session => Show(args, session), Console.Error);
+        }
+#pragma warning disable CA1031 // Last net: git must see a defined exit code, never an unhandled-exception code.
+        catch (Exception error)
+#pragma warning restore CA1031
+        {
+            Console.Error.WriteLine($"cthulhu-resolve: {error.Message}");
+            return (int)ExitCode.Unresolved;
+        }
     }
 
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>().UsePlatformDetect();
 
-    private static int Show(string[] args, MergeToolSession session)
+    private static ExitCode? Show(string[] args, MergeToolSession session)
     {
         var lifetime = new ClassicDesktopStyleApplicationLifetime
         {
@@ -68,13 +103,22 @@ internal static class Program
         window = new MergeToolWindow(session, message => ConfirmDialog.ShowAsync(window!, message));
         lifetime.MainWindow = window;
         lifetime.Start(args);
-        return ExitCodeOf(window.Result);
+        return window.Result;
     }
 
-    private static async Task<Prepared> OpenAsync(MergeToolArguments arguments, TextWriter stderr)
+    private static async Task<Prepared> OpenAsync(MergeToolArguments arguments, TextWriter stderr, IGitRunner runner)
     {
-        var runner = new GitRunner();
-        var git = await GitVersion.ProbeAsync(runner, CancellationToken.None);
+        GitVersion git;
+        try
+        {
+            git = await GitVersion.ProbeAsync(runner, CancellationToken.None);
+        }
+        catch (Exception error) when (error is Win32Exception or GitCommandException or FormatException or IOException)
+        {
+            await stderr.WriteLineAsync($"Could not run git: {error.Message}");
+            return new Prepared((int)ExitCode.Usage, null);
+        }
+
         if (git < GitVersion.Minimum)
         {
             await stderr.WriteLineAsync($"git {GitVersion.Minimum.Major}.{GitVersion.Minimum.Minor} or later is required (found {git}).");
