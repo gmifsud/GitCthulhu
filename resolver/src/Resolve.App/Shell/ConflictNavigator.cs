@@ -1,0 +1,143 @@
+using System.Globalization;
+using Avalonia.Automation;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.VisualTree;
+using Resolve.Core.Merge;
+using Resolve.Core.Resolution;
+using Resolve.Core.Session;
+
+namespace Resolve.App.Shell;
+
+/// <summary>
+/// The screen-reader path through a merge (decision O1-A): the editors expose nothing to assistive technology,
+/// so each non-equal region gets one focusable item with an exact accessible name, and a polite live status line
+/// carries announcements. Built from standard controls only.
+/// </summary>
+public sealed class ConflictNavigator : UserControl
+{
+    private readonly MergeToolSession _session;
+    private readonly ListBox _list = new();
+    private readonly List<int> _regionIds = [];
+
+    public ConflictNavigator(MergeToolSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        _session = session;
+
+        AutomationProperties.SetName(_list, "Conflicts and changes");
+        _list.AddHandler(KeyDownEvent, OnKeyDown, RoutingStrategies.Tunnel | RoutingStrategies.Bubble);
+
+        Status = new TextBlock { TextWrapping = Avalonia.Media.TextWrapping.Wrap };
+        AutomationProperties.SetLiveSetting(Status, AutomationLiveSetting.Polite);
+
+        var layout = new DockPanel();
+        DockPanel.SetDock(Status, Dock.Bottom);
+        layout.Children.Add(Status);
+        layout.Children.Add(_list);
+        Content = layout;
+        Refresh();
+    }
+
+    /// <summary>The region the navigator is on, or null when there are no listed regions.</summary>
+    public int? CurrentRegionId => _list.SelectedIndex is var index and >= 0 && index < _regionIds.Count ? _regionIds[index] : null;
+
+    /// <summary>Raised when the user presses Enter or Space on, or clicks, an item.</summary>
+    public event Action<int>? RegionChosen;
+
+    /// <summary>The polite live region holding the last announcement.</summary>
+    public TextBlock Status { get; }
+
+    /// <summary>Selects the region and scrolls it into view. Does not raise <see cref="RegionChosen"/>.</summary>
+    public void Select(int regionId)
+    {
+        var index = _regionIds.IndexOf(regionId);
+        if (index < 0)
+        {
+            return;
+        }
+        _list.SelectedIndex = index;
+        _list.ScrollIntoView(index);
+    }
+
+    /// <summary>Sets the live status line, which assistive technology announces politely.</summary>
+    public void Announce(string text) => Status.Text = text;
+
+    /// <summary>Rebuilds every item name from the current document, keeping the current region.</summary>
+    public void Refresh()
+    {
+        var current = CurrentRegionId;
+        var labels = _session.Inputs.Labels;
+        var regions = _session.Document.Regions.Where(region => region.Kind != RegionKind.Equal).ToList();
+        var conflicts = regions.Where(region => region.Kind == RegionKind.Conflict).ToList();
+        var changes = regions.Where(region => region.Kind != RegionKind.Conflict).ToList();
+
+        var items = new List<ListBoxItem>(regions.Count);
+        _regionIds.Clear();
+        AddItems(conflicts, "Conflict", labels, items);
+        AddItems(changes, "Change", labels, items);
+
+        _list.ItemsSource = items;
+        _list.SelectedIndex = current is { } id ? _regionIds.IndexOf(id) : -1;
+    }
+
+    internal IReadOnlyList<Control> Items() => _list.ItemsSource is IEnumerable<ListBoxItem> items ? [.. items] : [];
+
+    private void AddItems(List<RegionView> regions, string noun, SideLabels labels, List<ListBoxItem> items)
+    {
+        for (var position = 0; position < regions.Count; position++)
+        {
+            var region = regions[position];
+            var name = string.Create(CultureInfo.InvariantCulture, $"{noun} {position + 1} of {regions.Count}, {Lines(region)}, {State(region, labels)}");
+            var item = new ListBoxItem { Content = new TextBlock { Text = name }, Focusable = true };
+            AutomationProperties.SetName(item, name);
+            var regionId = region.RegionId;
+            item.PointerPressed += (_, _) => Choose(regionId);
+            items.Add(item);
+            _regionIds.Add(regionId);
+        }
+    }
+
+    private static string Lines(RegionView region)
+    {
+        var first = region.ResultLines.Start + 1;
+        var last = Math.Max(first, region.ResultLines.End);
+        return string.Create(CultureInfo.InvariantCulture, $"lines {first}–{last}");
+    }
+
+    private static string State(RegionView region, SideLabels labels) => region.Choice switch
+    {
+        ResolutionChoice.Unresolved => region.Kind == RegionKind.Conflict ? "unresolved" : $"taken from {SideOf(region, labels)}",
+        ResolutionChoice.Left => $"taken from {labels.LeftRole}",
+        ResolutionChoice.Right => $"taken from {labels.RightRole}",
+        ResolutionChoice.LeftThenRight => $"both, {labels.LeftRole} first",
+        ResolutionChoice.RightThenLeft => $"both, {labels.RightRole} first",
+        ResolutionChoice.Base => "kept the base",
+        ResolutionChoice.Manual when region.Kind == RegionKind.Conflict && !region.Acknowledged => "edited by hand, not yet marked resolved",
+        _ => "edited by hand",
+    };
+
+    private static string SideOf(RegionView region, SideLabels labels) => region.Kind == RegionKind.RightOnly ? labels.RightRole : labels.LeftRole;
+
+    private void OnKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key is Key.Enter or Key.Space && e.Source is Control source && source.FindAncestorOfType<ListBoxItem>(true) is { } item
+            && _list.IndexFromContainer(item) is var index and >= 0 && index < _regionIds.Count)
+        {
+            _list.SelectedIndex = index;
+            e.Handled = true;
+            Choose(_regionIds[index]);
+        }
+    }
+
+    private void Choose(int regionId)
+    {
+        var index = _regionIds.IndexOf(regionId);
+        if (index >= 0)
+        {
+            _list.SelectedIndex = index;
+        }
+        RegionChosen?.Invoke(regionId);
+    }
+}
