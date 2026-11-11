@@ -130,17 +130,38 @@ public sealed partial class ResolutionDocument
         _text = null;
         _views = null;
 
-        var previousEnd = 0;
-        for (var index = 0; index < _regions.Length; index++)
+        if (removed == 0)
         {
-            var region = _regions[index];
-            region.Touched = offset <= region.End && end >= region.Start;
-            // Anchors strictly inside the replaced range collapse onto it; clamping keeps the regions a
-            // gap-free, ordered tiling (the earlier region keeps the inserted text).
-            // The first region always starts the document: text inserted at 0 belongs to it.
-            region.Start = index == 0 ? 0 : Math.Max(MapStart(region.Start, offset, end, inserted.Length), previousEnd);
-            region.End = Math.Max(MapEnd(region.End, offset, end, inserted.Length), region.Start);
-            previousEnd = region.End;
+            // Spec R9: an insertion belongs to exactly one region; every other anchor stays on its own side.
+            var chosen = ChooseForInsertion(offset);
+            for (var index = 0; index < _regions.Length; index++)
+            {
+                var region = _regions[index];
+                region.Touched = index == chosen;
+                if (index > chosen)
+                {
+                    region.Start += inserted.Length;
+                }
+                if (index >= chosen)
+                {
+                    region.End += inserted.Length;
+                }
+            }
+        }
+        else
+        {
+            var previousEnd = 0;
+            for (var index = 0; index < _regions.Length; index++)
+            {
+                var region = _regions[index];
+                region.Touched = offset <= region.End && end >= region.Start;
+                // Anchors strictly inside the replaced range collapse onto it; clamping keeps the regions a
+                // gap-free, ordered tiling (the earlier region keeps the inserted text).
+                // The first region always starts the document.
+                region.Start = index == 0 ? 0 : Math.Max(MapStart(region.Start, offset, end, inserted.Length), previousEnd);
+                region.End = Math.Max(MapEnd(region.End, offset, end, inserted.Length), region.Start);
+                previousEnd = region.End;
+            }
         }
 
         foreach (var region in _regions)
@@ -163,6 +184,60 @@ public sealed partial class ResolutionDocument
     }
 
     internal static byte[] Hash(string text) => SHA256.HashData(MemoryMarshal.AsBytes(text.AsSpan()));
+
+    /// <summary>
+    /// The region that absorbs an insertion at <paramref name="offset"/> (ruling R9): an empty non-Equal region there;
+    /// else of the region ending there (P) and the one starting there (R) the non-Equal one, the Conflict one if
+    /// both are non-Equal, R if both or neither are conflicts; P if both are Equal.
+    /// </summary>
+    private int ChooseForInsertion(int offset)
+    {
+        int previous = -1, next = -1, containing = -1;
+        for (var index = 0; index < _regions.Length; index++)
+        {
+            var region = _regions[index];
+            if (region.Start == offset && region.End == offset)
+            {
+                if (region.Kind != RegionKind.Equal)
+                {
+                    return index;
+                }
+            }
+            else if (region.End == offset)
+            {
+                previous = index;
+            }
+            else if (region.Start == offset && next < 0)
+            {
+                next = index;
+            }
+            else if (region.Start < offset && offset < region.End)
+            {
+                containing = index;
+            }
+        }
+        if (containing >= 0)
+        {
+            return containing;
+        }
+        if (previous < 0 || next < 0)
+        {
+            return Math.Max(previous, next);
+        }
+        var previousEqual = _regions[previous].Kind == RegionKind.Equal;
+        var nextEqual = _regions[next].Kind == RegionKind.Equal;
+        if (previousEqual != nextEqual)
+        {
+            return previousEqual ? next : previous;
+        }
+        if (previousEqual)
+        {
+            return previous;
+        }
+        var previousConflict = _regions[previous].Kind == RegionKind.Conflict;
+        var nextConflict = _regions[next].Kind == RegionKind.Conflict;
+        return previousConflict && !nextConflict ? previous : next;
+    }
 
     private static int MapStart(int x, int a, int b, int length) =>
         x < a ? x : x >= b ? x + length - (b - a) : a;

@@ -144,6 +144,66 @@ public class ResolutionDocumentTests
         Assert.Equal(ResolutionChoice.Unresolved, ConflictOf(doc).Choice);
     }
 
+    [Fact]
+    public void Typing_at_the_start_of_a_conflict_goes_into_the_conflict()
+    {
+        var doc = Criterion1();
+        var conflict = ConflictOf(doc);
+        var before = doc.Regions[2];
+        var beforeText = doc.Text[before.Start..before.End];
+        doc.Edit(new TextChange(conflict.Start, 0, "x"));
+        Assert.Equal(beforeText, doc.Text[doc.Regions[2].Start..doc.Regions[2].End]);
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[2].Choice);
+        var after = ConflictOf(doc);
+        Assert.StartsWith("xline 20", doc.Text[after.Start..after.End]);
+        Assert.Equal(ResolutionChoice.Manual, after.Choice);
+        Assert.False(after.Acknowledged);
+    }
+
+    [Fact]
+    public void Typing_at_the_end_of_a_conflict_goes_into_the_conflict()
+    {
+        var doc = Criterion1();
+        var conflict = ConflictOf(doc);
+        doc.Edit(new TextChange(conflict.End, 0, "x"));
+        var after = ConflictOf(doc);
+        Assert.Equal("line 20\nx", doc.Text[after.Start..after.End]);
+        Assert.Equal(ResolutionChoice.Manual, after.Choice);
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[4].Choice);
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[2].Choice);
+    }
+
+    [Fact]
+    public void Text_typed_into_an_emptied_conflict_refills_it()
+    {
+        var doc = Criterion1();
+        var conflict = ConflictOf(doc);
+        doc.Edit(new TextChange(conflict.Start, conflict.End - conflict.Start, ""));
+        var neighbours = new[] { doc.Regions[2], doc.Regions[4] }.Select(view => doc.Text[view.Start..view.End]).ToArray();
+        doc.Edit(new TextChange(conflict.Start, 0, "typed\n"));
+        var after = ConflictOf(doc);
+        Assert.Equal("typed\n", doc.Text[after.Start..after.End]);
+        Assert.Equal(neighbours, new[] { doc.Regions[2], doc.Regions[4] }.Select(view => doc.Text[view.Start..view.End]));
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[2].Choice);
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[4].Choice);
+        Assert.Equal(ResolutionChoice.Manual, after.Choice);
+    }
+
+    [Fact]
+    public void A_boundary_insertion_between_an_equal_and_a_change_goes_to_the_change()
+    {
+        // Two Equal regions are never adjacent in a plan (rule 4 is unreachable), so this pins rule 2 both ways.
+        var doc = Criterion1();
+        var change = doc.Regions[1];
+        doc.Edit(new TextChange(change.Start, 0, "x"));
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[0].Choice);
+        Assert.Equal(ResolutionChoice.Manual, doc.Regions[1].Choice);
+        Assert.StartsWith("xleft 3", doc.Text[doc.Regions[1].Start..doc.Regions[1].End]);
+        doc.Edit(new TextChange(doc.Regions[1].End, 0, "y"));
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[2].Choice);
+        Assert.EndsWith("y", doc.Text[doc.Regions[1].Start..doc.Regions[1].End]);
+    }
+
     [Theory]
     [InlineData(-1, 0)]
     [InlineData(0, -1)]
