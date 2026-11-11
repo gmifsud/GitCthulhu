@@ -87,6 +87,30 @@ public class ConflictNavigatorTests
     }
 
     [AvaloniaFact]
+    public void A_right_or_middle_press_does_not_move_the_current_region()
+    {
+        var session = Sessions.Criterion1();
+        var nav = new ConflictNavigator(session);
+        var window = new Window { Width = 600, Height = 400, Content = nav };
+        window.Show();
+        window.UpdateLayout();
+        var chosen = new List<int>();
+        nav.RegionChosen += chosen.Add;
+        var first = session.Document.Regions.First(r => r.Kind != Resolve.Core.Merge.RegionKind.Equal);
+        nav.Select(first.RegionId);
+        var point = nav.Items()[2].TranslatePoint(new Avalonia.Point(5, 5), window)!.Value;
+
+        foreach (var button in new[] { MouseButton.Right, MouseButton.Middle })
+        {
+            window.MouseDown(point, button);
+            window.MouseUp(point, button);
+        }
+
+        Assert.Equal(first.RegionId, nav.CurrentRegionId);
+        Assert.Empty(chosen);
+    }
+
+    [AvaloniaFact]
     public void Names_follow_the_document_after_a_resolution()
     {
         var session = Sessions.Criterion1();

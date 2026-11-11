@@ -1,4 +1,5 @@
 using System.Globalization;
+using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -31,6 +32,9 @@ public sealed class ConflictNavigator : UserControl
 
         AutomationProperties.SetName(_list, "Conflicts and changes");
         _list.AddHandler(KeyDownEvent, OnKeyDown, RoutingStrategies.Tunnel | RoutingStrategies.Bubble);
+        // Only the left button selects: a right or middle press is swallowed before the ListBox can move the selection,
+        // which would silently retarget the region commands.
+        _list.AddHandler(PointerPressedEvent, OnPointerPressedTunnel, RoutingStrategies.Tunnel);
 
         Status = new TextBlock { TextWrapping = Avalonia.Media.TextWrapping.Wrap };
         AutomationProperties.SetLiveSetting(Status, AutomationLiveSetting.Polite);
@@ -149,6 +153,14 @@ public sealed class ConflictNavigator : UserControl
     };
 
     private static string SideOf(RegionView region, SideLabels labels) => region.Kind == RegionKind.RightOnly ? labels.RightRole : labels.LeftRole;
+
+    private static void OnPointerPressedTunnel(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(sender as Visual).Properties.IsLeftButtonPressed)
+        {
+            e.Handled = true;
+        }
+    }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {

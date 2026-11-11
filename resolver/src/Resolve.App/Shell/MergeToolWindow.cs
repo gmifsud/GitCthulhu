@@ -49,9 +49,9 @@ public sealed partial class MergeToolWindow : Window
         AcceptLeftButton = Action($"Accept LEFT · {labels.LeftRole}", WindowCommand.AcceptLeft);
         ApplyAllButton = Action("Apply all non-conflicting", WindowCommand.ApplyAllNonConflicting);
         SaveButton = Footer("Save", () => Fire(SaveAsync));
-        SaveAndExitButton = Footer("Save & exit", () => Fire(SaveAndExitAsync));
-        ExitUnresolvedButton = Footer("Exit unresolved", () => Fire(ExitUnresolvedAsync));
-        CancelButton = Footer("Cancel — leave file untouched", () => Fire(CancelAsync));
+        SaveAndExitButton = Footer(FooterLabel("Save & exit", ExitCode.Resolved), () => Fire(SaveAndExitAsync));
+        ExitUnresolvedButton = Footer(FooterLabel("Exit unresolved", ExitCode.Unresolved), () => Fire(ExitUnresolvedAsync));
+        CancelButton = Footer(FooterLabel("Cancel — leave file untouched", ExitCode.Unresolved), () => Fire(CancelAsync));
 
         var root = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(Gap) };
         Place(root, BuildHeader(session), 0);
@@ -88,6 +88,9 @@ public sealed partial class MergeToolWindow : Window
 
     internal MergeToolSession Session => _session;
 
+    /// <summary>The counter line; its accessible name is its text, so a screen reader reads the counts.</summary>
+    internal TextBlock Counter => _counter;
+
     internal ThreePaneView View { get; }
 
     internal ConflictNavigator Navigator { get; }
@@ -106,6 +109,10 @@ public sealed partial class MergeToolWindow : Window
 
     /// <summary>The RESULT caret's zero-based line.</summary>
     internal int ResultCaretLine() => View.Result.CaretLine;
+
+    /// <summary>"Save &amp; exit (0)": the label names the exit code git will see (spec §4.2).</summary>
+    private static string FooterLabel(string text, ExitCode code) =>
+        string.Create(CultureInfo.InvariantCulture, $"{text} ({(int)code})");
 
     private static string Count(int number, string noun) =>
         string.Create(CultureInfo.InvariantCulture, $"{number} {noun}{(number == 1 ? string.Empty : "s")}");
@@ -129,7 +136,6 @@ public sealed partial class MergeToolWindow : Window
     {
         var header = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 0, Gap) };
         var title = new TextBlock { Text = HeaderText, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
-        AutomationProperties.SetName(_counter, "Remaining work");
         header.Children.Add(title);
         if (session.Inputs.Labels.Banner is { } banner)
         {

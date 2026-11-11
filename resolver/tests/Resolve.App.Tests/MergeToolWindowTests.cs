@@ -19,6 +19,7 @@ namespace Resolve.App.Tests;
 
 public class MergeToolWindowTests
 {
+    private const string SkipReason = "An exclusive handle on MERGED blocks the write only on Windows; Unix locks are advisory and permission bits are not reliable under root.";
     private const string ManualPrompt = "Replace your manual edit in this region?";
     private const string DiscardPrompt = "Discard your changes and leave the file untouched?";
     private const string ExternalPrompt = "The file changed on disk since it was opened. Overwrite it?";
@@ -209,7 +210,7 @@ public class MergeToolWindowTests
 
         Click(w.ExitUnresolvedButton);
 
-        Assert.Equal(["Saves exactly what RESULT shows; 1 regions still unresolved."], asked);
+        Assert.Equal(["Saves exactly what RESULT shows; 1 region still unresolved."], asked);
         Assert.Equal(ExitCode.Unresolved, w.Result);
         Assert.True(w.Session.IsSaved);
     }
@@ -392,9 +393,165 @@ public class MergeToolWindowTests
         Assert.Contains("Keep base", labels);
         Assert.Contains("Mark resolved", labels);
         Assert.Contains("Apply all non-conflicting", labels);
-        Assert.Contains("Save & exit", labels);
-        Assert.Contains("Exit unresolved", labels);
-        Assert.Contains("Cancel — leave file untouched", labels);
+        Assert.Contains("Save & exit (0)", labels);
+        Assert.Contains("Exit unresolved (1)", labels);
+        Assert.Contains("Cancel — leave file untouched (1)", labels);
+    }
+
+    [AvaloniaFact]
+    public void The_counter_name_carries_the_counts()
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        Assert.Equal("Remaining: 1 conflict · 2 changes", AutomationProperties.GetName(w.Counter));
+
+        w.Run(WindowCommand.NextConflict);
+        w.Run(WindowCommand.AcceptLeft);
+
+        Assert.Equal("0 conflicts · 2 changes", w.Counter.Text);
+        Assert.Equal("Remaining: 0 conflicts · 2 changes", AutomationProperties.GetName(w.Counter));
+    }
+
+    [AvaloniaFact]
+    public void The_unresolved_prompt_is_singular_for_one_region_and_plural_otherwise()
+    {
+        var asked = new List<string>();
+        var w = MergeWindows.Criterion1(MergeWindows.Answering(false, asked));
+        Click(w.ExitUnresolvedButton);
+        Assert.Equal(["Saves exactly what RESULT shows; 1 region still unresolved."], asked);
+
+        var many = MergeWindows.Show(Sessions.Long(), MergeWindows.Answering(false, asked));
+        var conflicts = many.Session.Document.Counts.UnresolvedConflicts;
+        Assert.True(conflicts > 1);
+        asked.Clear();
+        Click(many.ExitUnresolvedButton);
+        Assert.Equal([$"Saves exactly what RESULT shows; {conflicts} regions still unresolved."], asked);
+    }
+
+    [AvaloniaFact]
+    public void Cancelling_after_a_save_with_no_later_edits_does_not_ask()
+    {
+        var asked = new List<string>();
+        var w = MergeWindows.Criterion1(MergeWindows.Answering(true, asked));
+        w.Run(WindowCommand.NextConflict);
+        w.Run(WindowCommand.AcceptLeft);
+        w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+        Assert.True(w.Session.IsSaved);
+        var saved = File.ReadAllBytes(w.Session.Inputs.MergedPath);
+
+        Click(w.CancelButton);
+
+        Assert.Empty(asked);
+        Assert.Equal(ExitCode.Unresolved, w.Result);
+        Assert.True(w.Session.IsCancelled);
+        Assert.Equal(saved, File.ReadAllBytes(w.Session.Inputs.MergedPath));
+    }
+
+    [AvaloniaFact]
+    public void Cancelling_after_a_save_and_a_later_edit_still_asks()
+    {
+        var asked = new List<string>();
+        var w = MergeWindows.Criterion1(MergeWindows.Answering(true, asked));
+        w.Run(WindowCommand.NextConflict);
+        w.Run(WindowCommand.AcceptLeft);
+        w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+        w.Run(WindowCommand.AcceptRight);
+        asked.Clear();
+
+        Click(w.CancelButton);
+
+        Assert.Equal([DiscardPrompt], asked);
+        Assert.Equal(ExitCode.Unresolved, w.Result);
+    }
+
+    [AvaloniaFact]
+    public async Task A_retry_after_an_agreed_overwrite_that_meets_another_change_keeps_the_window_open()
+    {
+        var asked = new List<string>();
+        var w = MergeWindows.Criterion1(MergeWindows.Answering(true, asked));
+        w.Run(WindowCommand.AcceptLeft);
+        var calls = new List<bool>();
+
+        await w.ExitAsync(overwrite =>
+        {
+            calls.Add(overwrite);
+            return ExitCode.ExternalChangeDeclined;
+        });
+
+        Assert.Equal([false, true], calls);
+        Assert.Equal([ExternalPrompt], asked);
+        Assert.Null(w.Result);
+        Assert.False(w.Session.IsCancelled);
+        Assert.Equal("The file changed on disk again; nothing was written.", Status(w));
+    }
+
+    [AvaloniaFact]
+    public void A_failed_save_and_exit_keeps_the_window_open_and_a_retry_succeeds()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), SkipReason);
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        w.Run(WindowCommand.NextConflict);
+        w.Run(WindowCommand.AcceptLeft);
+        var path = w.Session.Inputs.MergedPath;
+        var before = File.ReadAllBytes(path);
+
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Click(w.SaveAndExitButton);
+            Assert.Null(w.Result);
+            Assert.True(w.IsVisible);
+            Assert.Equal("Could not write the file. Your changes are still here.", Status(w));
+        }
+        Assert.Equal(before, File.ReadAllBytes(path));
+
+        Click(w.SaveAndExitButton);
+
+        Assert.Equal(ExitCode.Resolved, w.Result);
+        Assert.Contains("left 20", File.ReadAllText(path), StringComparison.Ordinal);
+    }
+
+    [AvaloniaFact]
+    public void A_failed_exit_unresolved_keeps_the_window_open_and_a_retry_succeeds()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), SkipReason);
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        var path = w.Session.Inputs.MergedPath;
+        var before = File.ReadAllBytes(path);
+
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Click(w.ExitUnresolvedButton);
+            Assert.Null(w.Result);
+            Assert.True(w.IsVisible);
+            Assert.Equal("Could not write the file. Your changes are still here.", Status(w));
+        }
+        Assert.Equal(before, File.ReadAllBytes(path));
+
+        Click(w.ExitUnresolvedButton);
+
+        Assert.Equal(ExitCode.Unresolved, w.Result);
+        Assert.True(w.Session.IsSaved);
+    }
+
+    [AvaloniaFact]
+    public void Ctrl_S_with_the_file_locked_stays_open_announces_the_failure_and_writes_nothing()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), SkipReason);
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        w.Run(WindowCommand.NextConflict);
+        w.Run(WindowCommand.AcceptLeft);
+        var path = w.Session.Inputs.MergedPath;
+        var before = File.ReadAllBytes(path);
+
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+            Assert.StartsWith("Save failed:", Status(w), StringComparison.Ordinal);
+        }
+
+        Assert.Null(w.Result);
+        Assert.True(w.IsVisible);
+        Assert.False(w.Session.IsSaved);
+        Assert.Equal(before, File.ReadAllBytes(path));
     }
 
     [AvaloniaFact]

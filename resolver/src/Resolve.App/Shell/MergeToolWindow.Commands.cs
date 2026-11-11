@@ -1,4 +1,5 @@
 using System.Globalization;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Threading;
@@ -209,6 +210,7 @@ public sealed partial class MergeToolWindow
             Navigator.Refresh();
         }
         _counter.Text = CounterText;
+        AutomationProperties.SetName(_counter, $"Remaining: {CounterText}");
         SaveAndExitButton.IsEnabled = _session.Document.IsComplete;
     }
 
@@ -220,7 +222,9 @@ public sealed partial class MergeToolWindow
     {
         var counts = _session.Document.Counts;
         var remaining = counts.UnresolvedConflicts + counts.ManualUnacknowledged;
-        prompt = string.Create(CultureInfo.InvariantCulture, $"Saves exactly what RESULT shows; {remaining} regions still unresolved.");
+        prompt = remaining == 1
+            ? "Saves exactly what RESULT shows; 1 region still unresolved."
+            : string.Create(CultureInfo.InvariantCulture, $"Saves exactly what RESULT shows; {remaining} regions still unresolved.");
         return !_session.Document.IsComplete;
     }
 
@@ -255,7 +259,7 @@ public sealed partial class MergeToolWindow
             Announce("Resolve every conflict before Save and exit");
             return;
         }
-        await Exit(overwrite => _session.SaveAndExit(overwrite));
+        await ExitAsync(overwrite => _session.SaveAndExit(overwrite));
     }
 
     private async Task ExitUnresolvedAsync()
@@ -264,23 +268,31 @@ public sealed partial class MergeToolWindow
         {
             return;
         }
-        await Exit(overwrite => _session.ExitUnresolved(overwrite));
+        await ExitAsync(overwrite => _session.ExitUnresolved(overwrite));
     }
 
     /// <summary>
     /// Runs a session exit; on an external change asks once and retries over it, or leaves with
     /// <see cref="ExitCode.ExternalChangeDeclined"/>. A failed write keeps the window open so nothing is lost.
     /// </summary>
-    private async Task Exit(Func<bool, ExitCode> exit)
+    internal async Task ExitAsync(Func<bool, ExitCode> exit)
     {
         var code = exit(false);
+        var overwrote = false;
         if (code == ExitCode.ExternalChangeDeclined && await _confirm(ExternalChangePrompt))
         {
+            overwrote = true;
             code = exit(true);
         }
         if (code == ExitCode.WriteFailed)
         {
             Announce("Could not write the file. Your changes are still here.");
+            return;
+        }
+        if (overwrote && code == ExitCode.ExternalChangeDeclined)
+        {
+            // The user agreed to overwrite, but the file moved again: nothing was written, so keep the resolution.
+            Announce("The file changed on disk again; nothing was written.");
             return;
         }
         if (code == ExitCode.Resolved)
@@ -309,7 +321,9 @@ public sealed partial class MergeToolWindow
         Close();
     }
 
-    private async Task<bool> ConfirmDiscard() => _session.Document.Version == 0 || await _confirm(DiscardPrompt);
+    /// <summary>Asks only when there are unsaved changes: edits since the last save, or edits never saved.</summary>
+    private async Task<bool> ConfirmDiscard() =>
+        _session.IsSaved || _session.Document.Version == 0 || await _confirm(DiscardPrompt);
 
     /// <summary>The title-bar close: never saves, and closes only after the user agrees to discard edits.</summary>
     private void OnClosing(object? sender, WindowClosingEventArgs e)
