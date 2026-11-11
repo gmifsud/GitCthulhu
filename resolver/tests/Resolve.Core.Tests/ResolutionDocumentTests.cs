@@ -228,4 +228,51 @@ public class ResolutionDocumentTests
             Assert.Equal(doc.Text.Length, views[^1].End);
             Assert.True(views.Zip(views.Skip(1)).All(pair => pair.First.End == pair.Second.Start));
         });
+
+    [Fact]
+    public void Replacing_a_conflicts_whole_text_from_its_first_character_keeps_it_in_the_conflict()   // ruling R31
+    {
+        var doc = Criterion1();
+        var conflict = ConflictOf(doc);
+        var before = doc.Regions[2];
+        var beforeText = doc.Text[before.Start..before.End];
+
+        doc.Edit(new TextChange(conflict.Start, conflict.End - conflict.Start, "mine\n"));
+
+        var after = ConflictOf(doc);
+        Assert.Equal("mine\n", doc.Text[after.Start..after.End]);
+        Assert.Equal(ResolutionChoice.Manual, after.Choice);
+        Assert.False(after.Acknowledged);
+        Assert.Equal(beforeText, doc.Text[doc.Regions[2].Start..doc.Regions[2].End]);
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[2].Choice);
+    }
+
+    [Fact]
+    public void Accepting_left_over_a_whole_text_replacement_replaces_exactly_that_text()   // ruling R31
+    {
+        var expected = Criterion1();
+        expected.Apply(new RegionCommand.Accept(ConflictOf(expected).RegionId, ResolutionChoice.Left));
+        var doc = Criterion1();
+        var conflict = ConflictOf(doc);
+        doc.Edit(new TextChange(conflict.Start, conflict.End - conflict.Start, "mine\n"));
+
+        Assert.IsType<CommandOutcome.NeedsConfirmation>(doc.Apply(new RegionCommand.Accept(conflict.RegionId, ResolutionChoice.Left)));
+        Assert.IsType<CommandOutcome.Changed>(doc.Apply(new RegionCommand.Accept(conflict.RegionId, ResolutionChoice.Left), confirmed: true));
+
+        Assert.Equal(expected.Text, doc.Text);
+        Assert.DoesNotContain("mine", doc.Text, StringComparison.Ordinal);
+        Assert.Equal(ResolutionChoice.Left, ConflictOf(doc).Choice);
+    }
+
+    [Fact]
+    public void A_replacement_straddling_a_boundary_still_goes_to_the_earlier_region()
+    {
+        var doc = Criterion1();
+        var conflict = ConflictOf(doc);
+        // From the middle of the line before the conflict to the middle of the conflict's line.
+        doc.Edit(new TextChange(conflict.Start - 2, 4, "Q"));
+        Assert.EndsWith("Q", doc.Text[doc.Regions[2].Start..doc.Regions[2].End], StringComparison.Ordinal);
+        Assert.Equal(ResolutionChoice.Manual, doc.Regions[2].Choice);
+        Assert.Equal(ResolutionChoice.Manual, ConflictOf(doc).Choice);
+    }
 }

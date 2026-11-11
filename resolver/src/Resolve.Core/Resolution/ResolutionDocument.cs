@@ -186,9 +186,10 @@ public sealed partial class ResolutionDocument
             {
                 var region = _regions[index];
                 region.Touched = offset <= region.End && end >= region.Start;
-                // Anchors strictly inside the replaced range collapse onto it; clamping keeps the regions a
-                // gap-free, ordered tiling (the earlier region keeps the inserted text).
-                // The first region always starts the document.
+                // Ruling R31: anchors exactly at the replaced range's start stay there, so replacing a region's text
+                // from its first character keeps the text in that region; anchors strictly inside collapse onto the
+                // range, and clamping keeps the regions a gap-free, ordered tiling (the earlier region keeps the
+                // inserted text when the range straddles a boundary). The first region always starts the document.
                 region.Start = index == 0 ? 0 : Math.Max(MapStart(region.Start, offset, end, inserted.Length), previousEnd);
                 region.End = Math.Max(MapEnd(region.End, offset, end, inserted.Length), region.Start);
                 previousEnd = region.End;
@@ -273,7 +274,7 @@ public sealed partial class ResolutionDocument
         x < a ? x : x >= b ? x + length - (b - a) : a;
 
     private static int MapEnd(int x, int a, int b, int length) =>
-        x < a ? x : x >= b ? x + length - (b - a) : a + length;
+        x <= a ? x : x >= b ? x + length - (b - a) : a + length;
 
     private void Reconcile(RegionState region)
     {
