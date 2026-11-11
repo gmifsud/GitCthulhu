@@ -8,7 +8,10 @@ namespace Resolve.Core.Diff;
 /// <summary>
 /// Line edits computed by git itself (<c>git diff --no-index -U0</c>), so a plan built from them has exactly the
 /// regions git's own merge machinery produces. Only hunk headers are read; content lines are never parsed.
-/// Every option that could change the alignment is pinned, so the user's diff config cannot alter it.
+/// Every option that could change the alignment is pinned, so the user's diff config cannot alter it: line-ending
+/// conversion (<c>core.autocrlf</c>) is switched off and hunks are never fused (<c>diff.interHunkContext</c>).
+/// Attributes such as <c>* text=auto</c> cannot be pinned, so callers must still check the script against the files
+/// (ruling R28: <c>Diff3Planner.TryPlan</c>).
 /// </summary>
 public static partial class GitLineDiff
 {
@@ -18,9 +21,10 @@ public static partial class GitLineDiff
         ArgumentNullException.ThrowIfNull(runner);
         var arguments = new[]
         {
+            "-c", "core.autocrlf=false", "-c", "core.safecrlf=false",
             "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "--no-renames",
             "--no-indent-heuristic", algorithm == DiffAlgorithm.Histogram ? "--diff-algorithm=histogram" : "--diff-algorithm=myers",
-            "-U0", "--", pathA, pathB,
+            "-U0", "--inter-hunk-context=0", "--", pathA, pathB,
         };
         var result = await runner.RunAsync(new GitInvocation(workingDirectory, arguments) { ReadOnly = true }, cancellationToken).ConfigureAwait(false);
         // --no-index exits 1 when the files differ; anything else is an error.

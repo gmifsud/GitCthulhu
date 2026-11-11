@@ -15,8 +15,17 @@ public sealed class PlanningFailureTests
     private sealed class UnreadableDiffRunner(IGitRunner inner) : IGitRunner
     {
         public Task<GitResult> RunAsync(GitInvocation invocation, CancellationToken cancellationToken) =>
-            invocation.Arguments is ["diff", ..]
+            invocation.Arguments.Contains("diff")
                 ? Task.FromResult(new GitResult(1, [], Encoding.UTF8.GetBytes("error: Could not access 'x_BASE_1.txt'\n")))
+                : inner.RunAsync(invocation, cancellationToken);
+    }
+
+    /// <summary>Answers every <c>git diff</c> with "identical", as git does when an attribute converts away the only differences.</summary>
+    private sealed class IdenticalDiffRunner(IGitRunner inner) : IGitRunner
+    {
+        public Task<GitResult> RunAsync(GitInvocation invocation, CancellationToken cancellationToken) =>
+            invocation.Arguments.Contains("diff")
+                ? Task.FromResult(new GitResult(0, [], []))
                 : inner.RunAsync(invocation, cancellationToken);
     }
 
@@ -48,11 +57,39 @@ public sealed class PlanningFailureTests
         int[] baseIds = [1, 2, 3];
         int[] left = [1, 9, 3];
         int[] right = [1, 2, 3];
-        // No edits for LEFT although it differs from BASE: net length matches, so only the other checks catch lost content elsewhere.
-        Assert.Throws<GitCommandException>(() => Diff3Planner.Plan(baseIds, [1, 2, 3, 4], right, [], [], DiffAlgorithm.Histogram));
-        Assert.Throws<GitCommandException>(() => Diff3Planner.Plan(baseIds, left, right, [new Edit(1, 2, 1, 2), new Edit(0, 1, 0, 1)], [], DiffAlgorithm.Histogram));
-        Assert.Throws<GitCommandException>(() => Diff3Planner.Plan(baseIds, left, right, [new Edit(2, 9, 1, 2)], [], DiffAlgorithm.Histogram));
+        // Wrong net length, unsorted, out of bounds: each throws from Plan and is null from TryPlan.
+        Assert.Throws<ArgumentException>(() => Diff3Planner.Plan(baseIds, [1, 2, 3, 4], right, [], [], DiffAlgorithm.Histogram));
+        Assert.Throws<ArgumentException>(() => Diff3Planner.Plan(baseIds, left, right, [new Edit(1, 2, 1, 2), new Edit(0, 1, 0, 1)], [], DiffAlgorithm.Histogram));
+        Assert.Throws<ArgumentException>(() => Diff3Planner.Plan(baseIds, left, right, [new Edit(2, 9, 1, 2)], [], DiffAlgorithm.Histogram));
+        Assert.Null(Diff3Planner.TryPlan(baseIds, left, right, [new Edit(2, 9, 1, 2)], [], DiffAlgorithm.Histogram));
         Assert.NotNull(Diff3Planner.Plan(baseIds, left, right, [new Edit(1, 2, 1, 2)], [], DiffAlgorithm.Histogram));
+    }
+
+    [Fact]
+    public void A_script_whose_equal_stretches_differ_is_not_valid()   // ruling R28
+    {
+        int[] baseIds = [1, 2, 3, 4];
+        int[] left = [1, 9, 3, 4];
+        // The counts match, but the stretch the script calls equal holds 2 on BASE and 9 on LEFT.
+        Assert.False(Diff3Planner.IsValidScript([], baseIds, left));
+        Assert.False(Diff3Planner.IsValidScript([new Edit(3, 4, 3, 4)], baseIds, left));
+        // An edit whose side position disagrees with the stretch before it.
+        Assert.False(Diff3Planner.IsValidScript([new Edit(1, 2, 2, 3)], baseIds, [1, 2, 9, 4]));
+        Assert.Null(Diff3Planner.TryPlan(baseIds, left, baseIds, [], [], DiffAlgorithm.Histogram));
+        Assert.True(Diff3Planner.IsValidScript([new Edit(1, 2, 1, 2)], baseIds, left));
+    }
+
+    [Fact]
+    public async Task A_git_script_that_hides_a_change_falls_back_to_the_in_process_plan()   // ruling R28
+    {
+        var inputs = await Inputs.FromTextsAsync("a\nb\nc\nd\ne\n", "a\nLEFT\nc\nd\ne\n", "a\nb\nc\nd\nRIGHT\n");
+
+        var plan = await MergePlanning.PlanAsync(new IdenticalDiffRunner(Fixtures.Git()), inputs, default);
+
+        var expected = Diff3Planner.Plan(inputs.Base.Lines, inputs.Left.Lines, inputs.Right.Lines, DiffAlgorithm.Histogram);
+        Assert.Equal(expected.Digest, plan.Digest);
+        Assert.Equal(expected.Regions.Select(region => (region.Kind, region.Base, region.Left, region.Right)), plan.Regions.Select(region => (region.Kind, region.Base, region.Left, region.Right)));
+        Assert.Equal(2, plan.ChangeCount);
     }
 
     [Fact]

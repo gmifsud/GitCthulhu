@@ -44,7 +44,11 @@ public static class MergePlanning
             }
             var leftEdits = await GitLineDiff.ComputeAsync(runner, workingDirectory, basePath, leftFile, DiffAlgorithm.Histogram, ct).ConfigureAwait(false);
             var rightEdits = await GitLineDiff.ComputeAsync(runner, workingDirectory, basePath, rightFile, DiffAlgorithm.Histogram, ct).ConfigureAwait(false);
-            return Diff3Planner.Plan(baseIds, leftIds, rightIds, leftEdits, rightEdits, DiffAlgorithm.Histogram);
+            // Ruling R28: a script that does not turn BASE into its side line for line (git converted line endings under
+            // an attribute such as "* text=auto", which cannot be pinned) is not refused: the in-process planner, which
+            // compares exact lines, plans instead. Exit 3 stays for git actually failing (GitLineDiff throws).
+            return Diff3Planner.TryPlan(baseIds, leftIds, rightIds, leftEdits, rightEdits, DiffAlgorithm.Histogram)
+                ?? Diff3Planner.Plan(baseIds, leftIds, rightIds, DiffAlgorithm.Histogram);
         }
         finally
         {

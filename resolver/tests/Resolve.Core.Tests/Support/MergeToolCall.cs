@@ -53,15 +53,17 @@ internal static class MergeToolCall
 /// <summary>Builds <see cref="MergeInputs"/> straight from texts, with no repository. No xUnit types.</summary>
 internal static class Inputs
 {
-    /// <summary>A null base text is an absent base (empty file, no stage 1).</summary>
+    /// <summary>A null base text is an absent base (empty file, no stage 1). The files go in <paramref name="directory"/>, or a fresh temp one.</summary>
     public static Task<MergeInputs> FromTextsAsync(
         string? baseText,
         string left,
         string right,
         TextEncodingKind leftEncoding = TextEncodingKind.Utf8,
-        TextEncodingKind rightEncoding = TextEncodingKind.Utf8)
+        TextEncodingKind rightEncoding = TextEncodingKind.Utf8,
+        string? directory = null)
     {
-        var directory = Directory.CreateTempSubdirectory("cthulhu-inputs-").FullName;
+        directory ??= Directory.CreateTempSubdirectory("cthulhu-inputs-").FullName;
+        Directory.CreateDirectory(directory);
         var baseDecoded = Make(baseText ?? "", TextEncodingKind.Utf8);
         var leftDecoded = Make(left, leftEncoding);
         var rightDecoded = Make(right, rightEncoding);

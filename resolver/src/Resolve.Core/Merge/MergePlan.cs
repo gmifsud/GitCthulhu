@@ -2,7 +2,6 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using Resolve.Core.Diff;
-using Resolve.Core.Git;
 using Resolve.Core.Text;
 
 namespace Resolve.Core.Merge;
@@ -77,42 +76,50 @@ public static class Diff3Planner
     }
 
     /// <summary>
-    /// An edit script that does not turn base into the side (unsorted, out of bounds, wrong net length) can never become a
-    /// plan: it would silently lose content. <see cref="GitCommandException"/> is what the session maps to "input unreadable".
+    /// True when the script turns base into the side exactly: sorted, in bounds, and every stretch between edits (and
+    /// around them) is the same lines, by id, on both. A script that fails this would silently lose content — e.g. git
+    /// hid an end-of-line-only change under <c>* text=auto</c> (ruling R28).
     /// </summary>
-    private static void Validate(IReadOnlyList<Edit> edits, int baseLength, int sideLength, string side)
+    public static bool IsValidScript(IReadOnlyList<Edit> edits, int[] baseIds, int[] sideIds)
     {
-        long delta = 0;
-        var previousEnd = 0;
+        ArgumentNullException.ThrowIfNull(edits);
+        ArgumentNullException.ThrowIfNull(baseIds);
+        ArgumentNullException.ThrowIfNull(sideIds);
+        int a = 0, b = 0;
         foreach (var edit in edits)
         {
-            if (edit.AStart < previousEnd || edit.AEnd < edit.AStart || edit.AEnd > baseLength
-                || edit.BStart < 0 || edit.BEnd < edit.BStart || edit.BEnd > sideLength)
+            if (edit.AStart < a || edit.AEnd < edit.AStart || edit.AEnd > baseIds.Length
+                || edit.BStart != b + (edit.AStart - a) || edit.BEnd < edit.BStart || edit.BEnd > sideIds.Length
+                || !baseIds.AsSpan(a, edit.AStart - a).SequenceEqual(sideIds.AsSpan(b, edit.BStart - b)))
             {
-                throw new GitCommandException($"The {side} edit script is not valid for its inputs.");
+                return false;
             }
-            previousEnd = edit.AEnd;
-            delta += edit.Delta;
+            a = edit.AEnd;
+            b = edit.BEnd;
         }
-        if (baseLength + delta != sideLength)
-        {
-            throw new GitCommandException($"The {side} edit script does not account for the {side} file's length.");
-        }
+        return baseIds.Length - a == sideIds.Length - b && baseIds.AsSpan(a).SequenceEqual(sideIds.AsSpan(b));
     }
 
     /// <summary>
     /// Plans from given edit scripts, e.g. git's own (<see cref="GitLineDiff"/>), so the regions are exactly the
-    /// conflicts git reports. Edits must be sorted, maximal and valid for these inputs.
+    /// conflicts git reports. Throws <see cref="ArgumentException"/> unless both scripts are valid (<see cref="IsValidScript"/>).
     /// </summary>
-    public static MergePlan Plan(int[] baseIds, int[] left, int[] right, IReadOnlyList<Edit> leftEdits, IReadOnlyList<Edit> rightEdits, DiffAlgorithm algorithm)
+    public static MergePlan Plan(int[] baseIds, int[] left, int[] right, IReadOnlyList<Edit> leftEdits, IReadOnlyList<Edit> rightEdits, DiffAlgorithm algorithm) =>
+        TryPlan(baseIds, left, right, leftEdits, rightEdits, algorithm)
+            ?? throw new ArgumentException("An edit script does not turn the base into its side.", nameof(leftEdits));
+
+    /// <summary>Like <see cref="Plan(int[], int[], int[], IReadOnlyList{Edit}, IReadOnlyList{Edit}, DiffAlgorithm)"/>, but null when a script is not valid for its inputs.</summary>
+    public static MergePlan? TryPlan(int[] baseIds, int[] left, int[] right, IReadOnlyList<Edit> leftEdits, IReadOnlyList<Edit> rightEdits, DiffAlgorithm algorithm)
     {
         ArgumentNullException.ThrowIfNull(baseIds);
         ArgumentNullException.ThrowIfNull(left);
         ArgumentNullException.ThrowIfNull(right);
         ArgumentNullException.ThrowIfNull(leftEdits);
         ArgumentNullException.ThrowIfNull(rightEdits);
-        Validate(leftEdits, baseIds.Length, left.Length, "left");
-        Validate(rightEdits, baseIds.Length, right.Length, "right");
+        if (!IsValidScript(leftEdits, baseIds, left) || !IsValidScript(rightEdits, baseIds, right))
+        {
+            return null;
+        }
         var regions = ImmutableArray.CreateBuilder<PlanRegion>();
         int i = 0, j = 0, basePosition = 0, leftDelta = 0, rightDelta = 0;
 
