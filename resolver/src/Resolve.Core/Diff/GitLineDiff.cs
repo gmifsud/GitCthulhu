@@ -28,7 +28,14 @@ public static partial class GitLineDiff
         {
             throw new GitCommandException(arguments, result);
         }
-        return ParseHunkHeaders(result.StandardOutput);
+        var edits = ParseHunkHeaders(result.StandardOutput);
+        // Files that truly differ always print a hunk under -U0; exit 1 with none is git failing to read a path
+        // ("Could not access ..."), and treating that as "no changes" would silently drop a side.
+        if (result.ExitCode == 1 && edits.Count == 0)
+        {
+            throw new GitCommandException(arguments, result);
+        }
+        return edits;
     }
 
     /// <summary>

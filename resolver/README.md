@@ -21,7 +21,7 @@ Phase 0 (foundation and spikes) is done; its table is further down.
 | Merge-tool window, keys, confirmations | ✅ | `src/Resolve.App/Shell/` |
 | Program entry (command line to window to exit code) | ✅ | `src/Resolve.App/Program.cs` |
 | `git mergetool` end to end (acceptance 8), no display needed | ✅ | `tests/Resolve.MergeToolProbe/`, `tests/Resolve.Core.Tests/MergeToolAcceptanceTests.cs` |
-| CI on Windows, macOS, Linux | ✅ | `../.github/workflows/resolver.yml` |
+| CI on Windows, macOS, Linux | Configured; not yet observed running for Phase 1 | `../.github/workflows/resolver.yml` |
 
 **Known v1 limitation (decision O1-A):** screen-reader editing of the RESULT pane is not supported. The conflict navigator is accessible (keyboard, live announcements), but typing into RESULT with a screen reader is a v1 limitation.
 
@@ -30,11 +30,11 @@ Phase 0 (foundation and spikes) is done; its table is further down.
 Build the app (`dotnet build src/Resolve.App -c Release`), then point git at the built `cthulhu-resolve`. On Windows the executable is `src/Resolve.App/bin/Release/net10.0/cthulhu-resolve.exe`; on Linux and macOS it is `cthulhu-resolve` in the same folder. On WSL use the Linux build, not the `.exe`, to keep path semantics consistent.
 
 ```ini
-# ~/.gitconfig (Windows path shown; use forward slashes)
+# ~/.gitconfig (Windows path shown, with <repo> your checkout; use forward slashes)
 [merge]
     tool = cthulhu
 [mergetool "cthulhu"]
-    cmd = \"D:/Repos/GitCthulhu/resolver/src/Resolve.App/bin/Release/net10.0/cthulhu-resolve.exe\" merge --base \"$BASE\" --local \"$LOCAL\" --remote \"$REMOTE\" --merged \"$MERGED\"
+    cmd = \"<repo>/resolver/src/Resolve.App/bin/Release/net10.0/cthulhu-resolve.exe\" merge --base \"$BASE\" --local \"$LOCAL\" --remote \"$REMOTE\" --merged \"$MERGED\"
     trustExitCode = true
 [mergetool]
     keepBackup = false   # the resolver keeps its own backup before the first save

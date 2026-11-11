@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using Resolve.Core.Diff;
+using Resolve.Core.Git;
 using Resolve.Core.Text;
 
 namespace Resolve.Core.Merge;
@@ -76,6 +77,30 @@ public static class Diff3Planner
     }
 
     /// <summary>
+    /// An edit script that does not turn base into the side (unsorted, out of bounds, wrong net length) can never become a
+    /// plan: it would silently lose content. <see cref="GitCommandException"/> is what the session maps to "input unreadable".
+    /// </summary>
+    private static void Validate(IReadOnlyList<Edit> edits, int baseLength, int sideLength, string side)
+    {
+        long delta = 0;
+        var previousEnd = 0;
+        foreach (var edit in edits)
+        {
+            if (edit.AStart < previousEnd || edit.AEnd < edit.AStart || edit.AEnd > baseLength
+                || edit.BStart < 0 || edit.BEnd < edit.BStart || edit.BEnd > sideLength)
+            {
+                throw new GitCommandException($"The {side} edit script is not valid for its inputs.");
+            }
+            previousEnd = edit.AEnd;
+            delta += edit.Delta;
+        }
+        if (baseLength + delta != sideLength)
+        {
+            throw new GitCommandException($"The {side} edit script does not account for the {side} file's length.");
+        }
+    }
+
+    /// <summary>
     /// Plans from given edit scripts, e.g. git's own (<see cref="GitLineDiff"/>), so the regions are exactly the
     /// conflicts git reports. Edits must be sorted, maximal and valid for these inputs.
     /// </summary>
@@ -86,6 +111,8 @@ public static class Diff3Planner
         ArgumentNullException.ThrowIfNull(right);
         ArgumentNullException.ThrowIfNull(leftEdits);
         ArgumentNullException.ThrowIfNull(rightEdits);
+        Validate(leftEdits, baseIds.Length, left.Length, "left");
+        Validate(rightEdits, baseIds.Length, right.Length, "right");
         var regions = ImmutableArray.CreateBuilder<PlanRegion>();
         int i = 0, j = 0, basePosition = 0, leftDelta = 0, rightDelta = 0;
 

@@ -31,8 +31,19 @@ internal static class Program
         }
 
         var backupRoot = Directory.CreateTempSubdirectory("cthulhu-probe-backups-").FullName;
-        var options = new SessionOptions(backupRoot, TimeProvider.System);
-        var outcome = await MergeToolSession.OpenAsync(new GitRunner(), parsed.Arguments, options, CancellationToken.None);
+        try
+        {
+            return await RunAsync(action, parsed.Arguments, new SessionOptions(backupRoot, TimeProvider.System));
+        }
+        finally
+        {
+            Directory.Delete(backupRoot, recursive: true);
+        }
+    }
+
+    private static async Task<int> RunAsync(string action, MergeToolArguments arguments, SessionOptions options)
+    {
+        var outcome = await MergeToolSession.OpenAsync(new GitRunner(), arguments, options, CancellationToken.None);
         if (outcome is OpenOutcome.Failed failed)
         {
             await Console.Error.WriteLineAsync(failed.Message);
