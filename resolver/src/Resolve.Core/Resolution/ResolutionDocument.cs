@@ -35,11 +35,19 @@ public sealed partial class ResolutionDocument
     private string? _text;
     private RegionView[]? _views;
 
-    private ResolutionDocument(MergePlan plan, TimeProvider clock, RegionState[] regions)
+    private readonly IReadOnlyList<Line> _base;
+    private readonly IReadOnlyList<Line> _left;
+    private readonly IReadOnlyList<Line> _right;
+
+    private ResolutionDocument(MergePlan plan, TimeProvider clock, RegionState[] regions, IReadOnlyList<Line> baseLines, IReadOnlyList<Line> left, IReadOnlyList<Line> right)
     {
         Plan = plan;
         Clock = clock;
         _regions = regions;
+        _base = baseLines;
+        _left = left;
+        _right = right;
+        NewLine = DominantNewLine(left, right);
     }
 
     internal MergePlan Plan { get; }
@@ -85,22 +93,14 @@ public sealed partial class ResolutionDocument
         ArgumentNullException.ThrowIfNull(right);
         ArgumentNullException.ThrowIfNull(clock);
         var builder = new StringBuilder();
+        var newLine = DominantNewLine(left, right);
         var regions = new RegionState[plan.Regions.Length];
         for (var index = 0; index < regions.Length; index++)
         {
             var planned = plan.Regions[index];
-            var (lines, range, choice) = planned.Kind switch
-            {
-                RegionKind.Equal => (@base, planned.Base, ResolutionChoice.Base),
-                RegionKind.LeftOnly or RegionKind.BothSame => (left, planned.Left, ResolutionChoice.Left),
-                RegionKind.RightOnly => (right, planned.Right, ResolutionChoice.Right),
-                _ => (@base, planned.Base, ResolutionChoice.Unresolved),
-            };
+            var choice = InitialChoice(planned.Kind);
             var start = builder.Length;
-            for (var line = range.Start; line < range.End; line++)
-            {
-                builder.Append(lines[line].ToString());
-            }
+            builder.Append(RegionText(planned, choice, @base, left, right, newLine));
             regions[index] = new RegionState(planned.Id, planned.Kind)
             {
                 Start = start,
@@ -110,21 +110,51 @@ public sealed partial class ResolutionDocument
                 ExpectedHash = Hash(builder.ToString(start, builder.Length - start)),
             };
         }
-        var document = new ResolutionDocument(plan, clock, regions);
+        var document = new ResolutionDocument(plan, clock, regions, @base, left, right);
         document._builder.Append(builder);
         return document;
     }
 
-    /// <summary>A manual edit. Returns the changes to show: here, the change itself.</summary>
+    /// <summary>
+    /// A manual edit. Typed line breaks are rewritten to <see cref="NewLine"/> (spec §9.1); returns the changes to
+    /// show: the rewritten change. Consecutive single-character typing coalesces into one undo entry.
+    /// </summary>
     public IReadOnlyList<TextChange> Edit(TextChange change)
     {
-        var (offset, removed, inserted) = change;
-        ArgumentNullException.ThrowIfNull(inserted, nameof(change));
-        ArgumentOutOfRangeException.ThrowIfNegative(offset);
-        ArgumentOutOfRangeException.ThrowIfNegative(removed);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, _builder.Length);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(removed, _builder.Length - offset);
+        ArgumentNullException.ThrowIfNull(change.InsertedText, nameof(change));
+        var rewritten = change with { InsertedText = ApplyNewLine(change.InsertedText) };
+        ArgumentOutOfRangeException.ThrowIfNegative(rewritten.Offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(rewritten.RemovedLength);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(rewritten.Offset, _builder.Length);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(rewritten.RemovedLength, _builder.Length - rewritten.Offset);
 
+        var typing = TypingKindOf(change);
+        var regionId = typing == TypingKind.None ? -1 : TypingRegionId(rewritten, typing);
+        var now = Clock.GetUtcNow();
+        var before = Snapshot();
+        var inverse = new TextChange(rewritten.Offset, rewritten.InsertedText.Length, _builder.ToString(rewritten.Offset, rewritten.RemovedLength));
+        ApplyEdit(rewritten);
+
+        if (_open is { } open && open.Accepts(rewritten, typing, regionId, now))
+        {
+            open.Extend(rewritten, inverse, Snapshot(), now);
+        }
+        else
+        {
+            var entry = new UndoEntry(before);
+            entry.Forward.Add(rewritten);
+            entry.Inverse.Add(inverse);
+            entry.After = Snapshot();
+            entry.StartTyping(typing, regionId, rewritten, now);
+            Record(entry);
+            _open = typing == TypingKind.None ? null : entry;
+        }
+        return [rewritten];
+    }
+
+    private void ApplyEdit(TextChange change)
+    {
+        var (offset, removed, inserted) = change;
         var end = offset + removed;
         _builder.Remove(offset, removed).Insert(offset, inserted);
         _text = null;
@@ -172,7 +202,6 @@ public sealed partial class ResolutionDocument
             }
         }
         Version++;
-        return [change];
     }
 
     /// <summary>Zero-based line holding <paramref name="offset"/>: the count of newlines before it.</summary>
@@ -287,7 +316,7 @@ public sealed partial class ResolutionDocument
         return views;
     }
 
-    /// <summary>Mutable per-region storage. Task 5 extends this with transition records for undo.</summary>
+    /// <summary>Mutable per-region storage; undo keeps whole-array snapshots of these fields (see RegionCommands.cs).</summary>
     private sealed class RegionState(int id, RegionKind kind)
     {
         public int Id { get; } = id;
