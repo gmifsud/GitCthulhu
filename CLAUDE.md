@@ -79,5 +79,6 @@ Review weekly — prune anything stale.
 - ADR 0002: app state stays a reducer.
 - ADR 0003: sessions-first GitLens path — worktree tabs own `AppState`; compare + split diff after WP1. Spec: `docs/superpowers/specs/2026-10-25-worktree-tabs-design.md`.
 - ADR 0004–0006 (accepted 2026-10-27): conflict resolver — .NET + Avalonia/AvaloniaEdit behind `IEditorSurface`; git CLI authoritative; immutable merge plan + anchored result. Spec: `docs/superpowers/specs/2026-10-27-conflict-resolver-design.md`.
+- Resolver O1 (decided 2026-11-11): option A — keep AvaloniaEdit, accessible conflict navigator; screen-reader editing of RESULT is a v1 limitation. Phase 1 plan: `docs/superpowers/plans/2026-11-11-resolver-phase-1.md`.
 - ADR 0007 (accepted 2026-11-07): `view` is O(visible) — no message per pointer move, no per-row scans, history appended not re-read. Measure with `GITCTHULHU_PERF=1`, the `perf_harness` test, and the `profiling` profile.
 

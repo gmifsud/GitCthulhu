@@ -967,7 +967,7 @@ Relative effort assumes one senior engineer and is given as S/M/L/XL (≈ 1 / 2�
 
 | # | Question | Default | Consequence if wrong | How to validate |
 |---|---|---|---|---|
-| O1 | AvaloniaEdit accessibility depth | Build a UIA/AX peer ourselves | +3–4 weeks or fallback to Monaco | Spike S3 with NVDA + VoiceOver scripts |
+| O1 | AvaloniaEdit accessibility depth | **Decided 2026-11-11: option A** (S3 report): keep AvaloniaEdit, add an accessible conflict navigator built from standard controls. Screen-reader *editing* of RESULT is a documented v1 limitation | +3–4 weeks or fallback to Monaco | Spike S3 with NVDA + VoiceOver scripts |
 | O2 | Initial result default (D4) | Base + non-conflicting applied | Users may expect Rider's base-only | Setting exists; dogfood survey |
 | O3 | Pane order for rebase | Fixed stage order (2 left, 3 right) with role labels | Some users want "my code left" | Optional display swap in Phase 3 |
 | O4 | Where the code lives (D6) | Separate `cthulhu-resolve` repo | Mixed-stack monorepo friction if merged | Revisit after Phase 1 |

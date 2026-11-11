@@ -17,7 +17,7 @@ Standalone three-way Git conflict resolver.
 | S2 planner vs git | ✅ Go | `docs/spikes/S2-planner-oracle.md` |
 | S4 atomic save | ✅ Linux; Windows/macOS/WSL pending | `docs/spikes/S4-atomic-save.md` |
 | S1 three-pane editor latency | ⚠ Conditional go (Linux CPU raster); GPU re-measure pending | `docs/spikes/S1-S3-editor.md`, `spikes/S1.ThreePane/` |
-| S3 editor accessibility | ❌ Kill criterion met; decision O1 needed (A navigator vs B Monaco) | `docs/spikes/S1-S3-editor.md` |
+| S3 editor accessibility | ❌ Kill criterion met → **O1 decided 2026-11-11: option A** (accessible conflict navigator; screen-reader editing of RESULT is a v1 limitation) | `docs/spikes/S1-S3-editor.md` |
 
 What each component guarantees:
 
