@@ -131,17 +131,18 @@ public sealed partial class ResolutionDocument
         var typing = TypingKindOf(change);
         var regionId = typing == TypingKind.None ? -1 : TypingRegionId(rewritten, typing);
         var now = Clock.GetUtcNow();
-        var before = Snapshot();
+        var open = _open is { } current && current.Accepts(rewritten, typing, regionId, now) ? current : null;
+        var before = open is null ? Snapshot() : null;   // only a new undo entry needs the "before" array
         var inverse = new TextChange(rewritten.Offset, rewritten.InsertedText.Length, _builder.ToString(rewritten.Offset, rewritten.RemovedLength));
         ApplyEdit(rewritten);
 
-        if (_open is { } open && open.Accepts(rewritten, typing, regionId, now))
+        if (open is not null)
         {
             open.Extend(rewritten, inverse, Snapshot(), now);
         }
         else
         {
-            var entry = new UndoEntry(before);
+            var entry = new UndoEntry(before!);
             entry.Forward.Add(rewritten);
             entry.Inverse.Add(inverse);
             entry.After = Snapshot();

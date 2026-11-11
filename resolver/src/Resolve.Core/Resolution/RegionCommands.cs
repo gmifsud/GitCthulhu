@@ -265,7 +265,7 @@ public sealed partial class ResolutionDocument
             for (var index = 0; index < _regions.Length; index++)
             {
                 var region = _regions[index];
-                if (region.Kind is RegionKind.Equal or RegionKind.Conflict)
+                if (region.Kind == RegionKind.Equal)
                 {
                     continue;
                 }
@@ -273,13 +273,19 @@ public sealed partial class ResolutionDocument
                 {
                     skipped.Add(region.Id);
                 }
-                else if (!IsInitial(index))
+                else if (region.Kind != RegionKind.Conflict && !IsInitial(index))
                 {
                     ReplaceInitial(index, entry);
                 }
             }
         });
-        return outcome is CommandOutcome.Changed changed ? changed with { SkippedManual = skipped } : outcome;
+        // Spec 12.2: the UI shows the skipped list even when nothing changed (no entry, no version bump then).
+        return outcome switch
+        {
+            CommandOutcome.Changed changed => changed with { SkippedManual = skipped },
+            _ when skipped.Count > 0 => new CommandOutcome.Changed([], skipped),
+            _ => outcome,
+        };
     }
 
     /// <summary>True when the region holds its initial text with its initial choice.</summary>

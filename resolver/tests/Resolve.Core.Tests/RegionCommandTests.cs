@@ -233,6 +233,42 @@ public class RegionCommandTests
     }
 
     [Fact]
+    public void Criterion_2_apply_all_lists_a_manual_conflict_as_skipped_without_changing_anything()
+    {
+        var doc = Criterion1();
+        var c = Conflict(doc);
+        doc.Edit(new TextChange(c.Start, 0, "mine "));
+        var text = doc.Text;
+        var version = doc.Version;
+        var outcome = Assert.IsType<CommandOutcome.Changed>(doc.Apply(new RegionCommand.ApplyAllNonConflicting()));
+        Assert.Equal([c.RegionId], outcome.SkippedManual);
+        Assert.Empty(outcome.Changes);
+        Assert.Equal(text, doc.Text);
+        Assert.Equal(version, doc.Version);
+        doc.Undo();
+        Assert.Equal(ResolutionChoice.Unresolved, Conflict(doc).Choice);
+        Assert.Equal("line 20", Lines(doc.Text)[19]);
+        Assert.Null(doc.Undo());
+    }
+
+    [Fact]
+    public void Apply_all_reapplies_a_reset_region_and_lists_a_manual_one_in_the_same_outcome()
+    {
+        var doc = Criterion1();
+        doc.Apply(new RegionCommand.Accept(5, ResolutionChoice.Base));
+        doc.Edit(new TextChange(doc.Regions[1].Start, 0, "mine "));
+        var outcome = Assert.IsType<CommandOutcome.Changed>(doc.Apply(new RegionCommand.ApplyAllNonConflicting()));
+        Assert.Equal([1], outcome.SkippedManual);
+        Assert.Single(outcome.Changes);
+        Assert.Equal(ResolutionChoice.Right, doc.Regions[5].Choice);
+        Assert.Equal("right 40", Lines(doc.Text)[39]);
+        Assert.Equal(ResolutionChoice.Manual, doc.Regions[1].Choice);
+        doc.Undo();
+        Assert.Equal(ResolutionChoice.Base, doc.Regions[5].Choice);
+        Assert.Equal(ResolutionChoice.Manual, doc.Regions[1].Choice);
+    }
+
+    [Fact]
     public void Typed_newline_uses_the_dominant_eol_of_left()
     {
         var doc = Build(Lf("a", "b"), Crlf("a", "b", "c"), Lf("a", "b"));
