@@ -39,6 +39,12 @@ internal sealed class RegionBackground : IBackgroundRenderer
 
     public KnownLayer Layer => KnownLayer.Background;
 
+    /// <summary>The wash brush for a tint, shared with the connector bands so the panes and bands match.</summary>
+    internal static IBrush WashFor(RegionTint tint) => Washes[(int)tint];
+
+    /// <summary>The solid ink for a tint, used for band outlines.</summary>
+    internal static IBrush InkFor(RegionTint tint) => Inks[(int)tint];
+
     public void Set(IReadOnlyList<Decoration> decorations)
     {
         var sorted = decorations.Where(d => d.EndLine > d.StartLine).ToArray();

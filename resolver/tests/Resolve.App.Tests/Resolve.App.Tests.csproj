@@ -15,6 +15,10 @@
     <PackageReference Include="Avalonia.Themes.Fluent" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Ruling R2: the core test helpers (git fixtures, stage files) are xUnit-free, so they are linked as source. -->
+    <Compile Include="../Resolve.Core.Tests/Support/*.cs" Link="Support/Core/%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
     <Using Include="Xunit" />
     <ProjectReference Include="../../src/Resolve.App/Resolve.App.csproj" />
   </ItemGroup>
