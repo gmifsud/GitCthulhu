@@ -74,6 +74,10 @@ internal sealed class GitFixture : IDisposable
     public Task<GitResult> TryRunAsync(params string[] arguments) =>
         Git.RunAsync(new GitInvocation(Worktree, arguments), CancellationToken.None);
 
+    /// <summary>Like <see cref="TryRunAsync"/> with extra environment for this call only; a null value removes the variable.</summary>
+    public Task<GitResult> TryRunWithEnvAsync(Dictionary<string, string?> environment, params string[] arguments) =>
+        Git.RunAsync(new GitInvocation(Worktree, arguments) { Environment = environment }, CancellationToken.None);
+
     public void Write(string path, string text) => WriteBytes(path, Encoding.UTF8.GetBytes(text));
 
     public void WriteBytes(string path, byte[] bytes)

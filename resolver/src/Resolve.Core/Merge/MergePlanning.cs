@@ -27,19 +27,23 @@ public static class MergePlanning
             return Diff3Planner.Plan(baseIds, leftIds, rightIds, DiffAlgorithm.Histogram);
         }
 
-        var workingDirectory = Path.GetDirectoryName(Path.GetFullPath(inputs.LeftFile)) ?? Path.GetTempPath();
+        var leftFile = Path.GetFullPath(inputs.LeftFile);
+        var rightFile = Path.GetFullPath(inputs.RightFile);
+        var workingDirectory = Path.GetDirectoryName(leftFile) ?? Path.GetTempPath();
         string? emptyDirectory = null;
         try
         {
-            var basePath = inputs.BaseKind == BaseKind.Present ? inputs.BaseFile : null;
+            // git mergetool passes paths relative to the worktree root ("./dir/x_BASE_1.txt") but git below runs in the LOCAL file's
+            // directory, so every path is made absolute against our own working directory first.
+            var basePath = inputs.BaseKind == BaseKind.Present ? Path.GetFullPath(inputs.BaseFile) : null;
             if (basePath is null)
             {
                 emptyDirectory = Directory.CreateTempSubdirectory("cthulhu-resolve-").FullName;
                 basePath = Path.Join(emptyDirectory, "empty");
                 await File.WriteAllBytesAsync(basePath, [], ct).ConfigureAwait(false);
             }
-            var leftEdits = await GitLineDiff.ComputeAsync(runner, workingDirectory, basePath, inputs.LeftFile, DiffAlgorithm.Histogram, ct).ConfigureAwait(false);
-            var rightEdits = await GitLineDiff.ComputeAsync(runner, workingDirectory, basePath, inputs.RightFile, DiffAlgorithm.Histogram, ct).ConfigureAwait(false);
+            var leftEdits = await GitLineDiff.ComputeAsync(runner, workingDirectory, basePath, leftFile, DiffAlgorithm.Histogram, ct).ConfigureAwait(false);
+            var rightEdits = await GitLineDiff.ComputeAsync(runner, workingDirectory, basePath, rightFile, DiffAlgorithm.Histogram, ct).ConfigureAwait(false);
             return Diff3Planner.Plan(baseIds, leftIds, rightIds, leftEdits, rightEdits, DiffAlgorithm.Histogram);
         }
         finally

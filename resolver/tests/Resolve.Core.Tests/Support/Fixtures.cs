@@ -15,7 +15,10 @@ internal static class Fixtures
     }
 
     /// <summary>Criterion 1: a.txt of 50 lines; LEFT changes lines 3 and 20, RIGHT changes lines 20 and 40; the merge is left conflicted.</summary>
-    public static async Task<GitFixture> Criterion1ConflictAsync()
+    public static Task<GitFixture> Criterion1ConflictAsync() => Criterion1ConflictAsync("a.txt");
+
+    /// <summary>Criterion 1 at a chosen worktree-relative path (spaces, a leading dash and non-ASCII names included).</summary>
+    public static async Task<GitFixture> Criterion1ConflictAsync(string path)
     {
         var fixture = await GitFixture.CreateAsync();
         var baseLines = Enumerable.Range(1, 50).Select(number => $"line {number}").ToArray();
@@ -26,9 +29,9 @@ internal static class Fixtures
             return string.Concat(lines.Select(line => line + "\n"));
         }
         await fixture.ConflictAsync(
-            f => f.Write("a.txt", Text(_ => { })),
-            f => f.Write("a.txt", Text(lines => { lines[2] = "left 3"; lines[19] = "left 20"; })),
-            f => f.Write("a.txt", Text(lines => { lines[19] = "right 20"; lines[39] = "right 40"; })));
+            f => f.Write(path, Text(_ => { })),
+            f => f.Write(path, Text(lines => { lines[2] = "left 3"; lines[19] = "left 20"; })),
+            f => f.Write(path, Text(lines => { lines[19] = "right 20"; lines[39] = "right 40"; })));
         return fixture;
     }
 

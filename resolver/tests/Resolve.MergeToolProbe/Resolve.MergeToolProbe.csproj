@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>resolve-probe</AssemblyName>
+    <RootNamespace>Resolve.MergeToolProbe</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <!-- CA1515: an application assembly, not a library.
+         CA1812: Program is instantiated by the runtime, not by this assembly.
+         CA2007: a console with no synchronisation context; ConfigureAwait adds noise only.
+         CA1707: underscored names are allowed in test-facing code (ruling R5).
+         CA1303: console messages are not localised. -->
+    <NoWarn>$(NoWarn);CA1515;CA1812;CA2007;CA1707;CA1303</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Resolve.Core/Resolve.Core.csproj" />
+  </ItemGroup>
+</Project>

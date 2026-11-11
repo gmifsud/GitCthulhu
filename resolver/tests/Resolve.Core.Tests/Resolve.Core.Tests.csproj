@@ -15,4 +15,17 @@
     <Using Include="Xunit" />
     <ProjectReference Include="../../src/Resolve.Core/Resolve.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The probe is only run, never referenced: build it first, then copy its whole output to <test output>/probe/. -->
+    <ProjectReference Include="../Resolve.MergeToolProbe/Resolve.MergeToolProbe.csproj" ReferenceOutputAssembly="false" OutputItemType="ProbeOutput" />
+  </ItemGroup>
+  <Target Name="CopyMergeToolProbe" AfterTargets="Build">
+    <ItemGroup>
+      <_ProbeDirectory Include="@(ProbeOutput->'%(RootDir)%(Directory)')" />
+    </ItemGroup>
+    <ItemGroup>
+      <_ProbeFile Include="%(_ProbeDirectory.Identity)*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ProbeFile)" DestinationFolder="$(OutDir)probe" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

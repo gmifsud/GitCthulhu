@@ -5,6 +5,46 @@ Standalone three-way Git conflict resolver.
 - **Spec:** `../docs/superpowers/specs/2026-10-27-conflict-resolver-design.md`
 - **Decisions:** ADR 0004–0006 in `../docs/adr/`
 
+## Status: Phase 1 (merge-tool MVP)
+
+Phase 0 (foundation and spikes) is done; its table is further down.
+
+| Phase 1 item | State | Where |
+|---|---|---|
+| Command line and exit codes (`cthulhu-resolve merge …`) | ✅ | `src/Resolve.Core/Cli/CommandLine.cs` |
+| Input loading, role labels (merge, rebase, cherry-pick, revert, stash) | ✅ | `Session/MergeInputs.cs`, `Session/OperationRoles.cs` |
+| Planning from git's own diffs | ✅ | `Merge/MergePlanning.cs`, `Diff/GitLineDiff.cs` |
+| Resolution document, region commands, undo | ✅ | `Resolution/ResolutionDocument.cs`, `Resolution/RegionCommands.cs` |
+| Merge-tool session: atomic save, backups, exit codes, marker scan | ✅ | `Session/MergeToolSession.cs`, `Persistence/AtomicFileWriter.cs` |
+| Editor surface and three panes with bands and synchronised scrolling | ✅ | `src/Resolve.App/Editor/`, `src/Resolve.App/Panes/` |
+| Accessible conflict navigator (O1-A) | ✅ | `src/Resolve.App/Shell/ConflictNavigator.cs` |
+| Merge-tool window, keys, confirmations | ✅ | `src/Resolve.App/Shell/` |
+| Program entry (command line to window to exit code) | ✅ | `src/Resolve.App/Program.cs` |
+| `git mergetool` end to end (acceptance 8), no display needed | ✅ | `tests/Resolve.MergeToolProbe/`, `tests/Resolve.Core.Tests/MergeToolAcceptanceTests.cs` |
+| CI on Windows, macOS, Linux | ✅ | `../.github/workflows/resolver.yml` |
+
+**Known v1 limitation (decision O1-A):** screen-reader editing of the RESULT pane is not supported. The conflict navigator is accessible (keyboard, live announcements), but typing into RESULT with a screen reader is a v1 limitation.
+
+## Use as git's merge tool
+
+Build the app (`dotnet build src/Resolve.App -c Release`), then point git at the built `cthulhu-resolve`. On Windows the executable is `src/Resolve.App/bin/Release/net10.0/cthulhu-resolve.exe`; on Linux and macOS it is `cthulhu-resolve` in the same folder. On WSL use the Linux build, not the `.exe`, to keep path semantics consistent.
+
+```ini
+# ~/.gitconfig (Windows path shown; use forward slashes)
+[merge]
+    tool = cthulhu
+[mergetool "cthulhu"]
+    cmd = \"D:/Repos/GitCthulhu/resolver/src/Resolve.App/bin/Release/net10.0/cthulhu-resolve.exe\" merge --base \"$BASE\" --local \"$LOCAL\" --remote \"$REMOTE\" --merged \"$MERGED\"
+    trustExitCode = true
+[mergetool]
+    keepBackup = false   # the resolver keeps its own backup before the first save
+    prompt = false
+```
+
+`$BASE`, `$LOCAL`, `$REMOTE` and `$MERGED` are shell variables that git's shell expands, not environment variables, so they must appear in `cmd`. `trustExitCode = true` is required: git stages the file only when the exit code is 0 (resolved). Closing the window or choosing Cancel exits 1 and leaves the conflict in place.
+
+Then run `git mergetool` (or `git mergetool -- <path>`). GitCthulhu's Compare window launches the resolver through `git mergetool`.
+
 ## Status: Phase 0 (foundation & spikes)
 
 | Item | State | Where |
