@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <!-- CA1707: test names are sentences. CA1515: xUnit needs public test classes.
+         CA1812: classes created by the Avalonia test host. CA2007: tests run on the UI thread.
+         CA1303: literals in tests are not localised. -->
+    <NoWarn>$(NoWarn);CA1707;CA1515;CA1812;CA2007;CA1303</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Avalonia.Headless.XUnit" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <ProjectReference Include="../../src/Resolve.App/Resolve.App.csproj" />
+  </ItemGroup>
+</Project>

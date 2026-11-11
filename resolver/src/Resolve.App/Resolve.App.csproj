@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Exe, not WinExe: git reads the merge tool's exit code and stderr. -->
+    <OutputType>Exe</OutputType>
+    <AssemblyName>cthulhu-resolve</AssemblyName>
+    <RootNamespace>Resolve.App</RootNamespace>
+    <!-- CA1515: an application assembly, not a library; public types are the contract between our own projects.
+         CA1812: types instantiated by Avalonia or by tests, not by this assembly.
+         CA2007: UI code must resume on the UI thread, so ConfigureAwait(false) would be wrong.
+         CA1707: allowed by ruling R5 (underscored names in UI and test-facing members).
+         CA1303: UI strings are not localised in v1. -->
+    <NoWarn>$(NoWarn);CA1515;CA1812;CA2007;CA1707;CA1303</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.AvaloniaEdit" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Resolve.App.Tests" />
+    <ProjectReference Include="../Resolve.Core/Resolve.Core.csproj" />
+  </ItemGroup>
+</Project>

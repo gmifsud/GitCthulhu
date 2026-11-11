@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Resolve.App/Resolve.App.csproj" />
     <Project Path="src/Resolve.Core/Resolve.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Resolve.App.Tests/Resolve.App.Tests.csproj" />
     <Project Path="tests/Resolve.Core.Tests/Resolve.Core.Tests.csproj" />
   </Folder>
 </Solution>
