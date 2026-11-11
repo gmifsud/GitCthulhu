@@ -124,6 +124,20 @@ pub trait GitRepository {
     fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
     /// Keep one side of a conflicted file (`git checkout --ours|--theirs`) and stage it.
     fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError>;
+    /// The merge tool `git mergetool` would run here: `merge.tool` when set, otherwise the one
+    /// tool with a `mergetool.<name>.cmd`, otherwise `None`. Never a guess from git's list of
+    /// known tools: a guess may be a terminal tool, which would hang with no terminal.
+    fn merge_tool(&self) -> Result<Option<String>, DomainError> {
+        Ok(None)
+    }
+    /// `git mergetool --no-prompt --tool <tool> -- <path>`. Blocks until the tool closes. `Ok`
+    /// when the merge was saved, which is when git stages the file; an error when the tool
+    /// exited unresolved or failed. Cthulhu Resolve joins here once it is configured as a merge
+    /// tool (resolver spec §8.4): the window never names it.
+    fn run_merge_tool(&self, path: &str, tool: &str) -> Result<(), DomainError> {
+        let _ = (path, tool);
+        Err(DomainError::Unknown("this repository cannot run a merge tool".to_string()))
+    }
     /// Diff of one path between two versions, both in working-tree form. `left` is a revision
     /// (branch, tag, commit, or `:2` / `:3` for the yours / theirs stage of a conflict);
     /// `right` is another, or `None` for the file on disk. A side without the file reads as empty.

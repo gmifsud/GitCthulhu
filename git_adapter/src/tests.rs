@@ -1783,6 +1783,56 @@ fn taking_their_side_then_continuing_commits_the_merge() {
 }
 
 #[test]
+fn the_merge_tool_is_the_chosen_one_or_the_only_one_defined_never_a_guess() {
+    assert_eq!(pick_merge_tool("p4merge", ""), Some("p4merge".into()));
+    let one = "mergetool.p4merge.cmd\nmergetool.p4merge.cmd\n";
+    assert_eq!(pick_merge_tool("", one), Some("p4merge".into()), "defined twice (global and local) is one tool");
+    let two = "mergetool.p4merge.cmd\nmergetool.cthulhu.cmd\n";
+    assert_eq!(pick_merge_tool("", two), None, "two tools and no choice: ask the user to choose");
+    assert_eq!(pick_merge_tool("cthulhu", two), Some("cthulhu".into()));
+    assert_eq!(pick_merge_tool("", ""), None);
+    assert_eq!(pick_merge_tool("--evil", "mergetool.-x.cmd\n"), None, "never an option-like name");
+}
+
+#[test]
+fn the_repositorys_own_merge_tool_setting_is_read() {
+    let fixture = TestRepo::new();
+    fixture.commit("base", &[("a.txt", "a\n")], 0);
+    git_in(fixture.workdir(), &["config", "merge.tool", "fixture-tool"]);
+    assert_eq!(fixture.adapter().merge_tool(), Ok(Some("fixture-tool".into())));
+}
+
+#[test]
+fn a_merge_tool_that_saves_the_file_resolves_and_stages_it() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let _ = adapter.merge_branch("feature", false);
+    // A tool that keeps their side and says so through its exit code, as a real tool would.
+    git_in(fixture.workdir(), &["config", "mergetool.fixture.cmd", r#"cp "$REMOTE" "$MERGED""#]);
+    git_in(fixture.workdir(), &["config", "mergetool.fixture.trustExitCode", "true"]);
+    git_in(fixture.workdir(), &["config", "mergetool.keepBackup", "false"]);
+
+    adapter.run_merge_tool("a.txt", "fixture").expect("the tool saved the merge");
+
+    assert_eq!(fixture.read_file("a.txt").as_deref(), Some("theirs\n"));
+    assert!(adapter.status().expect("status").conflicted_files.is_empty(), "git staged the result");
+}
+
+#[test]
+fn a_merge_tool_that_exits_unresolved_leaves_the_conflict() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let _ = adapter.merge_branch("feature", false);
+    git_in(fixture.workdir(), &["config", "mergetool.quitter.cmd", "exit 1"]);
+    git_in(fixture.workdir(), &["config", "mergetool.quitter.trustExitCode", "true"]);
+    git_in(fixture.workdir(), &["config", "mergetool.keepBackup", "false"]);
+
+    assert!(adapter.run_merge_tool("a.txt", "quitter").is_err());
+    assert_eq!(adapter.status().expect("status").conflicted_files, vec!["a.txt".to_string()]);
+    assert!(adapter.run_merge_tool("a.txt", "--tool=x").is_err(), "an option-like name is refused");
+}
+
+#[test]
 fn aborting_a_merge_restores_your_side() {
     let fixture = conflicting_branches();
     let adapter = fixture.adapter();

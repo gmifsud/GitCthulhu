@@ -313,6 +313,11 @@ pub(crate) fn history_action(action: &crate::jobs::HistoryAction) -> Action {
             };
             Action::new("Resolve conflict", format!("{path}: {label}"), format!("git checkout {flag} + git add"))
         }
+        HistoryAction::MergeTool { path, tool } => Action::new(
+            "Merge tool",
+            format!("{path} in {tool}"),
+            format!("git mergetool --no-prompt --tool {tool} -- {path}"),
+        ),
     }
 }
 

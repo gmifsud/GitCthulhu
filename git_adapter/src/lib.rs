@@ -100,6 +100,27 @@ fn walk_commits(
         .collect()
 }
 
+/// The merge tool to run: `chosen` (`merge.tool`) when set, else the only tool named in
+/// `defined` (`mergetool.<name>.cmd` keys, one per line), else none. Names are as git keeps
+/// them; a name git could read as an option is refused.
+fn pick_merge_tool(chosen: &str, defined: &str) -> Option<String> {
+    let usable = |name: &str| !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace);
+    if usable(chosen) {
+        return Some(chosen.to_string());
+    }
+    let mut names: Vec<&str> = defined
+        .lines()
+        .filter_map(|key| key.trim().strip_prefix("mergetool.")?.strip_suffix(".cmd"))
+        .filter(|name| usable(name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    match names.as_slice() {
+        [only] => Some((*only).to_string()),
+        _ => None,
+    }
+}
+
 /// The [`Commit`] a walk step points at.
 fn commit_from_info(info: gix::revision::walk::Info<'_>) -> Result<Commit, DomainError> {
     let commit = info.object().map_err(unknown)?;
@@ -752,6 +773,33 @@ impl GitRepository for GitoxideAdapter {
         let paths = [path.to_string()];
         run_git_paths(&self.repo_path, &["checkout", flag], &paths)?;
         run_git_paths(&self.repo_path, &["add"], &paths)
+    }
+
+    fn merge_tool(&self) -> Result<Option<String>, DomainError> {
+        self.open_repo()?;
+        // `git config` exits 1 when a key is unset: that is an answer, not a failure.
+        let read = |args: &[&str]| -> Result<String, DomainError> {
+            let output = command::git_output(&self.repo_path, args)?;
+            match output.status.code() {
+                Some(0) | Some(1) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+                _ => Err(unknown(String::from_utf8_lossy(&output.stderr).trim())),
+            }
+        };
+        let chosen = read(&["config", "--get", "merge.tool"])?;
+        let defined = read(&["config", "--name-only", "--get-regexp", r"^mergetool\..+\.cmd$"])?;
+        Ok(pick_merge_tool(chosen.trim(), &defined))
+    }
+
+    fn run_merge_tool(&self, path: &str, tool: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        if tool.is_empty() || tool.starts_with('-') || tool.contains(char::is_whitespace) {
+            return Err(unknown(format!("not a merge tool name: {tool:?}")));
+        }
+        run_git_paths(
+            &self.repo_path,
+            &["mergetool", "--no-prompt", "--tool", tool],
+            &[path.to_string()],
+        )
     }
 
     fn compare_file(&self, path: &str, left: &str, right: Option<&str>) -> Result<Patch, DomainError> {

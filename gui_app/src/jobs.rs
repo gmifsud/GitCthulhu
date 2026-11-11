@@ -775,6 +775,8 @@ pub(crate) enum HistoryAction {
     Continue(core_domain::RepoOperation),
     /// Keep one side of a conflicted file and stage it.
     Resolve { path: String, side: core_domain::ConflictSide },
+    /// Resolve a conflicted file in the user's merge tool; git stages it when the tool saves.
+    MergeTool { path: String, tool: String },
 }
 
 pub(crate) fn history_in_background(
@@ -790,12 +792,23 @@ pub(crate) fn history_in_background(
             HistoryAction::Continue(operation) => repo.continue_operation(operation),
             HistoryAction::Resolve { path, side } => repo.resolve_conflict(&path, side),
             HistoryAction::Rebase { name } => repo.rebase_onto(&name),
+            HistoryAction::MergeTool { path, tool } => repo.run_merge_tool(&path, &tool),
         },
         || {
             Err(DomainError::Unknown(
                 "history update was interrupted".to_string(),
             ))
         },
+    )
+}
+
+/// Which merge tool `git mergetool` would run in this repository, if one is set up.
+pub(crate) fn merge_tool_in_background(
+    repo: SharedRepository,
+) -> impl Future<Output = Result<Option<String>, DomainError>> {
+    in_background(
+        move || repo.merge_tool(),
+        || Err(DomainError::Unknown("merge tool lookup was interrupted".to_string())),
     )
 }
 

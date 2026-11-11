@@ -31,6 +31,8 @@ pub struct FakeGitRepository {
     pub abort_result: Result<(), DomainError>,
     pub continue_result: Result<(), DomainError>,
     pub resolve_result: Result<(), DomainError>,
+    pub merge_tool_result: Result<Option<String>, DomainError>,
+    pub run_merge_tool_result: Result<(), DomainError>,
     pub rebase_result: Result<(), DomainError>,
     pub stage_result: Result<(), DomainError>,
     pub unstage_result: Result<(), DomainError>,
@@ -82,6 +84,8 @@ impl FakeGitRepository {
             abort_result: Ok(()),
             continue_result: Ok(()),
             resolve_result: Ok(()),
+            merge_tool_result: Ok(None),
+            run_merge_tool_result: Ok(()),
             rebase_result: Ok(()),
             stage_result: Ok(()),
             unstage_result: Ok(()),
@@ -274,6 +278,14 @@ impl GitRepository for FakeGitRepository {
 
     fn resolve_conflict(&self, _path: &str, _side: core_domain::ConflictSide) -> Result<(), DomainError> {
         self.resolve_result.clone()
+    }
+
+    fn merge_tool(&self) -> Result<Option<String>, DomainError> {
+        self.merge_tool_result.clone()
+    }
+
+    fn run_merge_tool(&self, _path: &str, _tool: &str) -> Result<(), DomainError> {
+        self.run_merge_tool_result.clone()
     }
 
     fn compare_file(&self, path: &str, _left: &str, _right: Option<&str>) -> Result<Patch, DomainError> {

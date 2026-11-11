@@ -403,6 +403,10 @@ pub(crate) enum Message {
     ComparePathPicked(String),
     /// A side picked from a list: `left` true for the left side.
     CompareSidePicked { left: bool, side: CompareSide },
+    /// What `git mergetool` would run in the tab Compare was opened from.
+    MergeToolFound { session_path: String, result: Result<Option<String>, DomainError> },
+    /// Resolve this conflicted file in the merge tool Compare found.
+    OpenMergeTool(String),
     CompareDraftChanged { left: bool, text: String },
     /// Enter in a side's revision field.
     CompareDraftSubmitted { left: bool },
@@ -2257,6 +2261,27 @@ impl GitApp {
                 }
                 self.run_compare()
             }
+            Message::MergeToolFound { session_path, result } => {
+                if let Some(compare) = &mut self.compare {
+                    if compare.session_path == session_path {
+                        compare.merge_tool = match result {
+                            Ok(Some(tool)) => crate::compare::MergeTool::Named(tool),
+                            Ok(None) => crate::compare::MergeTool::Unset,
+                            Err(error) => crate::compare::MergeTool::Failed(error_message(&error)),
+                        };
+                    }
+                }
+                Task::none()
+            }
+            Message::OpenMergeTool(path) => {
+                let Some(crate::compare::MergeTool::Named(tool)) = self.compare.as_ref().map(|compare| compare.merge_tool.clone())
+                else {
+                    return Task::none();
+                };
+                // The tool owns the file until it closes; the refresh after it shows the outcome.
+                self.close_compare();
+                self.run_history(HistoryAction::MergeTool { path, tool })
+            }
             Message::CompareSwap => {
                 if let Some(compare) = &mut self.compare {
                     compare.swap();
@@ -4059,10 +4084,16 @@ impl GitApp {
             .unwrap_or_default();
         let conflicted = crate::compare::is_conflicted(status, &path);
         let state = CompareState::open(session.path.clone(), path, conflicted, against);
+        // Which merge tool a conflicted file could open in: read off-thread, once per opening.
+        let repo = session.adapter.clone();
+        let session_path = session.path.clone();
+        let find_tool = Task::perform(crate::jobs::merge_tool_in_background(repo), move |result| {
+            Message::MergeToolFound { session_path: session_path.clone(), result }
+        });
         self.close_prompts();
         self.context_menu = None;
         self.compare = Some(state);
-        self.run_compare()
+        Task::batch([self.run_compare(), find_tool])
     }
 
     /// Close the Compare window and drop its lookups with it.
@@ -8095,6 +8126,54 @@ mod tests {
         let _ = app.update(Message::Escape);
         assert!(app.compare.is_none(), "Escape closes it");
         assert!(app.compare_lookups.is_none(), "and its lookups go with it");
+    }
+
+    fn conflicted_status() -> core_domain::RepoStatus {
+        core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec![],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: Some(core_domain::RepoOperation::Merge),
+            conflicted_files: vec!["clash.rs".into()],
+        }
+    }
+
+    #[test]
+    fn a_conflicted_file_opens_in_the_merge_tool_git_would_run() {
+        use crate::compare::MergeTool;
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(conflicted_status());
+        let _ = app.update(Message::OpenCompare { path: Some("clash.rs".into()), against: None });
+        assert_eq!(app.compare.as_ref().expect("open").merge_tool, MergeTool::Looking);
+
+        // An answer for another tab is not this window's.
+        let _ = app.update(Message::MergeToolFound { session_path: "elsewhere".into(), result: Ok(Some("x".into())) });
+        assert_eq!(app.compare.as_ref().expect("open").merge_tool, MergeTool::Looking);
+
+        let session_path = app.session().path.clone();
+        let _ = app.update(Message::MergeToolFound { session_path, result: Ok(Some("p4merge".into())) });
+        assert_eq!(app.compare.as_ref().expect("open").merge_tool, MergeTool::Named("p4merge".into()));
+
+        let _ = app.update(Message::OpenMergeTool("clash.rs".into()));
+        assert!(app.compare.is_none(), "the tool owns the file now");
+        assert!(app.session().state.loading, "busy until the tool closes");
+        let running = app.activity.running().expect("logged");
+        assert_eq!(running.record.command, "git mergetool --no-prompt --tool p4merge -- clash.rs");
+    }
+
+    #[test]
+    fn without_a_merge_tool_nothing_is_launched() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(conflicted_status());
+        let _ = app.update(Message::OpenCompare { path: Some("clash.rs".into()), against: None });
+        let session_path = app.session().path.clone();
+        let _ = app.update(Message::MergeToolFound { session_path, result: Ok(None) });
+        let _ = app.update(Message::OpenMergeTool("clash.rs".into()));
+        assert!(app.compare.is_some(), "the window stays: there was nothing to open");
+        assert!(!app.session().state.loading);
     }
 
     #[test]

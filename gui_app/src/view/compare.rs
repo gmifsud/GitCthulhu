@@ -3,12 +3,12 @@
 //! revision, with any other revision.
 
 use crate::app::{GitApp, Message};
-use crate::compare::{self, CompareSide, CompareState};
+use crate::compare::{self, CompareSide, CompareState, MergeTool};
 use crate::icons::Icon;
 use crate::theme::DesignTokens;
 use core_domain::ConflictSide;
 use iced::overlay::menu;
-use iced::widget::{button, column, combo_box, container, horizontal_space, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, combo_box, container, horizontal_space, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
 use super::chrome::{accent_button, command_button, field_style, glyph, labelled_button, Reading};
@@ -108,7 +108,7 @@ pub(super) fn compare_window<'a>(
 
     let mut card = column![head, file_row, sides].spacing(12);
     if conflicted {
-        card = card.push(conflict_actions(&state.path, tokens, reading));
+        card = card.push(conflict_actions(&state.path, &state.merge_tool, tokens, reading));
     }
     card = card.push(column_titles(state, tokens, reading));
     card = card.push(body(app, state, tokens, reading));
@@ -228,18 +228,51 @@ fn lookup_menu_style(tokens: DesignTokens) -> impl Fn(&Theme) -> menu::Style {
     }
 }
 
-/// Take a side, or say the file was fixed by hand. Each closes the window.
-fn conflict_actions<'a>(path: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+/// Take a side, resolve it in the merge tool, or say the file was fixed by hand. Each closes
+/// the window.
+fn conflict_actions<'a>(
+    path: &str,
+    merge_tool: &MergeTool,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
     let take = |side| Message::ResolveConflict { path: path.to_string(), side };
+    let open_tool = match merge_tool {
+        MergeTool::Named(tool) => {
+            labelled_button(Icon::Merge, format!("Open in {tool}"), Message::OpenMergeTool(path.to_string()), true, false, tokens, reading)
+        }
+        // Disabled, saying why: there is no tool to open, and git's own guess could hang.
+        other => {
+            let reason = match other {
+                MergeTool::Looking => "Looking for a merge tool…".to_string(),
+                MergeTool::Failed(error) => format!("Could not read the merge tool: {error}"),
+                _ => "No merge tool set up. Set merge.tool in git config, for example: git config --global merge.tool p4merge".to_string(),
+            };
+            tooltip(
+                labelled_button(Icon::Merge, "Open in merge tool".into(), Message::OpenMergeTool(path.to_string()), false, false, tokens, reading),
+                container(text(reason).font(reading.font).size((reading.size - 1.0).max(10.0)))
+                    .padding([4, 8])
+                    .style(move |_theme: &Theme| container::Style {
+                        background: Some(Background::Color(tokens.bg_app)),
+                        text_color: Some(tokens.text_primary),
+                        border: Border { color: tokens.border, width: 1.0, radius: 4.0.into() },
+                        ..container::Style::default()
+                    }),
+                tooltip::Position::Bottom,
+            )
+            .into()
+        }
+    };
     container(
         row![
-            text("This file has conflicts. Keep one side, or edit the file and mark it resolved.")
+            text("This file has conflicts. Keep one side, resolve it in your merge tool, or edit the file and mark it resolved.")
                 .font(reading.font)
                 .size(reading.size)
                 .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
             horizontal_space(),
             labelled_button(Icon::ArrowSmallUp, "Accept yours".into(), take(ConflictSide::Yours), true, false, tokens, reading),
             labelled_button(Icon::ArrowSmallDown, "Accept theirs".into(), take(ConflictSide::Theirs), true, false, tokens, reading),
+            open_tool,
             accent_button("Mark resolved", Message::MarkResolved(path.to_string()), true, tokens, reading),
         ]
         .spacing(8)

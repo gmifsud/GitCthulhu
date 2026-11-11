@@ -34,6 +34,19 @@ impl std::fmt::Display for CompareSide {
     }
 }
 
+/// The merge tool a conflicted file can be opened in, as far as Compare knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MergeTool {
+    /// Still asking git.
+    Looking,
+    /// `git mergetool` would run this one.
+    Named(String),
+    /// None set up: `merge.tool` is unset and no single tool is defined.
+    Unset,
+    /// Git could not be asked.
+    Failed(String),
+}
+
 /// The open Compare window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompareState {
@@ -48,6 +61,8 @@ pub(crate) struct CompareState {
     pub generation: u64,
     pub loading: bool,
     pub result: Option<Result<Patch, String>>,
+    /// The tool "Open in …" launches for a conflicted file.
+    pub merge_tool: MergeTool,
 }
 
 impl CompareState {
@@ -71,6 +86,7 @@ impl CompareState {
             generation: 0,
             loading: false,
             result: None,
+            merge_tool: MergeTool::Looking,
         }
     }
 
