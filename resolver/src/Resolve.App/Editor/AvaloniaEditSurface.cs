@@ -70,6 +70,15 @@ public sealed class AvaloniaEditSurface : IEditorSurface
     /// <summary>Gives keyboard focus to the text area (the TextEditor itself is not focusable).</summary>
     public bool Focus() => _editor.TextArea.Focus();
 
+    public int CaretLine => _editor.TextArea.Caret.Line - 1;
+
+    public void MoveCaretToLine(int line)
+    {
+        var document = _editor.Document;
+        var number = Math.Clamp(line + 1, 1, document.LineCount);
+        _editor.CaretOffset = document.GetLineByNumber(number).Offset;
+    }
+
     private double LineHeight => _editor.TextArea.TextView.DefaultLineHeight;
 
     public double LineToY(int line) => line * LineHeight;

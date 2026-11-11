@@ -1,8 +1,10 @@
+using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
+using Avalonia.VisualTree;
 using Resolve.App.Shell;
 using Resolve.App.Tests.Support;
 using Resolve.Core.Resolution;
@@ -32,7 +34,56 @@ public class ConflictNavigatorTests
     {
         var nav = new ConflictNavigator(Sessions.Criterion1());
         nav.Announce("Conflict 1 resolved");
+        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
         Assert.Equal("Conflict 1 resolved", nav.Status.Text);
+    }
+
+    [AvaloniaFact]
+    public void Announcing_the_same_text_again_clears_the_line_first_so_it_is_re_read()
+    {
+        var nav = new ConflictNavigator(Sessions.Criterion1());
+        var seen = new List<string?>();
+        nav.Status.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == TextBlock.TextProperty)
+            {
+                seen.Add(nav.Status.Text);
+            }
+        };
+        nav.Announce("Undone");
+        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+        seen.Clear();
+
+        nav.Announce("Undone");
+        Assert.True(string.IsNullOrEmpty(nav.Status.Text), "the line must be cleared synchronously");
+        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+
+        Assert.Equal("Undone", nav.Status.Text);
+        Assert.Equal(2, seen.Count);
+        Assert.True(string.IsNullOrEmpty(seen[0]));
+        Assert.Equal("Undone", seen[1]);
+    }
+
+    [AvaloniaFact]
+    public void Only_the_left_mouse_button_chooses_a_region()
+    {
+        var session = Sessions.Criterion1();
+        var nav = new ConflictNavigator(session);
+        var window = new Window { Width = 600, Height = 400, Content = nav };
+        window.Show();
+        window.UpdateLayout();
+        var chosen = new List<int>();
+        nav.RegionChosen += chosen.Add;
+        var item = nav.Items()[1];
+        var point = item.TranslatePoint(new Avalonia.Point(5, 5), window)!.Value;
+
+        window.MouseDown(point, MouseButton.Right);
+        window.MouseUp(point, MouseButton.Right);
+        Assert.Empty(chosen);
+
+        window.MouseDown(point, MouseButton.Left);
+        window.MouseUp(point, MouseButton.Left);
+        Assert.Single(chosen);
     }
 
     [AvaloniaFact]

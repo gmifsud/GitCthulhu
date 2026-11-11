@@ -3,6 +3,7 @@ using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Resolve.Core.Merge;
 using Resolve.Core.Resolution;
@@ -20,6 +21,8 @@ public sealed class ConflictNavigator : UserControl
     private readonly MergeToolSession _session;
     private readonly ListBox _list = new();
     private readonly List<int> _regionIds = [];
+    private readonly Dictionary<int, string> _names = [];
+    private readonly Dictionary<int, string> _summaries = [];
 
     public ConflictNavigator(MergeToolSession session)
     {
@@ -61,8 +64,22 @@ public sealed class ConflictNavigator : UserControl
         _list.ScrollIntoView(index);
     }
 
-    /// <summary>Sets the live status line, which assistive technology announces politely.</summary>
-    public void Announce(string text) => Status.Text = text;
+    /// <summary>
+    /// Sets the live status line, which assistive technology announces politely. The line is cleared first and set on
+    /// the next dispatcher turn, so repeating the same message still changes the text and is read again.
+    /// </summary>
+    public void Announce(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        Status.Text = string.Empty;
+        Dispatcher.UIThread.Post(() => Status.Text = text);
+    }
+
+    /// <summary>The accessible name of the region's item, or null when it is not listed.</summary>
+    internal string? NameOf(int regionId) => _names.GetValueOrDefault(regionId);
+
+    /// <summary>A short "Conflict 1 of 1: taken from Current branch" for announcing the outcome of a command.</summary>
+    internal string? SummaryOf(int regionId) => _summaries.GetValueOrDefault(regionId);
 
     /// <summary>Rebuilds every item name from the current document, keeping the current region.</summary>
     public void Refresh()
@@ -75,6 +92,8 @@ public sealed class ConflictNavigator : UserControl
 
         var items = new List<ListBoxItem>(regions.Count);
         _regionIds.Clear();
+        _names.Clear();
+        _summaries.Clear();
         AddItems(conflicts, "Conflict", labels, items);
         AddItems(changes, "Change", labels, items);
 
@@ -89,11 +108,22 @@ public sealed class ConflictNavigator : UserControl
         for (var position = 0; position < regions.Count; position++)
         {
             var region = regions[position];
-            var name = string.Create(CultureInfo.InvariantCulture, $"{noun} {position + 1} of {regions.Count}, {Lines(region)}, {State(region, labels)}");
+            var heading = string.Create(CultureInfo.InvariantCulture, $"{noun} {position + 1} of {regions.Count}");
+            var state = State(region, labels);
+            var name = $"{heading}, {Lines(region)}, {state}";
             var item = new ListBoxItem { Content = new TextBlock { Text = name }, Focusable = true };
             AutomationProperties.SetName(item, name);
             var regionId = region.RegionId;
-            item.PointerPressed += (_, _) => Choose(regionId);
+            _names[regionId] = name;
+            _summaries[regionId] = $"{heading}: {state}";
+            // ListBoxItem marks the press handled when it selects itself, so listen to handled events too.
+            item.AddHandler(PointerPressedEvent, (_, e) =>
+            {
+                if (e.GetCurrentPoint(item).Properties.IsLeftButtonPressed)
+                {
+                    Choose(regionId);
+                }
+            }, RoutingStrategies.Bubble, handledEventsToo: true);
             items.Add(item);
             _regionIds.Add(regionId);
         }

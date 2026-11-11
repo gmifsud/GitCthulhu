@@ -27,6 +27,12 @@ public interface IEditorSurface
 
     void ScrollTo(double y);
 
+    /// <summary>The caret's zero-based line.</summary>
+    int CaretLine { get; }
+
+    /// <summary>Puts the caret at the start of the zero-based line (clamped to the text).</summary>
+    void MoveCaretToLine(int line);
+
     /// <summary>Applies changes to the text without raising <see cref="Edited"/>.</summary>
     void ApplyChanges(IReadOnlyList<TextChange> changes);
 
