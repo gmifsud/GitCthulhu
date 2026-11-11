@@ -149,7 +149,16 @@ public sealed partial class MergeToolSession
         }
         var version = Document.Version;
         var encoding = _resultEncoding;
-        var bytes = TextCodec.Encode(encoding, TextCodec.SplitLines(Document.Text));
+        byte[] bytes;
+        try
+        {
+            bytes = TextCodec.Encode(encoding, TextCodec.SplitLines(Document.Text));
+        }
+        catch (EncoderFallbackException error)
+        {
+            // Ruling R32: text the encoding cannot represent (a lone surrogate) is a failed write, never a crash.
+            return new SaveResult.Failed($"the result cannot be encoded: {error.Message}");
+        }
         var backupDirectory = _backedUp ? null : BackupDirectory();
         try
         {

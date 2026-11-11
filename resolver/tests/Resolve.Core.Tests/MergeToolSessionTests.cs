@@ -149,6 +149,25 @@ public sealed class MergeToolSessionTests
     }
 
     [Fact]
+    public async Task Text_the_encoding_cannot_represent_is_a_failed_write_that_leaves_merged_alone()   // ruling R32
+    {
+        using var fx = await Fixtures.Criterion1ConflictAsync();
+        var args = await MergeToolCall.WriteStageFilesAsync(fx, "a.txt");
+        var s = Opened(await MergeToolSession.OpenAsync(fx.Git, args, Fixtures.Options(), default));
+        var conflict = s.Document.Regions.Single(view => view.Kind == RegionKind.Conflict);
+        s.Document.Apply(new RegionCommand.Accept(conflict.RegionId, ResolutionChoice.Left));
+        s.Document.Edit(new TextChange(0, 0, "\uD800"));   // a lone surrogate
+        var before = File.ReadAllBytes(args.Merged);
+
+        Assert.IsType<SaveResult.Failed>(s.Save());
+        Assert.Equal(ExitCode.WriteFailed, s.SaveAndExit());
+        Assert.Equal(ExitCode.WriteFailed, s.ExitUnresolved());
+
+        Assert.Equal(before, File.ReadAllBytes(args.Merged));
+        Assert.False(s.IsSaved);
+    }
+
+    [Fact]
     public async Task Choosing_left_everywhere_saves_lefts_exact_bytes()   // P5
     {
         var baseLines = Enumerable.Range(1, 12).Select(number => new Line($"line {number}", LineEnding.CrLf)).ToArray();
