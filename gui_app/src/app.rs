@@ -23,7 +23,7 @@ use crate::jobs::{
     stop_shell, suggest_commit_in_background, worktrees_in_background, BranchAction,
     HistoryAction, SharedRepository, ShellEvent, StashAction, WorktreeEdit,
 };
-use crate::compare::{CompareSide, CompareState};
+use crate::compare::{CompareLookups, CompareSide, CompareState, LookupSource};
 use crate::terminal::{ConsoleChange, LineKind};
 use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
@@ -191,6 +191,8 @@ pub(crate) struct GitApp {
     pub(crate) repository_filter: String,
     /// The Compare window, when open.
     pub(crate) compare: Option<CompareState>,
+    /// The open Compare window's type-to-filter lists. See [`CompareLookups`].
+    pub(crate) compare_lookups: Option<CompareLookups>,
     compare_generation: u64,
     /// The interactive shell: a pseudoconsole running pwsh, alive while the window is, folded
     /// panel or not. `None` until the terminal is first shown, or after the shell exited.
@@ -828,6 +830,7 @@ impl GitApp {
             repositories_flyout: false,
             repository_filter: String::new(),
             compare: None,
+            compare_lookups: None,
             compare_generation: 0,
             pty: None,
             pty_error: None,
@@ -1311,6 +1314,8 @@ impl GitApp {
                 if let Some(message) = saw_error {
                     self.error.get_or_insert(message);
                 }
+                // New branches, tags or changed files: an open Compare lists them.
+                self.refresh_compare_lookups();
                 // Older history streams in behind the first page, without waiting to be asked.
                 let stream = self.stream_history(&path, false);
                 let patch = if self.session().id == path.id { self.start_patch() } else { Task::none() };
@@ -2268,7 +2273,7 @@ impl GitApp {
                 Task::none()
             }
             Message::CloseCompare => {
-                self.compare = None;
+                self.close_compare();
                 Task::none()
             }
             Message::ActivityLoaded(repository, records) => {
@@ -2525,11 +2530,11 @@ impl GitApp {
                 None => Task::none(),
             },
             Message::ResolveConflict { path, side } => {
-                self.compare = None;
+                self.close_compare();
                 self.run_history(HistoryAction::Resolve { path, side })
             }
             Message::MarkResolved(path) => {
-                self.compare = None;
+                self.close_compare();
                 self.update(Message::EditWorktree(WorktreeEdit::Stage(vec![path])))
             }
             Message::StashApply(index) => self.run_stash(StashAction::Apply(index)),
@@ -4060,8 +4065,37 @@ impl GitApp {
         self.run_compare()
     }
 
+    /// Close the Compare window and drop its lookups with it.
+    fn close_compare(&mut self) {
+        self.compare = None;
+        self.compare_lookups = None;
+    }
+
+    /// Rebuild the Compare lookups when what they list has changed: the tab's refs or status,
+    /// or whether the file is conflicted. Otherwise they are kept, with what was typed in them.
+    fn refresh_compare_lookups(&mut self) {
+        let Some(compare) = &self.compare else {
+            self.compare_lookups = None;
+            return;
+        };
+        let Some(session) = self.sessions.iter().find(|session| session.path == compare.session_path) else {
+            return;
+        };
+        let status = session.state.current_status.as_ref();
+        let source = LookupSource {
+            session_path: session.path.clone(),
+            generation: session.history_generation,
+            conflicted: crate::compare::is_conflicted(status, &compare.path),
+        };
+        if self.compare_lookups.as_ref().is_some_and(|lookups| lookups.is_for(&source)) {
+            return;
+        }
+        self.compare_lookups = Some(CompareLookups::build(source, &session.state.branches, &session.state.tags, status));
+    }
+
     /// Ask git for the open compare. A newer request makes an older answer stale.
     fn run_compare(&mut self) -> Task<Message> {
+        self.refresh_compare_lookups();
         let Some(compare) = &self.compare else {
             return Task::none();
         };
@@ -4732,7 +4766,8 @@ impl GitApp {
         if self.palette.take().is_some() {
             return Task::none();
         }
-        if self.compare.take().is_some() {
+        if self.compare.is_some() {
+            self.close_compare();
             return Task::none();
         }
         if self.repositories_flyout {
@@ -8059,6 +8094,44 @@ mod tests {
 
         let _ = app.update(Message::Escape);
         assert!(app.compare.is_none(), "Escape closes it");
+        assert!(app.compare_lookups.is_none(), "and its lookups go with it");
+    }
+
+    #[test]
+    fn compare_lookups_list_the_tabs_branches_and_follow_a_conflict() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        let branch = |name: &str| core_domain::Branch {
+            name: name.into(),
+            is_remote: false,
+            is_head: false,
+            tip: String::new(),
+            ahead: 0,
+            behind: 0,
+        };
+        app.session_mut().state.branches = vec![branch("main"), branch("feature/tenant-db-isolation")];
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["plain.rs".into()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec!["clash.rs".into()],
+        });
+        let _ = app.update(Message::OpenCompare { path: Some("plain.rs".into()), against: None });
+        let names = |app: &GitApp| -> Vec<String> {
+            app.compare_lookups.as_ref().expect("built").left.options().iter().map(ToString::to_string).collect()
+        };
+        assert_eq!(names(&app), ["Working tree", "HEAD", "main", "feature/tenant-db-isolation"]);
+        assert_eq!(app.compare_lookups.as_ref().expect("built").files.options(), ["clash.rs".to_string(), "plain.rs".to_string()]);
+
+        // The conflicted file adds the stages to both sides.
+        let _ = app.update(Message::ComparePathPicked("clash.rs".into()));
+        assert!(names(&app).contains(&"Theirs (incoming)".to_string()));
+
+        let _ = app.update(Message::CloseCompare);
+        assert!(app.compare_lookups.is_none());
     }
 
     #[test]

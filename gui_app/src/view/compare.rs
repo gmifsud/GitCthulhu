@@ -7,7 +7,8 @@ use crate::compare::{self, CompareSide, CompareState};
 use crate::icons::Icon;
 use crate::theme::DesignTokens;
 use core_domain::ConflictSide;
-use iced::widget::{button, column, container, horizontal_space, pick_list, row, scrollable, text, text_input};
+use iced::overlay::menu;
+use iced::widget::{button, column, combo_box, container, horizontal_space, row, scrollable, text, text_input, Space};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
 use super::chrome::{accent_button, command_button, field_style, glyph, labelled_button, Reading};
@@ -25,10 +26,7 @@ pub(super) fn compare_window<'a>(
     let session = app.sessions.iter().find(|session| session.path == state.session_path);
     let status = session.and_then(|session| session.state.current_status.as_ref());
     let conflicted = compare::is_conflicted(status, &state.path);
-    let choices = session
-        .map(|session| compare::side_choices(&session.state.branches, &session.state.tags, conflicted))
-        .unwrap_or_default();
-    let changed = compare::changed_paths(status);
+    let lookups = app.compare_lookups.as_ref();
 
     let mut title = row![
         glyph(Icon::Compare, reading.size + 2.0, tokens.accent_primary, &reading),
@@ -70,16 +68,23 @@ pub(super) fn compare_window<'a>(
             .on_submit(Message::ComparePathSubmitted)
             .style(field_style(tokens))
             .width(Length::Fill),
-        pick_list(changed, None::<String>, Message::ComparePathPicked)
-            .placeholder("Changed files")
-            .text_size(reading.size)
-            .width(Length::Fixed(220.0)),
+        match lookups {
+            Some(lookups) => combo_box(&lookups.files, "Find a changed file", None, Message::ComparePathPicked)
+                .font(reading.mono)
+                .size(reading.size)
+                .padding([4, 8])
+                .input_style(field_style(tokens))
+                .menu_style(lookup_menu_style(tokens))
+                .width(Length::Fixed(280.0))
+                .into(),
+            None => Element::from(Space::with_width(Length::Fixed(280.0))),
+        },
     ]
     .spacing(8)
     .align_y(Alignment::Center);
 
     let sides = row![
-        side_picker(true, &state.left, &state.left_draft, &choices, tokens, reading),
+        side_picker(true, &state.left, &state.left_draft, lookups.map(|lookups| &lookups.left), tokens, reading),
         button(glyph(Icon::SwitchBranch, reading.size + 1.0, tokens.text_secondary, &reading))
             .padding([4, 8])
             .on_press(Message::CompareSwap)
@@ -96,7 +101,7 @@ pub(super) fn compare_window<'a>(
                     shadow: Shadow::default(),
                 }
             }),
-        side_picker(false, &state.right, &state.right_draft, &choices, tokens, reading),
+        side_picker(false, &state.right, &state.right_draft, lookups.map(|lookups| &lookups.right), tokens, reading),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -163,19 +168,30 @@ fn pill<'a>(value: &'a str, tokens: DesignTokens, reading: Reading) -> Element<'
     .into()
 }
 
-/// One side: a list of the working tree, HEAD, stages, branches and tags, and a field for
-/// any other commit or ref (applied with Enter).
+/// One side: a lookup of the working tree, HEAD, stages, branches and tags (type any words of
+/// a name, in any order, then pick with the arrows and Enter or the mouse), and a field for any
+/// other commit or ref (applied with Enter).
 fn side_picker<'a>(
     left: bool,
     current: &CompareSide,
     draft: &str,
-    choices: &[CompareSide],
+    lookup: Option<&'a combo_box::State<CompareSide>>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let picker = pick_list(choices.to_vec(), Some(current.clone()), move |side| Message::CompareSidePicked { left, side })
-        .text_size(reading.size)
-        .width(Length::Fill);
+    let picker: Element<'a, Message> = match lookup {
+        Some(lookup) => combo_box(lookup, "Find a branch, tag or HEAD", Some(current), move |side| {
+            Message::CompareSidePicked { left, side }
+        })
+        .font(reading.font)
+        .size(reading.size)
+        .padding([4, 8])
+        .input_style(field_style(tokens))
+        .menu_style(lookup_menu_style(tokens))
+        .width(Length::Fill)
+        .into(),
+        None => Space::with_width(Length::Fill).into(),
+    };
     let typed = text_input("or type a commit, branch or tag ↵", draft)
         .font(reading.mono)
         .size(reading.size)
@@ -195,6 +211,21 @@ fn side_picker<'a>(
     .spacing(4)
     .width(Length::FillPortion(1))
     .into()
+}
+
+/// The open list under a lookup, in the window's colours rather than iced's grey.
+fn lookup_menu_style(tokens: DesignTokens) -> impl Fn(&Theme) -> menu::Style {
+    move |_theme| menu::Style {
+        background: Background::Color(tokens.bg_app),
+        border: Border {
+            color: tokens.chip_border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        text_color: tokens.text_secondary,
+        selected_text_color: tokens.text_primary,
+        selected_background: Background::Color(tokens.bg_raised),
+    }
 }
 
 /// Take a side, or say the file was fixed by hand. Each closes the window.

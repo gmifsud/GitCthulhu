@@ -80,6 +80,50 @@ impl CompareState {
     }
 }
 
+/// The Compare window's lookups: a side or a changed file found by typing part of its name.
+/// With a thousand branches a plain drop-down was unusable.
+///
+/// Each list keeps what was typed into it between frames, so it lives here, built once for
+/// what it lists and rebuilt only when that changes (see [`LookupSource`]). Typing filters
+/// inside the widget and sends no message; only picking does.
+pub(crate) struct CompareLookups {
+    pub(crate) left: iced::widget::combo_box::State<CompareSide>,
+    pub(crate) right: iced::widget::combo_box::State<CompareSide>,
+    pub(crate) files: iced::widget::combo_box::State<String>,
+    source: LookupSource,
+}
+
+/// What the lookups list depends on: the tab's refs and status (by its generation), and
+/// whether the file is conflicted (which adds the yours, theirs and base stages).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LookupSource {
+    pub(crate) session_path: String,
+    pub(crate) generation: u64,
+    pub(crate) conflicted: bool,
+}
+
+impl CompareLookups {
+    pub(crate) fn build(
+        source: LookupSource,
+        branches: &[Branch],
+        tags: &[Tag],
+        status: Option<&RepoStatus>,
+    ) -> Self {
+        let sides = side_choices(branches, tags, source.conflicted);
+        Self {
+            left: iced::widget::combo_box::State::new(sides.clone()),
+            right: iced::widget::combo_box::State::new(sides),
+            files: iced::widget::combo_box::State::new(changed_paths(status)),
+            source,
+        }
+    }
+
+    /// True when the lists were built from `source` and need no rebuilding.
+    pub(crate) fn is_for(&self, source: &LookupSource) -> bool {
+        &self.source == source
+    }
+}
+
 /// What to ask git for: `(left, right, reversed)`. Git always needs a revision on the left,
 /// so working tree on the left asks the other way round and the patch is reversed afterwards.
 /// `None` when both sides are the working tree.
@@ -272,6 +316,39 @@ mod tests {
         );
         let conflicted = side_choices(&branches, &tags, true);
         assert!(conflicted.contains(&CompareSide::Revision(STAGE_THEIRS.into())));
+    }
+
+    #[test]
+    fn the_lookups_list_every_side_and_changed_file_and_know_their_source() {
+        let branches: Vec<Branch> = (0..1_100)
+            .map(|index| Branch {
+                name: format!("feature/area-{index}"),
+                is_remote: index >= 300,
+                is_head: index == 0,
+                tip: String::new(),
+                ahead: 0,
+                behind: 0,
+            })
+            .collect();
+        let source = LookupSource { session_path: "/r".into(), generation: 3, conflicted: false };
+        let status = RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["a.rs".into()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        };
+        let lookups = CompareLookups::build(source.clone(), &branches, &[], Some(&status));
+        // Working tree and HEAD, then every branch.
+        assert_eq!(lookups.left.options().len(), 1_102);
+        assert_eq!(lookups.right.options(), lookups.left.options());
+        assert_eq!(lookups.files.options(), ["a.rs".to_string()]);
+        assert!(lookups.is_for(&source));
+        assert!(!lookups.is_for(&LookupSource { generation: 4, ..source.clone() }), "refs changed");
+        assert!(!lookups.is_for(&LookupSource { conflicted: true, ..source }), "stages appear");
     }
 
     #[test]
