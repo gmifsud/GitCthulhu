@@ -11,13 +11,37 @@ using Resolve.Core.Text;
 namespace Resolve.Core.Session;
 
 /// <summary>Where backups go and which clock the document uses.</summary>
-public sealed record SessionOptions(string BackupRoot, TimeProvider Clock)
+public sealed record SessionOptions
 {
-    private const string BackupFolder = "CthulhuResolve/backups";
+    private const string AppFolder = "CthulhuResolve";
+    private const string BackupFolder = "backups";
 
-    public static SessionOptions Default => new(
-        Path.Join(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), BackupFolder),
-        TimeProvider.System);
+    /// <summary>Backups must never land in the worktree, which is the tool's working directory: the root is always absolute.</summary>
+    public SessionOptions(string backupRoot, TimeProvider clock)
+    {
+        ArgumentNullException.ThrowIfNull(backupRoot);
+        ArgumentNullException.ThrowIfNull(clock);
+        if (!Path.IsPathFullyQualified(backupRoot))
+        {
+            throw new ArgumentException("The backup root must be a fully qualified path.", nameof(backupRoot));
+        }
+        BackupRoot = backupRoot;
+        Clock = clock;
+    }
+
+    public string BackupRoot { get; }
+
+    public TimeProvider Clock { get; }
+
+    public static SessionOptions Default
+    {
+        get
+        {
+            var data = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.Create);
+            var root = string.IsNullOrEmpty(data) || !Path.IsPathFullyQualified(data) ? Path.GetTempPath() : data;
+            return new SessionOptions(Path.Join(root, AppFolder, BackupFolder), TimeProvider.System);
+        }
+    }
 }
 
 public abstract record OpenOutcome
@@ -111,7 +135,7 @@ public sealed partial class MergeToolSession
             var document = ResolutionDocument.Create(plan, inputs.Base.Lines, inputs.Left.Lines, inputs.Right.Lines, options.Clock);
             return new OpenOutcome.Opened(new MergeToolSession(inputs, plan, document, options));
         }
-        catch (Exception error) when (error is GitCommandException or IOException or UnauthorizedAccessException)
+        catch (Exception error) when (error is GitCommandException or FormatException or IOException or UnauthorizedAccessException)
         {
             return new OpenOutcome.Failed(ExitCode.InputUnreadable, error.Message);
         }
@@ -119,6 +143,10 @@ public sealed partial class MergeToolSession
 
     public SaveResult Save(bool overwriteExternalChange = false)
     {
+        if (IsCancelled)
+        {
+            return new SaveResult.Failed("the session was cancelled");
+        }
         var version = Document.Version;
         var encoding = _resultEncoding;
         var bytes = TextCodec.Encode(encoding, TextCodec.SplitLines(Document.Text));
@@ -133,7 +161,8 @@ public sealed partial class MergeToolSession
                     return new SaveResult.ExternalChange();
                 }
                 // The user confirmed overwriting what is there now: expect exactly that, so a further change still blocks.
-                outcome = _writer.Save(Inputs.MergedPath, bytes, modified.Actual, backupDirectory);
+                // The bytes being replaced are someone else's work: always keep them, even after the first-save backup.
+                outcome = _writer.Save(Inputs.MergedPath, bytes, modified.Actual, BackupDirectory());
             }
             switch (outcome)
             {
@@ -159,12 +188,13 @@ public sealed partial class MergeToolSession
 
     /// <summary>Writes only a complete document; otherwise returns <see cref="ExitCode.Unresolved"/> without touching MERGED.</summary>
     public ExitCode SaveAndExit(bool overwriteExternalChange = false) =>
-        Document.IsComplete ? Finish(overwriteExternalChange, ExitCode.Resolved) : ExitCode.Unresolved;
+        Document.IsComplete && !IsCancelled ? Finish(overwriteExternalChange, ExitCode.Resolved) : ExitCode.Unresolved;
 
     /// <summary>Saves what RESULT shows, conflicts and all, and tells git the file is not resolved.</summary>
-    public ExitCode ExitUnresolved(bool overwriteExternalChange = false) => Finish(overwriteExternalChange, ExitCode.Unresolved);
+    public ExitCode ExitUnresolved(bool overwriteExternalChange = false) =>
+        IsCancelled ? ExitCode.Unresolved : Finish(overwriteExternalChange, ExitCode.Unresolved);
 
-    /// <summary>True once <see cref="Cancel"/> has been called.</summary>
+    /// <summary>True once <see cref="Cancel"/> has been called; cancelling is final and no later call writes.</summary>
     public bool IsCancelled { get; private set; }
 
     /// <summary>Never touches the disk.</summary>

@@ -2,6 +2,7 @@ using System.Text;
 using CsCheck;
 using Resolve.Core.Cli;
 using Resolve.Core.Diff;
+using Resolve.Core.Git;
 using Resolve.Core.Merge;
 using Resolve.Core.Persistence;
 using Resolve.Core.Resolution;
@@ -290,5 +291,76 @@ public sealed class MergeToolSessionTests
         var missing = args with { Local = Path.Join(Path.GetDirectoryName(args.Local)!, "missing") };
         var failed = Assert.IsType<OpenOutcome.Failed>(await MergeToolSession.OpenAsync(fx.Git, missing, Fixtures.Options(), default));
         Assert.Equal(ExitCode.InputUnreadable, failed.Code);
+    }
+
+    [Fact]
+    public void The_default_backup_root_is_fully_qualified()
+    {
+        Assert.True(Path.IsPathFullyQualified(SessionOptions.Default.BackupRoot));
+    }
+
+    [Fact]
+    public void A_relative_backup_root_is_rejected()
+    {
+        Assert.Throws<ArgumentException>(() => new SessionOptions(Path.Join("CthulhuResolve", "backups"), TimeProvider.System));
+    }
+
+    [Fact]
+    public async Task A_confirmed_overwrite_backs_up_the_external_bytes_even_after_the_first_backup()
+    {
+        using var fx = await Fixtures.Criterion1ConflictAsync();
+        var args = await MergeToolCall.WriteStageFilesAsync(fx, "a.txt");
+        var options = Fixtures.Options();
+        var s = Opened(await MergeToolSession.OpenAsync(fx.Git, args, options, default));
+        AcceptEverywhere(s.Document, ResolutionChoice.Left);
+        Assert.IsType<SaveResult.Saved>(s.Save());
+        Assert.Single(Directory.GetFiles(options.BackupRoot, "*", SearchOption.AllDirectories));
+
+        File.WriteAllText(args.Merged, "external work\n");
+        s.Document.Edit(new TextChange(0, 0, "more\n"));
+        Assert.IsType<SaveResult.Saved>(s.Save(overwriteExternalChange: true));
+
+        var backups = Directory.GetFiles(options.BackupRoot, "*", SearchOption.AllDirectories);
+        Assert.Equal(2, backups.Length);
+        Assert.Contains(backups, backup => File.ReadAllText(backup) == "external work\n");
+    }
+
+    [Fact]
+    public async Task Cancel_is_final()
+    {
+        using var fx = await Fixtures.Criterion1ConflictAsync();
+        var args = await MergeToolCall.WriteStageFilesAsync(fx, "a.txt");
+        var s = Opened(await MergeToolSession.OpenAsync(fx.Git, args, Fixtures.Options(), default));
+        AcceptEverywhere(s.Document, ResolutionChoice.Left);
+        Assert.True(s.Document.IsComplete);
+        var bytes = File.ReadAllBytes(args.Merged);
+        var written = File.GetLastWriteTimeUtc(args.Merged);
+
+        Assert.Equal(ExitCode.Unresolved, s.Cancel());
+
+        Assert.Equal(ExitCode.Unresolved, s.SaveAndExit());
+        Assert.Equal(ExitCode.Unresolved, s.ExitUnresolved());
+        var save = Assert.IsType<SaveResult.Failed>(s.Save());
+        Assert.Equal("the session was cancelled", save.Message);
+        Assert.Equal(bytes, File.ReadAllBytes(args.Merged));
+        Assert.Equal(written, File.GetLastWriteTimeUtc(args.Merged));
+    }
+
+    [Fact]
+    public async Task Malformed_unmerged_listing_is_refused_with_3()
+    {
+        using var fx = await Fixtures.Criterion1ConflictAsync();
+        var args = await MergeToolCall.WriteStageFilesAsync(fx, "a.txt");
+        var failed = Assert.IsType<OpenOutcome.Failed>(
+            await MergeToolSession.OpenAsync(new MalformedListingRunner(fx.Git), args, Fixtures.Options(), default));
+        Assert.Equal(ExitCode.InputUnreadable, failed.Code);
+    }
+
+    private sealed class MalformedListingRunner(IGitRunner inner) : IGitRunner
+    {
+        public Task<GitResult> RunAsync(GitInvocation invocation, CancellationToken cancellationToken) =>
+            invocation.Arguments.Contains("ls-files")
+                ? Task.FromResult(new GitResult(0, Encoding.UTF8.GetBytes("no tab here "), []))
+                : inner.RunAsync(invocation, cancellationToken);
     }
 }
