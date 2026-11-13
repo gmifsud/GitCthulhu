@@ -1,7 +1,7 @@
 //! config_adapter
 //! Implements the ConfigStore port for persisting user-defined settings using confy.
 
-use core_domain::{AppSettings, ConfigStore, DomainError, HeaderMark, WorktreeTabRetention};
+use core_domain::{AppSettings, ConfigStore, DomainError, HeaderMark, WorkspaceTabs, WorktreeTabRetention};
 
 mod activity;
 pub use activity::JsonlActivityStore;
@@ -36,6 +36,9 @@ struct AppSettingsDto {
     /// Absent in settings written before the Repositories column existed.
     #[serde(default = "default_repositories_pinned")]
     pub repositories_pinned: bool,
+    /// Absent in settings written before open tabs were remembered.
+    #[serde(default)]
+    pub workspace_tabs: Vec<WorkspaceTabs>,
 }
 
 fn default_repositories_pinned() -> bool {
@@ -68,6 +71,7 @@ impl Default for AppSettingsDto {
             recent_repositories: Vec::new(),
             header_mark: HeaderMark::default(),
             repositories_pinned: default_repositories_pinned(),
+            workspace_tabs: Vec::new(),
         }
     }
 }
@@ -86,6 +90,7 @@ impl From<AppSettingsDto> for AppSettings {
             recent_repositories: dto.recent_repositories,
             header_mark: dto.header_mark,
             repositories_pinned: dto.repositories_pinned,
+            workspace_tabs: dto.workspace_tabs,
         }
     }
 }
@@ -104,6 +109,7 @@ impl From<&AppSettings> for AppSettingsDto {
             recent_repositories: domain.recent_repositories.clone(),
             header_mark: domain.header_mark,
             repositories_pinned: domain.repositories_pinned,
+            workspace_tabs: domain.workspace_tabs.clone(),
         }
     }
 }

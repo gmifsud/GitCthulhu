@@ -51,6 +51,7 @@ pub fn merge_window_settings(stored: &mut AppSettings, incoming: AppSettings) {
     stored.header_mark = incoming.header_mark;
     stored.repositories_pinned = incoming.repositories_pinned;
     stored.recent_repositories = incoming.recent_repositories;
+    stored.workspace_tabs = incoming.workspace_tabs;
 }
 
 #[cfg(test)]
@@ -115,6 +116,7 @@ mod tests {
             recent_repositories: path.map(str::to_string).into_iter().collect(),
             header_mark: Default::default(),
             repositories_pinned: true,
+            workspace_tabs: Vec::new(),
         }
     }
 

@@ -247,6 +247,18 @@ impl HeaderMark {
     ];
 }
 
+/// The worktree tabs a repository had open, so the next launch can put them back.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WorkspaceTabs {
+    /// The folder the repository was opened from.
+    pub repository: String,
+    /// Every tab's folder, in tab order.
+    pub tabs: Vec<String>,
+    /// The folder of the tab that was in front. Empty when unknown.
+    #[serde(default)]
+    pub active: String,
+}
+
 /// User-defined settings for the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
@@ -272,6 +284,8 @@ pub struct AppSettings {
     pub header_mark: HeaderMark,
     /// The Repositories column stays open beside the Explorer (true) or folds to a rail.
     pub repositories_pinned: bool,
+    /// The tabs each repository had open when it was last on screen, one entry per repository.
+    pub workspace_tabs: Vec<WorkspaceTabs>,
 }
 
 impl AppSettings {
@@ -329,12 +343,53 @@ impl AppSettings {
         true
     }
 
-    /// Drop `path` from [`Self::recent_repositories`]. Returns true when it was there.
+    /// Drop `path` from [`Self::recent_repositories`], and the tabs remembered for it.
+    /// Returns true when it was listed.
     pub fn forget_recent(&mut self, path: &str) -> bool {
         let before = self.recent_repositories.len();
         self.recent_repositories
             .retain(|known| !same_repository_path(known, path));
+        self.workspace_tabs
+            .retain(|known| !same_repository_path(&known.repository, path));
         before != self.recent_repositories.len()
+    }
+
+    /// The tabs remembered for the repository opened from `repository`, if any.
+    pub fn tabs_of(&self, repository: &str) -> Option<&WorkspaceTabs> {
+        self.workspace_tabs
+            .iter()
+            .find(|known| same_repository_path(&known.repository, repository))
+    }
+
+    /// Remember which tabs the repository opened from `repository` has open, and which is in
+    /// front. Its entry keeps its place; a new repository joins at the end. Returns true when
+    /// anything changed, so an unchanged window never writes the settings file.
+    pub fn remember_tabs(&mut self, repository: &str, tabs: &[String], active: &str) -> bool {
+        let repository = repository.trim();
+        if repository.is_empty() {
+            return false;
+        }
+        match self
+            .workspace_tabs
+            .iter_mut()
+            .find(|known| same_repository_path(&known.repository, repository))
+        {
+            // The same folder spelt another way is the same repository: nothing to write.
+            Some(known) if known.tabs == tabs && known.active == active => false,
+            Some(known) => {
+                known.tabs = tabs.to_vec();
+                known.active = active.to_string();
+                true
+            }
+            None => {
+                self.workspace_tabs.push(WorkspaceTabs {
+                    repository: repository.to_string(),
+                    tabs: tabs.to_vec(),
+                    active: active.to_string(),
+                });
+                true
+            }
+        }
     }
 }
 
@@ -402,6 +457,7 @@ impl Default for AppSettings {
             worktree_tab_retention: WorktreeTabRetention::default(),
             header_mark: HeaderMark::default(),
             repositories_pinned: true,
+            workspace_tabs: Vec::new(),
         }
     }
 }
@@ -473,5 +529,29 @@ mod tests {
     fn separators_do_not_make_a_different_folder() {
         assert!(same_repository_path(r"D:\Repos\ISL", "D:/Repos/ISL/"));
         assert!(!same_repository_path("/r/a", "/r/ab"));
+    }
+
+    #[test]
+    fn a_repository_remembers_its_tabs_and_keeps_its_place() {
+        let mut settings = AppSettings::default();
+        let tabs = vec!["/r/a".to_string(), "/r/wt/x".to_string()];
+        assert!(settings.remember_tabs("/r/a", &tabs, "/r/wt/x"));
+        assert!(settings.remember_tabs("/r/b", &["/r/b".to_string()], "/r/b"));
+        assert!(!settings.remember_tabs("/r/a/", &tabs, "/r/wt/x"), "nothing changed: no write");
+
+        assert!(settings.remember_tabs("/r/a", &tabs[..1], "/r/a"));
+        assert_eq!(settings.workspace_tabs.len(), 2);
+        assert_eq!(settings.workspace_tabs[0].tabs, vec!["/r/a"]);
+        assert_eq!(settings.tabs_of("/r/a/").map(|known| known.active.as_str()), Some("/r/a"));
+        assert!(settings.tabs_of("/r/elsewhere").is_none());
+    }
+
+    #[test]
+    fn forgetting_a_repository_forgets_its_tabs() {
+        let mut settings = AppSettings::default();
+        settings.remember_recent("/r/a");
+        settings.remember_tabs("/r/a", &["/r/a".to_string(), "/r/wt/x".to_string()], "/r/a");
+        assert!(settings.forget_recent("/r/a"));
+        assert!(settings.tabs_of("/r/a").is_none());
     }
 }

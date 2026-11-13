@@ -11,7 +11,7 @@ use crate::worktree_ink::WorktreeInks;
 use core_domain::Worktree;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text, tooltip};
+use iced::widget::{button, column, container, horizontal_space, row, scrollable, text, tooltip};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::chrome::{glyph, hairline, Reading};
@@ -31,11 +31,13 @@ pub(super) fn tab_strip<'a>(
     }
     strip = strip.push(add_button(app.tab_picker_open, tokens, reading));
 
-    // Full-width chrome bar; tabs themselves stay content-sized chips on the left.
-    let mut bar = column![container(strip)
-        .padding([6, 8])
-        .width(Length::Fill)
-        .align_left(Length::Fill)];
+    // Full-width chrome bar; tabs stay content-sized chips on the left, and what the window
+    // is working on is named on the right, where it never moves the tabs or the panes.
+    let mut top = row![strip, horizontal_space()].align_y(Alignment::Center).spacing(12);
+    if let Some(label) = app.busy_label() {
+        top = top.push(busy_chip(label, tokens, reading));
+    }
+    let mut bar = column![container(top).padding([6, 8]).width(Length::Fill)];
     if app.tab_picker_open {
         bar = bar.push(hairline(tokens));
         bar = bar.push(picker(app, tokens, reading));
@@ -175,6 +177,35 @@ fn tab<'a>(
         }),
         tooltip::Position::Bottom,
     )
+    .into()
+}
+
+/// What the window is working on, in words: "Opening worktree feature-x…".
+fn busy_chip<'a>(label: String, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let size = (reading.size - 1.0).max(11.0);
+    container(
+        row![
+            glyph(Icon::Refresh, size, tokens.accent_primary, &reading),
+            text(label)
+                .font(reading.font)
+                .size(size)
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style { color: Some(tokens.text_primary) }),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([4, 10])
+    .style(move |_theme: &Theme| container::Style {
+        background: Some(Background::Color(tokens.bg_raised)),
+        text_color: Some(tokens.text_primary),
+        border: Border {
+            color: tokens.accent_primary,
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        shadow: Shadow::default(),
+    })
     .into()
 }
 

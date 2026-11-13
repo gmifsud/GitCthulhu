@@ -27,7 +27,7 @@ use crate::compare::{CompareLookups, CompareSide, CompareState, LookupSource};
 use crate::terminal::{ConsoleChange, LineKind};
 use crate::layout::{self, HunkMode, LayoutPreset, RatioSlot, WorkspacePane};
 use crate::selection::Selection;
-use crate::session::{apply_retention, same_path, SessionKey, WorktreeSession, DIFF_LINES_PER_PAGE};
+use crate::session::{apply_retention, basename, same_path, SessionKey, WorktreeSession, DIFF_LINES_PER_PAGE};
 use crate::theme::DesignTokens;
 use crate::wip::{InspectTarget, WipRow, WorktreeProbe};
 use crate::{
@@ -123,6 +123,11 @@ pub(crate) struct GitApp {
     pub(crate) worktree_busy: bool,
     /// The path being opened into a tab; further opens are ignored until it lands.
     worktree_opening: Option<String>,
+    /// The folder this repository was opened from. Its open tabs are remembered under it,
+    /// whichever tab is first now.
+    workspace_path: Option<String>,
+    /// Putting back the tabs this repository had open at the last launch.
+    tab_restore: TabRestore,
     /// Right-click menu over a commit or local branch.
     pub(crate) context_menu: Option<crate::context_menu::ContextMenuState>,
     /// Commit id waiting for detach confirmation when the worktree is dirty.
@@ -427,6 +432,9 @@ pub(crate) enum Message {
     ActivityTick,
     /// The history list scrolled: its offset and visible height in px.
     HistoryScrolled { offset: f32, height: f32, content: f32 },
+    /// The history's own scrollbar was dragged or its track pressed. `end` is the thumb at
+    /// the bottom of its track: go to the true end, whatever the estimate of `content` says.
+    HistoryScrollTo { offset: f32, end: bool, height: f32, content: f32 },
     /// The Diff pane scrolled to this offset in px.
     DiffScrolled(f32),
     /// The next chunk of a tab's history arrived (streamed in the background).
@@ -618,6 +626,17 @@ pub(crate) enum Message {
 
 /// A repository left for another one, with its tabs exactly as they were. Each tab keeps
 /// its draft, marks, selection, filters, history depth and scroll positions.
+/// Where the window is in putting last launch's tabs back. Tabs are saved only once this is
+/// [`TabRestore::Done`], so a half-restored window never overwrites what was remembered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TabRestore {
+    /// Waiting for the worktree list: only worktrees git still knows are reopened.
+    Waiting,
+    /// Opening these one at a time, in tab order; then `active` goes in front.
+    Opening { queue: Vec<String>, active: String },
+    Done,
+}
+
 struct ParkedWorkspace {
     /// [`core_domain::repository_key`] of its first tab's folder.
     key: String,
@@ -766,6 +785,8 @@ impl GitApp {
         settings: AppSettings,
         save_settings: SettingsSaver,
     ) -> Self {
+        let workspace_path = repository_path.clone().filter(|path| adapter.is_some() && !path.trim().is_empty());
+        let tab_restore = if workspace_path.is_some() { TabRestore::Waiting } else { TabRestore::Done };
         let sessions = match (adapter, repository_path) {
             (Some(adapter), path) => vec![WorktreeSession::new(
                 path.unwrap_or_default(),
@@ -791,6 +812,8 @@ impl GitApp {
             worktree_prompt: None,
             worktree_busy: false,
             worktree_opening: None,
+            workspace_path,
+            tab_restore,
             context_menu: None,
             confirm_detach: None,
             tip_hover: None,
@@ -1281,13 +1304,14 @@ impl GitApp {
             None => Task::none(),
         };
         let handled = self.handle(message);
+        let remembered = self.remember_open_tabs();
         let loaded = self.load_activity_once();
         let restored = if std::mem::take(&mut self.scroll_restore) {
             self.restore_scroll()
         } else {
             Task::none()
         };
-        Task::batch([saved, handled, loaded, restored])
+        Task::batch([saved, handled, remembered, loaded, restored])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -2334,6 +2358,19 @@ impl GitApp {
                 }
                 Task::none()
             }
+            Message::HistoryScrollTo { offset, end, height, content } => {
+                // The same bookkeeping as a wheel scroll (the window drawn, the anchor row,
+                // reading more near the end), then move the list itself.
+                let scrolled = self.handle(Message::HistoryScrolled { offset, height, content });
+                let y = if end { content + height } else { offset };
+                Task::batch([
+                    scrolled,
+                    iced::widget::scrollable::scroll_to(
+                        iced::widget::scrollable::Id::new(HISTORY_SCROLL_ID),
+                        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+                    ),
+                ])
+            }
             Message::HistoryPageLoaded(key, result) => {
                 let Some(session) = self.session_mut_for(&key) else {
                     return Task::none();
@@ -2744,7 +2781,8 @@ impl GitApp {
                     Ok(list) => {
                         self.worktree_catalogue = list;
                         self.catalogue_error = None;
-                        return self.probe_unopened_worktrees();
+                        let restore = self.begin_tab_restore();
+                        return Task::batch([restore, self.probe_unopened_worktrees()]);
                     }
                     // Keep the last good catalogue; the explorer shows why it is stale.
                     Err(error) => self.catalogue_error = Some(error_message(&error)),
@@ -3350,6 +3388,89 @@ impl GitApp {
         path: String,
         result: Result<OpenedRepository, DomainError>,
     ) -> Task<Message> {
+        let landed = self.land_worktree(path, result);
+        // A restore opens its tabs one after another: this one landing frees the next.
+        Task::batch([landed, self.continue_tab_restore()])
+    }
+
+    /// Start putting back the tabs remembered for this repository, once the worktree list
+    /// has arrived. Folders git no longer lists as worktrees are left out, silently: a
+    /// worktree removed since the last launch is not an error.
+    fn begin_tab_restore(&mut self) -> Task<Message> {
+        if self.tab_restore != TabRestore::Waiting {
+            return Task::none();
+        }
+        let remembered = self
+            .workspace_path
+            .as_deref()
+            .and_then(|root| self.settings.tabs_of(root))
+            .cloned();
+        let Some(remembered) = remembered else {
+            self.tab_restore = TabRestore::Done;
+            return Task::none();
+        };
+        let queue = remembered
+            .tabs
+            .into_iter()
+            .filter(|path| self.worktree_catalogue.iter().any(|entry| same_path(&entry.path, path)))
+            .collect();
+        self.tab_restore = TabRestore::Opening { queue, active: remembered.active };
+        self.continue_tab_restore()
+    }
+
+    /// Open the next remembered tab, or finish: put the remembered tab in front.
+    fn continue_tab_restore(&mut self) -> Task<Message> {
+        if self.worktree_opening.is_some() {
+            return Task::none();
+        }
+        loop {
+            let TabRestore::Opening { queue, active } = &mut self.tab_restore else {
+                return Task::none();
+            };
+            if queue.is_empty() {
+                let active = std::mem::take(active);
+                self.tab_restore = TabRestore::Done;
+                if let Some(index) = self.sessions.iter().position(|session| same_path(&session.path, &active)) {
+                    self.activate(index);
+                }
+                return Task::none();
+            }
+            let next = queue.remove(0);
+            if self.sessions.iter().any(|session| same_path(&session.path, &next)) {
+                continue;
+            }
+            return self.open_worktree_tab(next);
+        }
+    }
+
+    /// Save which tabs are open and which is in front, when that changed. Called after every
+    /// message, so it compares in place and allocates only when there is something to write.
+    fn remember_open_tabs(&mut self) -> Task<Message> {
+        if self.tab_restore != TabRestore::Done {
+            return Task::none();
+        }
+        let (Some(root), Some(front)) = (self.workspace_path.as_deref(), self.sessions.get(self.active)) else {
+            return Task::none();
+        };
+        let unchanged = self.settings.tabs_of(root).is_some_and(|known| {
+            known.active == front.path
+                && known.tabs.len() == self.sessions.len()
+                && known.tabs.iter().zip(&self.sessions).all(|(tab, session)| *tab == session.path)
+        });
+        if unchanged {
+            return Task::none();
+        }
+        let tabs: Vec<String> = self.sessions.iter().map(|session| session.path.clone()).collect();
+        let (root, front) = (root.to_string(), front.path.clone());
+        self.settings.remember_tabs(&root, &tabs, &front);
+        self.persist_settings(self.settings.clone())
+    }
+
+    fn land_worktree(
+        &mut self,
+        path: String,
+        result: Result<OpenedRepository, DomainError>,
+    ) -> Task<Message> {
         // A result that is not the open in flight belongs to a replaced repository.
         let expected = self
             .worktree_opening
@@ -3384,7 +3505,11 @@ impl GitApp {
                 let session = WorktreeSession::new(path, repo, self.settings.clone());
                 let key = session.key();
                 self.sessions.push(session);
-                self.activate(self.sessions.len() - 1);
+                // A tab being put back loads behind the one on screen; the remembered front
+                // tab is chosen once they are all open.
+                if !matches!(self.tab_restore, TabRestore::Opening { .. }) {
+                    self.activate(self.sessions.len() - 1);
+                }
                 Task::done(Message::RefreshSession(key))
             }
             Err(error) => {
@@ -3859,6 +3984,8 @@ impl GitApp {
         events: Vec<ViewEvent>,
     ) -> Task<Message> {
         self.sessions = workspace.sessions;
+        // Its tabs are here as they were left: there is nothing to put back.
+        self.tab_restore = TabRestore::Done;
         self.active = workspace.active.min(self.sessions.len().saturating_sub(1));
         self.worktree_catalogue = workspace.worktree_catalogue;
         self.ref_filter = workspace.ref_filter;
@@ -4163,25 +4290,61 @@ impl GitApp {
         })
     }
 
-    /// Label for the status strip while work is in flight.
-    pub(crate) fn activity_label(&self) -> &'static str {
-        if self.shell_busy {
-            "Running command…"
-        } else if self.worktree_busy {
-            "Worktree…"
-        } else if self.agent_busy {
-            "Agent…"
-        } else if self.opening || self.worktree_opening.is_some() {
-            "Opening…"
-        } else if self.active_session().is_some_and(|s| s.state.loading) {
-            "Loading…"
-        } else {
-            "Ready"
+    /// What the window is working on right now, in words, or `None` when it is idle. The
+    /// most specific thing known wins: a named git action before a plain "Loading".
+    pub(crate) fn busy_label(&self) -> Option<String> {
+        if let Some(progress) = &self.open_progress {
+            return Some(format!("Opening {}…", basename(&progress.path)));
         }
+        if self.opening {
+            return Some("Setting up the repository…".to_string());
+        }
+        if let Some(path) = &self.worktree_opening {
+            return Some(match &self.tab_restore {
+                TabRestore::Opening { queue, .. } if queue.is_empty() => {
+                    format!("Restoring worktree tabs: {}…", basename(path))
+                }
+                TabRestore::Opening { queue, .. } => {
+                    format!("Restoring worktree tabs: {} ({} more)…", basename(path), queue.len())
+                }
+                _ => format!("Opening worktree {}…", basename(path)),
+            });
+        }
+        if let Some(entry) = self.activity.running() {
+            return Some(crate::activity::running_label(&entry.record));
+        }
+        if self.shell_busy {
+            return Some("Running command…".to_string());
+        }
+        if self.worktree_busy {
+            return Some("Updating worktrees…".to_string());
+        }
+        if self.agent_busy {
+            return Some("Writing a commit message…".to_string());
+        }
+        let front = self.active_session();
+        if let Some(session) = front.filter(|session| session.state.loading) {
+            return Some(format!("Loading {}…", basename(&session.path)));
+        }
+        if let Some(session) = self.sessions.iter().find(|session| session.state.loading) {
+            return Some(format!("Loading {} in the background…", basename(&session.path)));
+        }
+        if self.compare.as_ref().is_some_and(|compare| compare.loading) {
+            return Some("Comparing…".to_string());
+        }
+        if let Some(session) = front.filter(|session| session.history_more_pending) {
+            return Some(format!("Reading history: {} commits so far…", session.state.commits.len()));
+        }
+        None
+    }
+
+    /// Label for the status strip: the work in flight, or "Ready".
+    pub(crate) fn activity_label(&self) -> String {
+        self.busy_label().unwrap_or_else(|| "Ready".to_string())
     }
 
     pub(crate) fn activity_busy(&self) -> bool {
-        self.activity_label() != "Ready"
+        self.busy_label().is_some()
     }
 
     fn confirm_branch(&mut self) -> Task<Message> {
@@ -7069,6 +7232,139 @@ mod tests {
             std::sync::Arc::new(FakeGitRepository::ok()),
             AppSettings::default(),
         ));
+    }
+
+    /// A repository opened from `FIRST` whose settings remember `tabs` with `active` in front.
+    fn app_remembering(tabs: &[&str], active: &str) -> GitApp {
+        let mut settings = AppSettings::default();
+        let tabs: Vec<String> = tabs.iter().map(|tab| tab.to_string()).collect();
+        settings.remember_tabs(FIRST, &tabs, active);
+        GitApp::with_repo_opener(
+            std::sync::Arc::new(FakeGitRepository::ok()),
+            Some(FIRST.to_string()),
+            unavailable_opener(),
+            unavailable_opener(),
+            unavailable_initialiser(),
+            unavailable_cloner(),
+            settings,
+            ignore_settings(),
+        )
+    }
+
+    fn land(app: &mut GitApp, path: &str) {
+        let _ = app.update(Message::WorktreeOpened(
+            path.to_string(),
+            Ok(OpenedRepository(std::sync::Arc::new(populated_repo()))),
+        ));
+    }
+
+    fn all_three() -> Vec<Worktree> {
+        vec![linked(FIRST, "main", true), linked(SECOND, "feature", false), linked(THIRD, "other", false)]
+    }
+
+    #[test]
+    fn the_tabs_open_at_the_last_launch_are_put_back_with_the_same_one_in_front() {
+        let mut app = app_remembering(&[FIRST, SECOND, THIRD], SECOND);
+
+        // Nothing is reopened until git has listed the worktrees.
+        assert_eq!(app.tab_restore, TabRestore::Waiting);
+        load_catalogue_list(&mut app, all_three());
+        assert_eq!(app.worktree_opening.as_deref(), Some(SECOND), "one at a time, in tab order");
+        assert_eq!(app.busy_label().as_deref(), Some("Restoring worktree tabs: second (1 more)…"));
+
+        land(&mut app, SECOND);
+        assert_eq!(app.active, 0, "a tab being put back loads behind the one on screen");
+        assert_eq!(app.worktree_opening.as_deref(), Some(THIRD));
+        land(&mut app, THIRD);
+
+        let open: Vec<&str> = app.sessions.iter().map(|session| session.path.as_str()).collect();
+        assert_eq!(open, vec![FIRST, SECOND, THIRD]);
+        assert_eq!(app.sessions[app.active].path, SECOND, "the remembered tab is in front");
+        assert_eq!(app.tab_restore, TabRestore::Done);
+    }
+
+    #[test]
+    fn a_worktree_removed_since_the_last_launch_is_left_out_without_an_error() {
+        let mut app = app_remembering(&[FIRST, SECOND, THIRD], THIRD);
+
+        load_catalogue_list(&mut app, vec![linked(FIRST, "main", true), linked(SECOND, "feature", false)]);
+        land(&mut app, SECOND);
+
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.tab_restore, TabRestore::Done);
+        assert!(app.error.is_none());
+        assert_eq!(app.active, 0, "the remembered front tab is gone: the one on screen stays");
+    }
+
+    #[test]
+    fn a_half_restored_window_never_overwrites_what_was_remembered() {
+        let mut app = app_remembering(&[FIRST, SECOND, THIRD], THIRD);
+        let remembered = app.settings.tabs_of(FIRST).cloned();
+
+        // Messages arrive while the tabs are still being put back.
+        let _ = app.update(Message::ToggleTabPicker);
+        load_catalogue_list(&mut app, all_three());
+        land(&mut app, SECOND);
+        assert_eq!(app.settings.tabs_of(FIRST).cloned(), remembered);
+
+        // A failed worktree list leaves the restore waiting rather than giving up.
+        let mut waiting = app_remembering(&[FIRST, SECOND], SECOND);
+        let key = waiting.active_key();
+        let _ = waiting.update(Message::WorktreesLoaded(key, Err(DomainError::Unknown("offline".into()))));
+        assert_eq!(waiting.tab_restore, TabRestore::Waiting);
+        assert_eq!(waiting.settings.tabs_of(FIRST).map(|known| known.tabs.len()), Some(2));
+    }
+
+    #[test]
+    fn opening_closing_and_switching_tabs_is_remembered() {
+        let mut app = app_remembering(&[FIRST], FIRST);
+        load_catalogue_list(&mut app, all_three());
+        assert_eq!(app.tab_restore, TabRestore::Done);
+
+        let _ = app.update(Message::OpenWorktree(SECOND.to_string()));
+        land(&mut app, SECOND);
+        let known = app.settings.tabs_of(FIRST).expect("remembered");
+        assert_eq!(known.tabs, vec![FIRST, SECOND]);
+        assert_eq!(known.active, SECOND);
+
+        let _ = app.update(Message::SelectWorktreeTab(0));
+        assert_eq!(app.settings.tabs_of(FIRST).expect("remembered").active, FIRST);
+
+        let _ = app.update(Message::CloseWorktreeTab(1));
+        assert_eq!(app.settings.tabs_of(FIRST).expect("remembered").tabs, vec![FIRST]);
+    }
+
+    #[test]
+    fn the_busy_label_names_the_work_and_is_absent_when_idle() {
+        let mut app = two_session_app();
+        assert_eq!(app.busy_label(), None);
+        assert_eq!(app.activity_label(), "Ready");
+
+        app.sessions[1].state.loading = true;
+        assert_eq!(app.busy_label().as_deref(), Some("Loading second in the background…"));
+        app.sessions[0].state.loading = true;
+        assert_eq!(app.busy_label().as_deref(), Some("Loading first…"));
+        app.sessions[0].state.loading = false;
+        app.sessions[1].state.loading = false;
+
+        app.sessions[0].history_more_pending = true;
+        assert_eq!(app.busy_label().as_deref(), Some("Reading history: 0 commits so far…"));
+        app.sessions[0].history_more_pending = false;
+
+        let _ = app.update(Message::OpenWorktree(THIRD.to_string()));
+        assert_eq!(app.busy_label().as_deref(), Some("Opening worktree third…"));
+        assert!(app.activity_busy());
+    }
+
+    #[test]
+    fn dragging_the_history_scrollbar_moves_the_window_that_is_drawn() {
+        let mut app = two_session_app();
+
+        let _ = app.update(Message::HistoryScrollTo { offset: 40_000.0, end: false, height: 600.0, content: 90_000.0 });
+
+        assert_eq!(app.history_scroll, 40_000.0);
+        assert_eq!(app.history_viewport, 600.0);
+        assert_eq!(app.sessions[0].history_offset, 40_000.0);
     }
 
     #[test]

@@ -196,7 +196,7 @@ fn activity_status<'a>(app: &'a GitApp, quiet: f32, tokens: DesignTokens, readin
         })
     };
     let Some((icon, ink, label)) = shown else {
-        return button(status_text(app.activity_label().to_string(), quiet, tokens, reading))
+        return button(status_text(app.activity_label(), quiet, tokens, reading))
             .padding(0)
             .on_press(Message::ShowActivity)
             .style(move |_theme, _status| iced::widget::button::Style::default())

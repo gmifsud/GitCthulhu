@@ -18,7 +18,10 @@ use crate::history_index::{Columns, AUTHOR_WIDTH, COL_GAP, HASH_WIDTH, WHEN_WIDT
 use core_domain::{Commit, DagNode};
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, tooltip, Space};
+
+use super::history_scrollbar::{HistoryScrollbar, BAR_WIDTH};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -77,6 +80,8 @@ pub(super) fn history_table<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let session = app.session();
+    // The history's own scrollbar stands beside the list, so the rows are that much narrower.
+    let width = (width - BAR_WIDTH).max(0.0);
     // Rebuild the row index only when what it depends on changed: never for a mouse move,
     // a hover or a scroll. This is what keeps a long history fast.
     // Rows are measured at the width rounded down to a step, so dragging a divider rebuilds
@@ -249,23 +254,35 @@ pub(super) fn history_table<'a>(
                 .style(move |_| text::Style { color: Some(tokens.text_muted) }),
         );
     }
+    // Everything in the list: the headers, the rows, and the list's own padding.
+    let content = PREAMBLE_HEIGHT + index.total + LIST_PAD_Y * 2.0;
     drop(guard);
 
-    container(
-        scrollable(commit_rows.padding([2.0, LIST_PAD_X]))
-            .id(scrollable::Id::new(crate::app::HISTORY_SCROLL_ID))
-            .width(Length::Fill)
-            .on_scroll(|viewport| Message::HistoryScrolled {
-                offset: viewport.absolute_offset().y,
-                height: viewport.bounds().height,
-                content: viewport.content_bounds().height,
-            }),
-    )
+    // iced's thumb shrinks to a hairline on a long history, so it is hidden (no width) and
+    // the bar beside the list is the one to grab. The wheel and the keys still scroll the list.
+    let list = scrollable(commit_rows.padding([LIST_PAD_Y, LIST_PAD_X]))
+        .id(scrollable::Id::new(crate::app::HISTORY_SCROLL_ID))
+        .direction(Direction::Vertical(Scrollbar::new().width(0).scroller_width(0)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .on_scroll(|viewport| Message::HistoryScrolled {
+            offset: viewport.absolute_offset().y,
+            height: viewport.bounds().height,
+            content: viewport.content_bounds().height,
+        });
+    let bar = canvas(HistoryScrollbar { content, scroll, tokens })
+        .width(Length::Fixed(BAR_WIDTH))
+        .height(Length::Fill);
+
+    container(row![list, bar])
     .width(Length::Fill)
     .height(Length::Fill)
     .style(move |_theme: &Theme| panel_style(tokens, false))
     .into()
 }
+
+/// Padding above and below the list inside its scrollable.
+const LIST_PAD_Y: f32 = 2.0;
 
 /// Width step the row index is measured at.
 const WIDTH_STEP: f32 = 24.0;
