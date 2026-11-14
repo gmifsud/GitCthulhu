@@ -128,6 +128,10 @@ pub(crate) struct GitApp {
     workspace_path: Option<String>,
     /// Putting back the tabs this repository had open at the last launch.
     tab_restore: TabRestore,
+    /// The Diff pane has the caret: its keys (arrows, Ctrl+C, Ctrl+A) go to it.
+    pub(crate) diff_focused: bool,
+    /// Height of the Diff pane, from its last scroll. Zero until it has scrolled.
+    pub(crate) diff_viewport: f32,
     /// When the work that holds the window began: see [`Self::holding_label`].
     pub(crate) held_since: Option<std::time::Instant>,
     /// Right-click menu over a commit or local branch.
@@ -441,6 +445,16 @@ pub(crate) enum Message {
     ActivityTick,
     /// The history list scrolled: its offset and visible height in px.
     HistoryScrolled { offset: f32, height: f32, content: f32 },
+    /// The Diff pane scrolled: where to, and how tall it is.
+    DiffViewport { offset: f32, height: f32 },
+    /// A press on the diff's text: place the caret, or take the word or the line.
+    DiffPress { pane: crate::diff_select::Pane, pos: crate::diff_select::Pos, grain: crate::diff_select::Grain },
+    /// The pointer moved with the button held: the selection follows.
+    DiffDrag(crate::diff_select::Pos),
+    /// A key while the diff has the caret.
+    DiffKey(crate::diff_select::DiffKey),
+    /// A press elsewhere: the diff gives up the caret and keeps its selection.
+    DiffBlur,
     /// The history's own scrollbar was dragged or its track pressed. `end` is the thumb at
     /// the bottom of its track: go to the true end, whatever the estimate of `content` says.
     HistoryScrollTo { offset: f32, end: bool, height: f32, content: f32 },
@@ -657,6 +671,9 @@ pub(crate) enum MergePreviewState {
     Failed(String),
 }
 
+/// The Diff pane's height before its first scroll has reported the real one.
+const DIFF_VIEWPORT_GUESS: f32 = 400.0;
+
 struct ParkedWorkspace {
     /// [`core_domain::repository_key`] of its first tab's folder.
     key: String,
@@ -835,6 +852,8 @@ impl GitApp {
             workspace_path,
             tab_restore,
             held_since: None,
+            diff_focused: false,
+            diff_viewport: 0.0,
             context_menu: None,
             confirm_detach: None,
             tip_hover: None,
@@ -1082,6 +1101,69 @@ impl GitApp {
         }
         self.install_layout();
         true
+    }
+
+    /// The Diff pane's lines, as it draws them.
+    fn diff_layout(&self) -> crate::diff_view::Layout {
+        let (patches, focus, limit): (&[core_domain::Patch], _, _) = match self.active_session() {
+            Some(session) => (&session.patches, session.focused_diff_path.as_deref(), session.diff_lines_limit),
+            None => (&[], None, 0),
+        };
+        crate::diff_view::layout(patches, focus, limit, self.diff_split)
+    }
+
+    /// Lines a Page key moves the diff's caret by: a screenful, less one line of overlap.
+    pub(crate) fn diff_page(&self) -> usize {
+        let height = if self.diff_viewport > 0.0 { self.diff_viewport } else { DIFF_VIEWPORT_GUESS };
+        ((height / crate::diff_view::ROW_HEIGHT) as usize).saturating_sub(1).max(1)
+    }
+
+    /// A key in the Diff pane: copy, select all, or move the caret and keep it in view.
+    fn diff_key(&mut self, key: crate::diff_select::DiffKey) -> Task<Message> {
+        use crate::diff_select::DiffKey;
+        if !self.diff_focused {
+            return Task::none();
+        }
+        let layout = self.diff_layout();
+        let viewport = if self.diff_viewport > 0.0 { self.diff_viewport } else { DIFF_VIEWPORT_GUESS };
+        let Some(session) = self.active_session_mut() else {
+            return Task::none();
+        };
+        let Some(held) = session.diff_selection else {
+            return Task::none();
+        };
+        match key {
+            DiffKey::Copy if held.is_caret() => Task::none(),
+            DiffKey::Copy => iced::clipboard::write(crate::diff_select::selected_text(&layout, &held)),
+            DiffKey::SelectAll => {
+                if let Some(all) = crate::diff_select::select_all(&layout, held.pane) {
+                    session.diff_selection = Some(all);
+                }
+                Task::none()
+            }
+            DiffKey::Move(motion, extend) => {
+                let moved = crate::diff_select::moved(&layout, held, motion, extend);
+                session.diff_selection = Some(moved);
+                // Keep the caret's line in view: scroll just far enough to show it.
+                let tops = crate::diff_select::tops(&layout);
+                let (Some(top), Some(bottom)) = (tops.get(moved.caret.line), tops.get(moved.caret.line + 1)) else {
+                    return Task::none();
+                };
+                let offset = session.diff_offset;
+                let target = if *top < offset {
+                    *top
+                } else if *bottom > offset + viewport {
+                    *bottom - viewport
+                } else {
+                    return Task::none();
+                };
+                session.diff_offset = target.max(0.0);
+                iced::widget::scrollable::scroll_to(
+                    iced::widget::scrollable::Id::new(DIFF_SCROLL_ID),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: target.max(0.0) },
+                )
+            }
+        }
     }
 
     /// Scroll the Diff pane to the next or previous difference, using the same layout the
@@ -2408,6 +2490,34 @@ impl GitApp {
                 }
                 Task::none()
             }
+            Message::DiffViewport { offset, height } => {
+                self.diff_viewport = height;
+                self.handle(Message::DiffScrolled(offset))
+            }
+            Message::DiffPress { pane, pos, grain } => {
+                let extend = self.modifiers.shift();
+                let layout = self.diff_layout();
+                let Some(session) = self.active_session_mut() else {
+                    return Task::none();
+                };
+                if let Some(held) = crate::diff_select::pressed(&layout, session.diff_selection, pane, pos, grain, extend) {
+                    session.diff_selection = Some(held);
+                    self.diff_focused = true;
+                }
+                Task::none()
+            }
+            Message::DiffDrag(pos) => {
+                let layout = self.diff_layout();
+                if let Some(session) = self.active_session_mut() {
+                    session.diff_selection = session.diff_selection.map(|held| crate::diff_select::dragged(&layout, held, pos));
+                }
+                Task::none()
+            }
+            Message::DiffBlur => {
+                self.diff_focused = false;
+                Task::none()
+            }
+            Message::DiffKey(key) => self.diff_key(key),
             Message::HistoryScrollTo { offset, end, height, content } => {
                 // The same bookkeeping as a wheel scroll (the window drawn, the anchor row,
                 // reading more near the end), then move the list itself.
@@ -2513,6 +2623,8 @@ impl GitApp {
                 match result {
                     Ok(patches) => {
                         session.patches = patches;
+                        // Another diff: the old selection points at lines that are gone.
+                        session.diff_selection = None;
                         session.patch_error = None;
                         if !restoring {
                             session.diff_change = None;
@@ -7503,6 +7615,79 @@ mod tests {
         app.sessions[0].state.loading = false;
         let _ = app.update(Message::ActivityTick);
         assert!(app.held_since.is_none() && app.loading_card().is_none());
+    }
+
+    fn app_with_a_diff() -> GitApp {
+        use core_domain::{DiffLine, DiffLineKind, Hunk, Patch};
+        let line = |kind, text: &str| DiffLine { kind, text: text.to_string() };
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.diff_split = true;
+        app.session_mut().patches = vec![Patch {
+            path: "a.rs".into(),
+            hunks: vec![Hunk {
+                header: "@@ -1,3 +1,3 @@".into(),
+                lines: vec![
+                    line(DiffLineKind::Context, "fn main() {"),
+                    line(DiffLineKind::Removed, "    old_call();"),
+                    line(DiffLineKind::Added, "    new_call(1);"),
+                    line(DiffLineKind::Context, "}"),
+                ],
+            }],
+            binary: false,
+        }];
+        app
+    }
+
+    #[test]
+    fn the_diff_takes_a_selection_like_a_read_only_editor() {
+        use crate::diff_select::{DiffKey, Grain, Motion, Pane, Pos};
+        let mut app = app_with_a_diff();
+        let layout = app.diff_layout();
+        let first = layout
+            .lines
+            .iter()
+            .position(|line| crate::diff_select::line_text(line, Pane::Right).is_some())
+            .expect("a text line");
+
+        // Keys do nothing until the diff has been clicked.
+        let _ = app.update(Message::DiffKey(DiffKey::SelectAll));
+        assert!(app.session().diff_selection.is_none());
+
+        let _ = app.update(Message::DiffPress { pane: Pane::Right, pos: Pos { line: first, col: 3 }, grain: Grain::Caret });
+        assert!(app.diff_focused);
+        let _ = app.update(Message::DiffDrag(Pos { line: first + 1, col: 99 }));
+        let held = app.session().diff_selection.expect("selected");
+        assert_eq!(crate::diff_select::selected_text(&layout, &held), "main() {
+    new_call(1);");
+
+        let _ = app.update(Message::DiffKey(DiffKey::SelectAll));
+        let all = app.session().diff_selection.expect("selected");
+        assert_eq!(crate::diff_select::selected_text(&layout, &all), "fn main() {
+    new_call(1);
+}");
+
+        let _ = app.update(Message::DiffKey(DiffKey::Move(Motion::Top, false)));
+        assert!(app.session().diff_selection.expect("caret").is_caret());
+
+        // A press elsewhere gives up the caret; the keys go quiet again.
+        let _ = app.update(Message::DiffBlur);
+        let before = app.session().diff_selection;
+        let _ = app.update(Message::DiffKey(DiffKey::Move(Motion::Bottom, true)));
+        assert_eq!(app.session().diff_selection, before);
+    }
+
+    #[test]
+    fn a_new_diff_drops_the_old_selection() {
+        use crate::diff_select::{Grain, Pane, Pos};
+        let mut app = app_with_a_diff();
+        let _ = app.update(Message::DiffPress { pane: Pane::Left, pos: Pos { line: 2, col: 0 }, grain: Grain::Line });
+        assert!(app.session().diff_selection.is_some());
+
+        let key = app.active_key();
+        let generation = app.session().patch_generation;
+        let _ = app.update(Message::PatchLoaded { session: key, generation, result: Ok(vec![]) });
+
+        assert!(app.session().diff_selection.is_none());
     }
 
     #[test]

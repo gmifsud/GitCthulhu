@@ -9,6 +9,7 @@ mod files_nav;
 mod commands;
 mod confirm;
 mod context_overlay;
+mod diff_overlay;
 mod explorer;
 mod filter_bar;
 mod history;

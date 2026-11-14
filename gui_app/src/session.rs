@@ -181,6 +181,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) history_layout: std::cell::RefCell<HistoryLayout>,
     /// Where the Diff pane was scrolled to, in px.
     pub(crate) diff_offset: f32,
+    /// The text selected in the Diff pane, or its bare caret.
+    pub(crate) diff_selection: Option<crate::diff_select::DiffSelection>,
     /// Put the Diff pane back at `diff_offset` once the diff loads (after a return to this tab).
     pub(crate) diff_restore_pending: bool,
 }
@@ -226,6 +228,7 @@ impl WorktreeSession {
             history_anchor_within: 0.0,
             history_layout: std::cell::RefCell::new(HistoryLayout::default()),
             diff_offset: 0.0,
+            diff_selection: None,
             diff_restore_pending: false,
         }
     }
