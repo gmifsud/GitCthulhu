@@ -11,7 +11,7 @@ use crate::palette::commit_matches;
 use crate::reachability::{filter_dag_nodes, session_head_tip};
 use crate::ref_pills::{pill_mark, pill_tooltip, primary_node_kind, refs_at, tip_worktree, RefPill, RefPillKind};
 use crate::selection::{short_hash, Selection};
-use crate::session::WorktreeSession;
+use crate::session::{same_path, WorktreeSession};
 use crate::wip::WipRow;
 use crate::theme::DesignTokens;
 use crate::history_index::{Columns, AUTHOR_WIDTH, COL_GAP, HASH_WIDTH, WHEN_WIDTH};
@@ -176,7 +176,16 @@ pub(super) fn history_table<'a>(
         .padding(0)
         .on_press(Message::WorktreeClicked(wip.path.clone()))
         .style(move |_theme, status| commit_style(tokens, status, selected));
-        commit_rows = commit_rows.push(hover_tip(line.into(), wip.tooltip.clone(), tokens, reading));
+        // The worktree's menu: open it, copy its path or branch.
+        let line: Element<'a, Message> = match app.worktree_catalogue.iter().find(|entry| same_path(&entry.path, &wip.path)) {
+            Some(entry) => mouse_area(line)
+                .on_right_press(Message::OpenContextMenu {
+                    target: ContextTarget::Worktree { path: entry.path.clone(), branch: entry.branch.clone(), is_main: entry.is_main },
+                })
+                .into(),
+            None => line.into(),
+        };
+        commit_rows = commit_rows.push(hover_tip(line, wip.tooltip.clone(), tokens, reading));
     }
 
     if first < index.rows.len() && index.rows[first].top > 0.0 {
@@ -193,7 +202,7 @@ pub(super) fn history_table<'a>(
                 .width(Length::Fixed(graph_w))
                 .height(Length::Fixed(row.height))
                 .into(),
-            description_cell(app, &row.subject, &row.pills, row.merge, row.height, line, &worktree_inks, tokens, reading),
+            description_cell(app, &row.commit_id, &row.subject, &row.pills, row.merge, row.height, line, &worktree_inks, tokens, reading),
             &row.author,
             &age,
             short_hash(&row.commit_id),
@@ -204,7 +213,7 @@ pub(super) fn history_table<'a>(
             reading,
         );
         let id = row.commit_id.clone();
-        let right_target = ContextTarget::Commit { id: row.commit_id.clone() };
+        let right_target = ContextTarget::Commit { id: row.commit_id.clone(), subject: subject_of(&row.subject).to_string() };
         commit_rows = commit_rows.push(
             mouse_area(
                 button(label)
@@ -546,8 +555,10 @@ fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
 /// The worktree and branch names on top, then the subject, both whole and wrapping. Hovering
 /// the names lists every ref at the commit by its full name.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn description_cell<'a>(
     app: &GitApp,
+    commit_id: &str,
     message: &str,
     pills: &[RefPill],
     muted: bool,
@@ -567,7 +578,7 @@ fn description_cell<'a>(
     if !pills.is_empty() {
         let folder_of = |path: &str| app.worktree_folder(path);
         let names = pill_tooltip(pills, &app.worktree_catalogue, &folder_of);
-        cell = cell.push(hover_tip(pill_strip(pills, lane, worktree_inks, tokens, reading), names, tokens, reading));
+        cell = cell.push(hover_tip(pill_strip(commit_id, pills, lane, worktree_inks, tokens, reading), names, tokens, reading));
     }
     cell = cell.push(subject);
     container(cell)
@@ -706,6 +717,7 @@ fn ref_names_at<'s>(commit_id: &str, session: &'s WorktreeSession) -> Vec<&'s st
 }
 
 fn pill_strip<'a>(
+    commit_id: &str,
     pills: &[RefPill],
     lane: Color,
     worktree_inks: &WorktreeInks,
@@ -718,7 +730,11 @@ fn pill_strip<'a>(
     for pill in pills {
         // A branch checked out in a worktree wears that worktree's colour, as everywhere else.
         let ink = pill.worktree.as_deref().map_or(lane, |path| worktree_inks.colour(path));
-        pill_row = pill_row.push(ref_pill(pill, ink, tokens, reading));
+        // Its own menu on right-click, ahead of the row's: checkout, merge, copy the name…
+        pill_row = pill_row.push(
+            mouse_area(ref_pill(pill, ink, tokens, reading))
+                .on_right_press(Message::OpenContextMenu { target: pill_target(pill, commit_id) }),
+        );
     }
     pill_row.wrap().into()
 }
@@ -860,6 +876,16 @@ fn hover_tip<'a>(
 /// in a worktree is in that worktree's colour, and so is its line below. The shape says
 /// the kind: filled for the checkout, outlined for a worktree or branch, faint for a remote
 /// (with its cloud mark), neutral for a tag.
+/// The menu a pill opens: the branch's, the remote branch's or the tag's.
+fn pill_target(pill: &RefPill, commit_id: &str) -> ContextTarget {
+    let (name, tip) = (pill.name.clone(), commit_id.to_string());
+    match pill.kind {
+        RefPillKind::Head | RefPillKind::Worktree | RefPillKind::Local => ContextTarget::LocalBranch { name, tip },
+        RefPillKind::Remote => ContextTarget::RemoteBranch { name, tip },
+        RefPillKind::Tag => ContextTarget::Tag { name, commit_id: tip },
+    }
+}
+
 fn ref_pill<'a>(pill: &RefPill, lane: Color, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let faint = Color { a: 0.55, ..lane };
     let (fg, bg, border) = match pill.kind {
@@ -977,6 +1003,19 @@ mod measured_rows_tests {
 
     fn pill(name: &str) -> RefPill {
         RefPill { label: name.into(), name: name.into(), kind: RefPillKind::Worktree, ahead: 0, behind: 0, worktree: None }
+    }
+
+    #[test]
+    fn a_pill_opens_the_menu_of_the_ref_it_names() {
+        let at = "abcdef0";
+        let mut pill = pill("feature/x");
+        assert_eq!(pill_target(&pill, at), ContextTarget::LocalBranch { name: "feature/x".into(), tip: at.into() });
+        pill.kind = RefPillKind::Remote;
+        pill.name = "origin/feature/x".into();
+        assert_eq!(pill_target(&pill, at), ContextTarget::RemoteBranch { name: "origin/feature/x".into(), tip: at.into() });
+        pill.kind = RefPillKind::Tag;
+        pill.name = "v1.2".into();
+        assert_eq!(pill_target(&pill, at), ContextTarget::Tag { name: "v1.2".into(), commit_id: at.into() });
     }
 
     #[test]

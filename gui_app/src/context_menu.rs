@@ -10,7 +10,8 @@ use crate::session::same_path;
 /// What the user right-clicked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContextTarget {
-    Commit { id: String },
+    /// A commit row in the graph, with its subject line for copying.
+    Commit { id: String, subject: String },
     LocalBranch { name: String, tip: String },
     /// A remote-tracking branch such as `origin/feature/x`.
     RemoteBranch { name: String, tip: String },
@@ -144,7 +145,7 @@ pub(crate) fn context_actions(
 ) -> Vec<ContextAction> {
     let idle = !loading;
     match target {
-        ContextTarget::Commit { id } => {
+        ContextTarget::Commit { id, subject } => {
             let short = short_hash(id);
             let on_head = active_head == Some(id.as_str());
             // A worktree already checked out here opens in a tab; only otherwise is a new one
@@ -179,7 +180,17 @@ pub(crate) fn context_actions(
                 action("Cherry-pick onto current…", idle && !on_head, ContextActionKind::CherryPick { id: id.clone() }),
                 action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
                 action("Copy hash", true, ContextActionKind::CopyText { text: id.clone() }),
+                action(format!("Copy short hash ({short})"), true, ContextActionKind::CopyText { text: short.to_string() }),
+                action("Copy subject", !subject.is_empty(), ContextActionKind::CopyText { text: subject.clone() }),
             ]);
+            // Every branch at this commit, local first, each copyable by name: the pills on the row,
+            // without having to aim at one.
+            let mut here: Vec<&Branch> = branches.iter().filter(|branch| branch.tip == *id).collect();
+            here.sort_by_key(|branch| (branch.is_remote, branch.name.clone()));
+            actions.extend(
+                here.into_iter()
+                    .map(|branch| action(format!("Copy '{}'", branch.name), true, ContextActionKind::CopyText { text: branch.name.clone() })),
+            );
             actions
         }
         ContextTarget::LocalBranch { name, tip } => {
@@ -292,6 +303,9 @@ pub(crate) fn context_actions(
             action("Apply", idle, ContextActionKind::StashApply { index: *index, message: message.clone() }),
             action("Pop", idle, ContextActionKind::StashPop { index: *index, message: message.clone() }),
             action("Drop…", idle, ContextActionKind::StashDrop { index: *index, message: message.clone() }),
+            action("Copy message", !message.is_empty(), ContextActionKind::CopyText { text: message.clone() }),
+            // The name git commands take: `git stash show stash@{2}`.
+            action(format!("Copy name (stash@{{{index}}})"), true, ContextActionKind::CopyText { text: format!("stash@{{{index}}}") }),
         ],
         ContextTarget::Worktree { path, branch, is_main } => vec![
             action("Open in tab", idle, ContextActionKind::OpenWorktreeTab { path: path.clone() }),
@@ -512,9 +526,39 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_row_copies_its_hash_subject_and_every_branch_on_it() {
+        let target = ContextTarget::Commit { id: "abcdef0123456789".into(), subject: "Fix the parser".into() };
+        let mut here = branch("feature/x", false, false);
+        here.tip = "abcdef0123456789".into();
+        let mut remote = branch("origin/feature/x", true, false);
+        remote.tip = "abcdef0123456789".into();
+        let elsewhere = branch("main", false, false);
+        let actions = context_actions(&target, &[], &[remote, elsewhere, here], Some("other"), false);
+        let copied = |label: &str| match &find(&actions, label).kind {
+            ContextActionKind::CopyText { text } => text.clone(),
+            other => panic!("{label} does not copy: {other:?}"),
+        };
+        assert_eq!(copied("Copy short hash"), "abcdef0");
+        assert_eq!(copied("Copy subject"), "Fix the parser");
+        assert_eq!(copied("Copy 'feature/x'"), "feature/x");
+        assert_eq!(copied("Copy 'origin/feature/x'"), "origin/feature/x");
+        let names: Vec<&str> = actions.iter().filter(|a| a.label.starts_with("Copy '")).map(|a| a.label.as_str()).collect();
+        assert_eq!(names, vec!["Copy 'feature/x'", "Copy 'origin/feature/x'"], "local first, and only branches at this commit");
+    }
+
+    #[test]
+    fn a_stash_copies_its_message_and_the_name_git_takes() {
+        let target = ContextTarget::Stash { index: 2, message: "WIP on main: tidy".into() };
+        let actions = context_actions(&target, &[], &[], None, false);
+        assert!(matches!(&find(&actions, "Copy message").kind, ContextActionKind::CopyText { text } if text == "WIP on main: tidy"));
+        assert!(matches!(&find(&actions, "Copy name (stash@{2})").kind, ContextActionKind::CopyText { text } if text == "stash@{2}"));
+    }
+
+    #[test]
     fn commit_menu_branches_opens_and_detaches() {
         let target = ContextTarget::Commit {
             id: "abcdef0123456789".into(),
+            subject: "Fix the parser".into(),
         };
         let actions = context_actions(&target, &[], &[], Some("other"), false);
         assert!(matches!(
@@ -536,7 +580,7 @@ mod tests {
     #[test]
     fn a_commit_with_a_worktree_offers_to_open_it_in_a_tab() {
         let id = "abcdef0123456789";
-        let target = ContextTarget::Commit { id: id.into() };
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
         let branches = vec![Branch {
             name: "feature/x".into(),
             is_remote: false,
@@ -558,7 +602,7 @@ mod tests {
     #[test]
     fn detach_disabled_when_already_on_commit() {
         let id = "abcdef0123456789";
-        let target = ContextTarget::Commit { id: id.into() };
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
         let actions = context_actions(&target, &[], &[], Some(id), false);
         assert!(!find(&actions, "Detach HEAD here").enabled);
         assert!(!find(&actions, "Cherry-pick").enabled);

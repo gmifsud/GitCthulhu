@@ -163,6 +163,17 @@ fn tab<'a>(
         }
     });
 
+    // Right-click: the worktree's menu (copy its path or branch, open its folder…).
+    let target = crate::context_menu::ContextTarget::Worktree {
+        path: session.path.clone(),
+        branch: Some(session_branch(app, session)).filter(|name| name != DETACHED).unwrap_or_default(),
+        is_main: app
+            .worktree_catalogue
+            .iter()
+            .find(|entry| same_path(&entry.path, &session.path))
+            .is_some_and(|entry| entry.is_main),
+    };
+    let cell = iced::widget::mouse_area(cell).on_right_press(Message::OpenContextMenu { target });
     tooltip(
         cell,
         container(
