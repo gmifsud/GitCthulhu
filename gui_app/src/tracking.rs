@@ -1,9 +1,13 @@
 use core_domain::{RepoStatus, TrackingStatus};
 
 /// One line for the current branch. Counts are already computed by git.
-pub(crate) fn tracking_summary(status: Option<&RepoStatus>) -> String {
+///
+/// `reading` is whether a read is in flight: with no status and nothing running, the last
+/// read failed, and saying "Loading…" for ever would be a lie.
+pub(crate) fn tracking_summary(status: Option<&RepoStatus>, reading: bool) -> String {
     match status {
-        None => "Loading…".to_string(),
+        None if reading => "Loading…".to_string(),
+        None => "Not read: press Refresh".to_string(),
         Some(RepoStatus { tracking: None, .. }) => "No upstream".to_string(),
         Some(RepoStatus {
             tracking: Some(tracking),
@@ -131,22 +135,23 @@ mod tests {
 
     #[test]
     fn phrases_match_the_counts() {
-        assert_eq!(tracking_summary(None), "Loading…");
-        assert_eq!(tracking_summary(Some(&status(None))), "No upstream");
+        assert_eq!(tracking_summary(None, true), "Loading…");
+        assert_eq!(tracking_summary(None, false), "Not read: press Refresh", "a failed read is not loading");
+        assert_eq!(tracking_summary(Some(&status(None)), false), "No upstream");
         assert_eq!(
-            tracking_summary(Some(&status(Some(tracked(0, 0))))),
+            tracking_summary(Some(&status(Some(tracked(0, 0)))), false),
             "Up to date with origin/main"
         );
         assert_eq!(
-            tracking_summary(Some(&status(Some(tracked(2, 0))))),
+            tracking_summary(Some(&status(Some(tracked(2, 0)))), false),
             "↑2 outgoing to origin/main"
         );
         assert_eq!(
-            tracking_summary(Some(&status(Some(tracked(0, 1))))),
+            tracking_summary(Some(&status(Some(tracked(0, 1)))), false),
             "↓1 incoming from origin/main"
         );
         assert_eq!(
-            tracking_summary(Some(&status(Some(tracked(1, 3))))),
+            tracking_summary(Some(&status(Some(tracked(1, 3)))), false),
             "↓3 incoming · ↑1 outgoing · origin/main"
         );
     }

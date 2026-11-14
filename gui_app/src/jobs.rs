@@ -87,6 +87,44 @@ fn in_background<T: Send + 'static>(
     async move { receiver.await.unwrap_or_else(|_| interrupted()) }
 }
 
+/// Repository reads allowed to run at once.
+///
+/// gix maps a pack file copy-on-write, and Windows reserves a mapping's whole size against
+/// the page file. One read of a repository with 1.9 GB of packs reserves 1.9 GB. A repository
+/// with 47 worktrees was probed 46 at a time, asked for some 87 GB, and reads failed with
+/// "The paging file is too small" (os error 1455).
+pub(crate) const READ_SLOTS: usize = 2;
+
+/// Counts the reads in flight; [`read_slot`] waits here when all slots are taken.
+struct ReadGate {
+    running: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+static READ_GATE: ReadGate = ReadGate { running: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
+
+/// Held for the length of one repository read; dropping it lets the next one start.
+pub(crate) struct ReadSlot(());
+
+impl Drop for ReadSlot {
+    fn drop(&mut self) {
+        // A poisoned count is still a count: a read that panicked must not block the rest.
+        let mut running = READ_GATE.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *running = running.saturating_sub(1);
+        READ_GATE.freed.notify_one();
+    }
+}
+
+/// Wait for a free slot. Blocking: call it on the job's own thread, never the UI's.
+pub(crate) fn read_slot() -> ReadSlot {
+    let mut running = READ_GATE.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *running >= READ_SLOTS {
+        running = READ_GATE.freed.wait(running).unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *running += 1;
+    ReadSlot(())
+}
+
 /// What a running shell command reports, in order: `Started` once, `Line` for each line as it
 /// is printed, then `Finished` once.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,7 +474,10 @@ pub(crate) fn load_repository_in_background(
     limit: usize,
 ) -> impl Future<Output = Vec<ViewEvent>> {
     in_background(
-        move || load_repository_up_to(repo.as_ref(), limit),
+        move || {
+            let _slot = read_slot();
+            load_repository_up_to(repo.as_ref(), limit)
+        },
         || {
             vec![ViewEvent::ErrorOccurred(DomainError::Unknown(
                 "repository load was interrupted".to_string(),
@@ -619,6 +660,8 @@ pub(crate) fn probe_worktree_in_background(
     let echoed = path.clone();
     in_background(
         move || {
+            // The repository handle, and the packs it mapped, are dropped before the slot is.
+            let _slot = read_slot();
             let result = open(&path).and_then(|repo| repo.status());
             (path, generation, result)
         },
@@ -1434,5 +1477,36 @@ mod tests {
         ));
 
         assert_eq!(result, Err(DomainError::RepositoryNotFound));
+    }
+}
+
+#[cfg(test)]
+mod read_gate_tests {
+    use super::{read_slot, READ_SLOTS};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn no_more_reads_run_at_once_than_there_are_slots() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let readers: Vec<_> = (0..24)
+            .map(|_| {
+                let (running, most) = (Arc::clone(&running), Arc::clone(&most));
+                std::thread::spawn(move || {
+                    let _slot = read_slot();
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for reader in readers {
+            reader.join().expect("reader");
+        }
+        // Other tests may hold slots too, so the bound is what matters, not reaching it.
+        assert!(most.load(Ordering::SeqCst) <= READ_SLOTS, "{} ran together", most.load(Ordering::SeqCst));
+        assert!(most.load(Ordering::SeqCst) >= 1);
     }
 }

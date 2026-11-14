@@ -95,7 +95,7 @@ fn title_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Ele
 
 fn branch_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let branch_name = current_branch_name(&app.session().state.branches);
-    let summary = crate::tracking::tracking_summary(app.session().state.current_status.as_ref());
+    let summary = crate::tracking::tracking_summary(app.session().state.current_status.as_ref(), app.session().state.loading);
 
     // Three slots: the two sides share the spare width equally, so the sync group sits on the
     // window's centre line whatever the branch name or path. Each side clips rather than push.
