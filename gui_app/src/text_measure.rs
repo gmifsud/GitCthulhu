@@ -90,8 +90,67 @@ pub(crate) fn width(text: &str, font: Font, size: f32) -> f32 {
 }
 
 /// Height of `text` wrapped to `width`.
+///
+/// Most text fits on one line, and saying so needs no layout: see [`fits_on_one_line`]. Only
+/// text that may wrap is laid out. On a first history load this skipped the shaping of nearly
+/// every subject, which was the whole of the freeze.
 pub(crate) fn height(text: &str, font: Font, size: f32, width: f32) -> f32 {
+    if fits_on_one_line(text, font, size, width) {
+        return one_line_height(font, size);
+    }
     measure(text, font, size, width).height
+}
+
+/// Allowance on top of the summed advances, against rounding in the text engine.
+const FIT_MARGIN: f32 = 2.0;
+
+/// True when `text` certainly fits on one line `width` wide, worked out without laying it out.
+///
+/// Measured text is laid out with basic shaping, which places each glyph at its own advance:
+/// no kerning, no ligatures. So a line's width is the sum of its characters' advances, and for
+/// printable ASCII those come from a table measured once per font and size. Any other
+/// character (accents, CJK, emoji, a tab) answers false and the text is laid out as before.
+pub(crate) fn fits_on_one_line(text: &str, font: Font, size: f32, width: f32) -> bool {
+    if text.is_empty() || !text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        return false;
+    }
+    ADVANCES.with(|tables| {
+        let mut tables = tables.borrow_mut();
+        let key = (font, (size * 10.0).round() as u32);
+        let table = tables.entry(key).or_insert_with(|| ascii_advances(font, size));
+        let total: f32 = text.bytes().map(|byte| table[usize::from(byte - b' ')]).sum();
+        total + FIT_MARGIN <= width
+    })
+}
+
+/// Each printable ASCII character's advance at `size` in `font`, measured as a run of ten so
+/// rounding of a single narrow glyph does not shrink it.
+fn ascii_advances(font: Font, size: f32) -> [f32; 95] {
+    let mut table = [0.0; 95];
+    for (slot, byte) in (b' '..=b'~').enumerate() {
+        let run: String = std::iter::repeat(byte as char).take(10).collect();
+        // A run of spaces measures as nothing (trailing whitespace): measure it between bars.
+        table[slot] = if byte == b' ' {
+            (measure_unwrapped(&format!("|{run}|"), font, size) - measure_unwrapped("||", font, size)) / 10.0
+        } else {
+            measure_unwrapped(&run, font, size) / 10.0
+        };
+    }
+    table
+}
+
+fn measure_unwrapped(text: &str, font: Font, size: f32) -> f32 {
+    measure(text, font, size, f32::MAX / 4.0).width
+}
+
+/// The height of one line of text at `size` in `font`.
+fn one_line_height(font: Font, size: f32) -> f32 {
+    measure("M", font, size, f32::MAX / 4.0).height
+}
+
+thread_local! {
+    /// Printable ASCII advances per (font, size in tenths).
+    static ADVANCES: RefCell<HashMap<(Font, u32), [f32; 95]>> = RefCell::new(HashMap::new());
 }
 
 #[cfg(test)]
@@ -106,6 +165,39 @@ mod tests {
         let one_line = height("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0, 2_000.0);
         let wrapped = height("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0, 80.0);
         assert!(wrapped >= one_line * 2.0, "{one_line} vs {wrapped}");
+    }
+
+    /// The shortcut must agree with real layout: never "fits" for text that wraps, and close
+    /// enough that text which fits is not sent to layout for nothing.
+    #[test]
+    fn the_one_line_shortcut_agrees_with_layout() {
+        let samples = [
+            "Merge branch 'feature/tenant-db-isolation-shared-instance' into feature/tenant-db-isolation-shared-instance_LaneB",
+            "fix(tenant-isolation): validate tenant IDs for host-side resolution",
+            "docs: update CIM target branches to eyesel integration",
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+            "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+            "a  b   c    d     e      f       {tabs and spaces}  ~!@#$%^&*()_+`-=[]\\;',./",
+        ];
+        for size in [12.0, 14.0, 18.0] {
+            for text in samples {
+                let real = width(text, Font::DEFAULT, size);
+                let real_lines = |at: f32| measure(text, Font::DEFAULT, size, at).height;
+                let one = real_lines(f32::MAX / 4.0);
+                for at in [real * 0.5, real - 1.0, real + FIT_MARGIN + 1.0, real * 1.5] {
+                    if fits_on_one_line(text, Font::DEFAULT, size, at) {
+                        assert_eq!(real_lines(at), one, "said to fit but wraps: {text:?} at {at} (size {size})");
+                    }
+                }
+                assert!(
+                    fits_on_one_line(text, Font::DEFAULT, size, real + FIT_MARGIN + 1.0),
+                    "fits by layout but not by the shortcut: {text:?} ({real} px, size {size})"
+                );
+            }
+        }
+        assert!(!fits_on_one_line("café", Font::DEFAULT, 14.0, 10_000.0), "not ASCII: laid out instead");
+        assert!(!fits_on_one_line("", Font::DEFAULT, 14.0, 10_000.0));
+        assert_eq!(height("short", Font::DEFAULT, 14.0, 10_000.0), measure("short", Font::DEFAULT, 14.0, 10_000.0).height);
     }
 
     #[test]
