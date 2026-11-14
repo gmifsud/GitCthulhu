@@ -777,6 +777,19 @@ pub(crate) enum HistoryAction {
     Resolve { path: String, side: core_domain::ConflictSide },
     /// Resolve a conflicted file in the user's merge tool; git stages it when the tool saves.
     MergeTool { path: String, tool: String },
+    /// Resolve a conflicted file in whichever merge tool applies here: the one the user chose
+    /// in git, otherwise the built-in resolver.
+    ResolveInTool { path: String },
+}
+
+pub(crate) fn merge_preview_in_background(
+    repo: SharedRepository,
+    name: String,
+) -> impl Future<Output = Result<core_domain::MergePreview, DomainError>> {
+    in_background(
+        move || repo.merge_preview(&name),
+        || Err(DomainError::Unknown("merge preview was interrupted".to_string())),
+    )
 }
 
 pub(crate) fn history_in_background(
@@ -793,6 +806,13 @@ pub(crate) fn history_in_background(
             HistoryAction::Resolve { path, side } => repo.resolve_conflict(&path, side),
             HistoryAction::Rebase { name } => repo.rebase_onto(&name),
             HistoryAction::MergeTool { path, tool } => repo.run_merge_tool(&path, &tool),
+            HistoryAction::ResolveInTool { path } => match repo.merge_tool()? {
+                Some(tool) => repo.run_merge_tool(&path, &tool),
+                None => Err(DomainError::Unknown(
+                    "No merge tool to open: Cthulhu Resolve is not built beside the app, and git has no merge.tool set."
+                        .to_string(),
+                )),
+            },
         },
         || {
             Err(DomainError::Unknown(

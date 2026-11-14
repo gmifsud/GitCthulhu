@@ -51,6 +51,20 @@ pub struct Branch {
     pub behind: usize,
 }
 
+/// What merging a branch or commit into the current branch would do, worked out without
+/// touching the index, the working tree or any ref.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MergePreview {
+    /// Commits the merge would bring in. Zero: already up to date.
+    pub commits: usize,
+    /// The current branch has nothing of its own: it would simply move forward.
+    pub fast_forward: bool,
+    /// Files the merge would change.
+    pub files: Vec<String>,
+    /// Files that would conflict.
+    pub conflicts: Vec<String>,
+}
+
 /// One entry from `git worktree list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {

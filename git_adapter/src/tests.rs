@@ -1784,14 +1784,49 @@ fn taking_their_side_then_continuing_commits_the_merge() {
 
 #[test]
 fn the_merge_tool_is_the_chosen_one_or_the_only_one_defined_never_a_guess() {
-    assert_eq!(pick_merge_tool("p4merge", ""), Some("p4merge".into()));
+    assert_eq!(pick_merge_tool("p4merge", "", false), Some("p4merge".into()));
     let one = "mergetool.p4merge.cmd\nmergetool.p4merge.cmd\n";
-    assert_eq!(pick_merge_tool("", one), Some("p4merge".into()), "defined twice (global and local) is one tool");
+    assert_eq!(pick_merge_tool("", one, false), Some("p4merge".into()), "defined twice (global and local) is one tool");
     let two = "mergetool.p4merge.cmd\nmergetool.cthulhu.cmd\n";
-    assert_eq!(pick_merge_tool("", two), None, "two tools and no choice: ask the user to choose");
-    assert_eq!(pick_merge_tool("cthulhu", two), Some("cthulhu".into()));
-    assert_eq!(pick_merge_tool("", ""), None);
-    assert_eq!(pick_merge_tool("--evil", "mergetool.-x.cmd\n"), None, "never an option-like name");
+    assert_eq!(pick_merge_tool("", two, false), None, "two tools and no choice: ask the user to choose");
+    assert_eq!(pick_merge_tool("cthulhu", two, false), Some("cthulhu".into()));
+    assert_eq!(pick_merge_tool("", "", false), None);
+    assert_eq!(pick_merge_tool("--evil", "mergetool.-x.cmd\n", false), None, "never an option-like name");
+}
+
+#[test]
+fn the_built_in_resolver_outranks_a_tool_that_is_only_defined_but_not_one_the_user_chose() {
+    let one = "mergetool.p4merge.cmd
+";
+    assert_eq!(pick_merge_tool("", one, true), Some(BUILTIN_MERGE_TOOL.into()));
+    assert_eq!(pick_merge_tool("", "", true), Some(BUILTIN_MERGE_TOOL.into()));
+    assert_eq!(pick_merge_tool("p4merge", one, true), Some("p4merge".into()), "merge.tool is the user's choice");
+}
+
+#[test]
+fn a_merge_preview_names_the_conflicts_and_changes_nothing() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let before = adapter.status().expect("status before");
+    let head = adapter.log(Some(1)).expect("log")[0].id.clone();
+
+    let preview = adapter.merge_preview("feature").expect("preview");
+
+    assert_eq!(preview.commits, 1);
+    assert!(!preview.fast_forward);
+    assert_eq!(preview.files, vec!["a.txt"]);
+    assert_eq!(preview.conflicts, vec!["a.txt"]);
+    assert_eq!(adapter.status().expect("status after"), before, "nothing staged, nothing in progress");
+    assert_eq!(adapter.log(Some(1)).expect("log")[0].id, head);
+    assert!(adapter.merge_preview("--evil").is_err(), "an option-like name is refused");
+}
+
+#[test]
+fn a_merge_preview_of_a_branch_already_merged_is_empty() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let head = adapter.log(Some(1)).expect("log")[0].id.clone();
+    assert_eq!(adapter.merge_preview(&head), Ok(MergePreview::default()));
 }
 
 #[test]
@@ -1816,6 +1851,42 @@ fn a_merge_tool_that_saves_the_file_resolves_and_stages_it() {
 
     assert_eq!(fixture.read_file("a.txt").as_deref(), Some("theirs\n"));
     assert!(adapter.status().expect("status").conflicted_files.is_empty(), "git staged the result");
+}
+
+#[test]
+fn the_built_in_resolver_runs_with_nothing_in_git_config() {
+    let fixture = conflicting_branches();
+    let adapter = fixture.adapter();
+    let _ = adapter.merge_branch("feature", false);
+    // A stand-in for Cthulhu Resolve that takes the same arguments and keeps their side.
+    let tools = tempfile::tempdir().expect("tools");
+    let stand_in = tools.path().join("stand in.sh");
+    std::fs::write(
+        &stand_in,
+        "#!/bin/sh
+[ \"$1\" = merge ] || exit 2
+shift
+while [ $# -gt 1 ]; do case \"$1\" in --remote) remote=\"$2\";; --merged) merged=\"$2\";; esac; shift 2; done
+cp \"$remote\" \"$merged\"
+",
+    )
+    .expect("write the stand-in");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    }
+    std::env::set_var("GITCTHULHU_RESOLVER", &stand_in);
+
+    assert_eq!(adapter.merge_tool(), Ok(Some(BUILTIN_MERGE_TOOL.into())), "no merge.tool: the built-in one");
+    let ran = adapter.run_merge_tool("a.txt", BUILTIN_MERGE_TOOL);
+    std::env::remove_var("GITCTHULHU_RESOLVER");
+
+    ran.expect("the resolver saved the merge");
+    assert_eq!(fixture.read_file("a.txt").as_deref(), Some("theirs
+"));
+    assert!(adapter.status().expect("status").conflicted_files.is_empty(), "git staged the result");
+    assert!(fixture.read_file("a.txt.orig").is_none(), "no backup file is left behind");
 }
 
 #[test]

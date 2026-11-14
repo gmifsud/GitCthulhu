@@ -173,7 +173,8 @@ impl GitApp {
                 .filter(|branch| !(branch.is_head && !branch.is_remote))
                 .map(|branch| branch.name.clone())
                 .collect();
-            return Some(history_prompt(prompt, &mergeable, &current, tokens, reading));
+            let preview = self.merge_preview.as_ref().map(|(_, state)| state);
+            return Some(history_prompt(prompt, &mergeable, &current, preview, tokens, reading));
         }
         if let Some(prompt) = &self.stash_prompt {
             return Some(stash_dialog(prompt, tokens, reading));

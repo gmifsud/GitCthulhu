@@ -14,7 +14,7 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LogCursor,
+    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LogCursor, MergePreview,
     Patch, RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
@@ -119,10 +119,44 @@ fn walk_commits(
 /// The merge tool to run: `chosen` (`merge.tool`) when set, else the only tool named in
 /// `defined` (`mergetool.<name>.cmd` keys, one per line), else none. Names are as git keeps
 /// them; a name git could read as an option is refused.
-fn pick_merge_tool(chosen: &str, defined: &str) -> Option<String> {
+/// The name the built-in resolver runs under. It needs nothing in the user's git config: its
+/// command is handed to `git mergetool` for that one run.
+pub(crate) const BUILTIN_MERGE_TOOL: &str = "cthulhu-resolve";
+
+/// Cthulhu Resolve, when it is installed beside the app or built in this checkout.
+/// `GITCTHULHU_RESOLVER` names it outright. Tests see only that variable, so what they find
+/// never depends on what happens to be built on the machine.
+fn bundled_resolver() -> Option<std::path::PathBuf> {
+    if let Some(named) = std::env::var_os("GITCTHULHU_RESOLVER") {
+        let named = std::path::PathBuf::from(named);
+        return named.is_file().then_some(named);
+    }
+    if cfg!(test) {
+        return None;
+    }
+    let file = if cfg!(windows) { "cthulhu-resolve.exe" } else { "cthulhu-resolve" };
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors().skip(1).take(4).find_map(|dir| {
+        [
+            dir.join(file),
+            dir.join("resolver").join(file),
+            dir.join("resolver/src/Resolve.App/bin/Release/net10.0").join(file),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    })
+}
+
+/// The tool to run: the one the user chose in `merge.tool`; otherwise the built-in resolver
+/// when it is there; otherwise the only tool with a command. A tool merely defined (a
+/// `mergetool.<name>.cmd` left by another program) never outranks the built-in one.
+fn pick_merge_tool(chosen: &str, defined: &str, builtin: bool) -> Option<String> {
     let usable = |name: &str| !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace);
     if usable(chosen) {
         return Some(chosen.to_string());
+    }
+    if builtin {
+        return Some(BUILTIN_MERGE_TOOL.to_string());
     }
     let mut names: Vec<&str> = defined
         .lines()
@@ -803,13 +837,62 @@ impl GitRepository for GitoxideAdapter {
         };
         let chosen = read(&["config", "--get", "merge.tool"])?;
         let defined = read(&["config", "--name-only", "--get-regexp", r"^mergetool\..+\.cmd$"])?;
-        Ok(pick_merge_tool(chosen.trim(), &defined))
+        Ok(pick_merge_tool(chosen.trim(), &defined, bundled_resolver().is_some()))
+    }
+
+    fn merge_preview(&self, name: &str) -> Result<MergePreview, DomainError> {
+        self.open_repo()?;
+        require_branch_name(name)?;
+        let lines = |text: &str| -> Vec<String> {
+            text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect()
+        };
+        let count = command::run_git_stdout(&self.repo_path, &["rev-list", "--count", &format!("HEAD..{name}")])?;
+        let commits = count.trim().parse::<usize>().map_err(unknown)?;
+        if commits == 0 {
+            return Ok(MergePreview::default());
+        }
+        // Exit 1 is "not an ancestor": an answer, not a failure.
+        let ancestor = command::git_output(&self.repo_path, &["merge-base", "--is-ancestor", "HEAD", name])?;
+        let fast_forward = ancestor.status.code() == Some(0);
+        let files = lines(&command::run_git_stdout(
+            &self.repo_path,
+            &["diff", "--name-only", &format!("HEAD...{name}")],
+        )?);
+        // `merge-tree --write-tree` merges in memory: it writes objects, never the index, the
+        // working tree or a ref. Exit 0 is a clean merge, 1 a merge with conflicts.
+        let merged = command::git_output(
+            &self.repo_path,
+            &["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", name],
+        )?;
+        let conflicts = match merged.status.code() {
+            Some(0) => Vec::new(),
+            // The first line is the merged tree; the conflicted paths follow.
+            Some(1) => lines(&String::from_utf8_lossy(&merged.stdout)).into_iter().skip(1).collect(),
+            _ => return Err(unknown(String::from_utf8_lossy(&merged.stderr).trim())),
+        };
+        Ok(MergePreview { commits, fast_forward, files, conflicts })
     }
 
     fn run_merge_tool(&self, path: &str, tool: &str) -> Result<(), DomainError> {
         self.open_repo()?;
         if tool.is_empty() || tool.starts_with('-') || tool.contains(char::is_whitespace) {
             return Err(unknown(format!("not a merge tool name: {tool:?}")));
+        }
+        if tool == BUILTIN_MERGE_TOOL {
+            let resolver = bundled_resolver()
+                .ok_or_else(|| unknown("Cthulhu Resolve is not built or installed beside the app"))?;
+            // git's shell expands $BASE and the rest; the path is quoted for it.
+            let command = format!(
+                r#"mergetool.{tool}.cmd="{}" merge --base "$BASE" --local "$LOCAL" --remote "$REMOTE" --merged "$MERGED""#,
+                resolver.to_string_lossy().replace('\\', "/"),
+            );
+            let trust = format!("mergetool.{tool}.trustExitCode=true");
+            // The resolver keeps its own backup before the first save.
+            return run_git_paths(
+                &self.repo_path,
+                &["-c", &command, "-c", &trust, "-c", "mergetool.keepBackup=false", "mergetool", "--no-prompt", "--tool", tool],
+                &[path.to_string()],
+            );
         }
         run_git_paths(
             &self.repo_path,

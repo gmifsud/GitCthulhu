@@ -1,4 +1,4 @@
-use super::{
+use super::{MergePreview, 
     ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, Patch,
     RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
@@ -124,6 +124,12 @@ pub trait GitRepository {
     fn continue_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
     /// Keep one side of a conflicted file (`git checkout --ours|--theirs`) and stage it.
     fn resolve_conflict(&self, path: &str, side: ConflictSide) -> Result<(), DomainError>;
+    /// What `git merge <name>` would do, without doing it (`git merge-tree`): nothing in the
+    /// repository changes.
+    fn merge_preview(&self, name: &str) -> Result<MergePreview, DomainError> {
+        let _ = name;
+        Err(DomainError::Unknown("this repository cannot preview a merge".to_string()))
+    }
     /// The merge tool `git mergetool` would run here: `merge.tool` when set, otherwise the one
     /// tool with a `mergetool.<name>.cmd`, otherwise `None`. Never a guess from git's list of
     /// known tools: a guess may be a terminal tool, which would hang with no terminal.

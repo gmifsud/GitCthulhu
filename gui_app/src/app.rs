@@ -242,6 +242,9 @@ pub(crate) struct GitApp {
     pub(crate) confirm_drop: Option<Stash>,
     pub(crate) branch_prompt: Option<BranchPrompt>,
     pub(crate) history_prompt: Option<HistoryPrompt>,
+    /// What the merge being asked about would do: the name it was worked out for, and the
+    /// answer. Read off-thread while the Merge dialog is open; nothing in the repository moves.
+    pub(crate) merge_preview: Option<(String, MergePreviewState)>,
     pub(crate) stash_prompt: Option<StashPrompt>,
     pub(crate) clone_url: String,
     open_repository: RepositoryOpener,
@@ -412,6 +415,10 @@ pub(crate) enum Message {
     CompareSidePicked { left: bool, side: CompareSide },
     /// What `git mergetool` would run in the tab Compare was opened from.
     MergeToolFound { session_path: String, result: Result<Option<String>, DomainError> },
+    /// What merging `name` would do, for the Merge dialog.
+    MergePreviewLoaded { name: String, result: Result<core_domain::MergePreview, DomainError> },
+    /// Open the first file still in conflict in the merge tool.
+    ResolveNextConflict,
     /// Resolve this conflicted file in the merge tool Compare found.
     OpenMergeTool(String),
     CompareDraftChanged { left: bool, text: String },
@@ -641,6 +648,14 @@ enum TabRestore {
 
 /// Work shorter than this never shows the loading card.
 const HOLD_CARD_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The Merge dialog's preview of what the merge would do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MergePreviewState {
+    Looking,
+    Ready(core_domain::MergePreview),
+    Failed(String),
+}
 
 struct ParkedWorkspace {
     /// [`core_domain::repository_key`] of its first tab's folder.
@@ -889,6 +904,7 @@ impl GitApp {
             confirm_drop: None,
             branch_prompt: None,
             history_prompt: None,
+            merge_preview: None,
             stash_prompt: None,
             clone_url: String::new(),
             history_query: String::new(),
@@ -1311,6 +1327,7 @@ impl GitApp {
         };
         let handled = self.handle(message);
         let remembered = self.remember_open_tabs();
+        let previewed = self.sync_merge_preview();
         if self.holding_label().is_none() {
             self.held_since = None;
         } else if self.held_since.is_none() {
@@ -1322,7 +1339,7 @@ impl GitApp {
         } else {
             Task::none()
         };
-        Task::batch([saved, handled, remembered, loaded, restored])
+        Task::batch([saved, handled, remembered, previewed, loaded, restored])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -2295,6 +2312,28 @@ impl GitApp {
                     }
                 }
                 self.run_compare()
+            }
+            Message::MergePreviewLoaded { name, result } => {
+                // An answer for a name no longer asked about is dropped.
+                if let Some((asked, state)) = &mut self.merge_preview {
+                    if *asked == name {
+                        *state = match result {
+                            Ok(preview) => MergePreviewState::Ready(preview),
+                            Err(error) => MergePreviewState::Failed(error_message(&error)),
+                        };
+                    }
+                }
+                Task::none()
+            }
+            Message::ResolveNextConflict => {
+                let next = self
+                    .active_session()
+                    .and_then(|session| session.state.current_status.as_ref())
+                    .and_then(|status| status.conflicted_files.first().cloned());
+                match next {
+                    Some(path) => self.run_history(HistoryAction::ResolveInTool { path }),
+                    None => Task::none(),
+                }
             }
             Message::MergeToolFound { session_path, result } => {
                 if let Some(compare) = &mut self.compare {
@@ -4580,6 +4619,29 @@ impl GitApp {
         self.run_history(HistoryAction::Reset { id, mode })
     }
 
+    /// Keep the merge preview in step with the Merge dialog: read it when a name is chosen or
+    /// changed, drop it when the dialog closes. Called after every message; it does nothing
+    /// unless the name asked about changed.
+    fn sync_merge_preview(&mut self) -> Task<Message> {
+        let asked = match &self.history_prompt {
+            Some(HistoryPrompt::Merge { name, .. }) if !name.is_empty() => name.clone(),
+            _ => {
+                self.merge_preview = None;
+                return Task::none();
+            }
+        };
+        if self.merge_preview.as_ref().is_some_and(|(name, _)| *name == asked) {
+            return Task::none();
+        }
+        let Some(repo) = self.active_session().map(|session| session.adapter.clone()) else {
+            return Task::none();
+        };
+        self.merge_preview = Some((asked.clone(), MergePreviewState::Looking));
+        Task::perform(crate::jobs::merge_preview_in_background(repo, asked.clone()), move |result| {
+            Message::MergePreviewLoaded { name: asked.clone(), result }
+        })
+    }
+
     fn confirm_merge(&mut self) -> Task<Message> {
         let Some(HistoryPrompt::Merge { name, no_ff }) = self.history_prompt.clone() else {
             return Task::none();
@@ -4811,6 +4873,14 @@ impl GitApp {
             Kind::CherryPick { id } => {
                 select(self, Selection::Commit { id });
                 self.update(Message::AskCherryPick)
+            }
+            Kind::MergeCommit { id } => {
+                if self.active_session().is_none_or(|session| session.state.loading) {
+                    return Task::none();
+                }
+                self.close_prompts();
+                self.history_prompt = Some(HistoryPrompt::Merge { name: id, no_ff: false });
+                Task::none()
             }
             Kind::ResetTo { id } => {
                 select(self, Selection::Commit { id });
@@ -8526,6 +8596,48 @@ mod tests {
         assert!(app.session().state.loading, "busy until the tool closes");
         let running = app.activity.running().expect("logged");
         assert_eq!(running.record.command, "git mergetool --no-prompt --tool p4merge -- clash.rs");
+    }
+
+    #[test]
+    fn merging_a_commit_from_the_graph_asks_first_and_previews_without_merging() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let id = "aaaaaaa1".to_string();
+
+        let _ = app.update(Message::ContextMenuAction(crate::context_menu::ContextActionKind::MergeCommit { id: id.clone() }));
+
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::Merge { name: id.clone(), no_ff: false }));
+        assert_eq!(app.merge_preview, Some((id.clone(), MergePreviewState::Looking)));
+        assert!(!app.session().state.loading, "nothing runs until Merge is pressed");
+
+        // An answer for another name is dropped; the one asked about lands.
+        let other = core_domain::MergePreview { commits: 9, ..Default::default() };
+        let _ = app.update(Message::MergePreviewLoaded { name: "elsewhere".into(), result: Ok(other) });
+        assert_eq!(app.merge_preview, Some((id.clone(), MergePreviewState::Looking)));
+        let preview = core_domain::MergePreview {
+            commits: 2,
+            fast_forward: false,
+            files: vec!["a.rs".into(), "b.rs".into()],
+            conflicts: vec!["a.rs".into()],
+        };
+        let _ = app.update(Message::MergePreviewLoaded { name: id.clone(), result: Ok(preview.clone()) });
+        assert_eq!(app.merge_preview, Some((id, MergePreviewState::Ready(preview))));
+
+        let _ = app.update(Message::CancelHistory);
+        assert!(app.merge_preview.is_none(), "closing the dialog drops the preview");
+    }
+
+    #[test]
+    fn the_conflict_bar_opens_the_first_conflicted_file_in_the_merge_tool() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::ResolveNextConflict);
+        assert!(app.activity.running().is_none(), "no conflict: nothing to open");
+
+        app.session_mut().state.current_status = Some(conflicted_status());
+        let _ = app.update(Message::ResolveNextConflict);
+
+        assert!(app.session().state.loading, "busy until the tool closes");
+        let running = app.activity.running().expect("logged");
+        assert_eq!(running.record.detail, "clash.rs");
     }
 
     #[test]

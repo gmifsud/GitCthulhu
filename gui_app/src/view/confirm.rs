@@ -74,6 +74,7 @@ pub(super) fn history_prompt<'a>(
     prompt: &HistoryPrompt,
     branches: &[String],
     current: &str,
+    preview: Option<&crate::app::MergePreviewState>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -90,7 +91,7 @@ pub(super) fn history_prompt<'a>(
             reading,
         ),
         HistoryPrompt::Reset { id } => reset_dialog(id, tokens, reading),
-        HistoryPrompt::Merge { name, no_ff } => merge_dialog(name, *no_ff, branches, current, tokens, reading),
+        HistoryPrompt::Merge { name, no_ff } => merge_dialog(name, *no_ff, branches, current, preview, tokens, reading),
         HistoryPrompt::Rebase { name } => dialog(
             "Rebase onto this branch?",
             name,
@@ -292,16 +293,69 @@ fn note<'a>(value: &'static str, tokens: DesignTokens, reading: Reading) -> Elem
         .into()
 }
 
+/// Most conflicting files the preview lists by name.
+const PREVIEW_NAMES: usize = 8;
+
+/// The preview in words: a headline, the conflicting files to name, and whether it conflicts.
+pub(crate) fn merge_preview_text(state: &crate::app::MergePreviewState) -> (String, Vec<String>, bool) {
+    use crate::app::MergePreviewState as State;
+    let plural = |count: usize, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
+    match state {
+        State::Looking => ("Checking what this merge would do…".to_string(), Vec::new(), false),
+        State::Failed(error) => (format!("Could not preview this merge: {error}"), Vec::new(), false),
+        State::Ready(preview) if preview.commits == 0 => {
+            ("Already up to date: there is nothing to merge.".to_string(), Vec::new(), false)
+        }
+        State::Ready(preview) => {
+            let mut headline = format!(
+                "Brings in {}, changing {}.",
+                plural(preview.commits, "commit", "commits"),
+                plural(preview.files.len(), "file", "files"),
+            );
+            if preview.fast_forward {
+                headline.push_str(" Fast-forward: the branch only moves ahead.");
+            }
+            if preview.conflicts.is_empty() {
+                headline.push_str(" No conflicts.");
+                return (headline, Vec::new(), false);
+            }
+            headline.push_str(&format!(" {} would conflict:", plural(preview.conflicts.len(), "file", "files")));
+            let mut names: Vec<String> = preview.conflicts.iter().take(PREVIEW_NAMES).cloned().collect();
+            if preview.conflicts.len() > PREVIEW_NAMES {
+                names.push(format!("… and {} more", preview.conflicts.len() - PREVIEW_NAMES));
+            }
+            (headline, names, true)
+        }
+    }
+}
+
 /// "Merge into <current>": pick the branch, choose whether to always record a merge commit.
 fn merge_dialog<'a>(
     name: &str,
     no_ff: bool,
     branches: &[String],
     current: &str,
+    preview: Option<&crate::app::MergePreviewState>,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
     let chosen = (!name.is_empty()).then(|| name.to_string());
+    let mut previewed = column![].spacing(2);
+    if let Some(state) = preview {
+        let (headline, names, conflicts) = merge_preview_text(state);
+        let ink = if conflicts { tokens.vcs_conflicted } else { tokens.text_primary };
+        previewed = previewed.push(
+            text(headline).font(reading.font).size(reading.size).style(move |_| text::Style { color: Some(ink) }),
+        );
+        for name in names {
+            previewed = previewed.push(
+                text(name)
+                    .font(reading.mono)
+                    .size((reading.size - 1.0).max(11.0))
+                    .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+            );
+        }
+    }
     let card = column![
         heading(format!("Merge into {current}"), tokens, reading),
         pick_list(branches.to_vec(), chosen, Message::MergeTargetPicked)
@@ -321,8 +375,9 @@ fn merge_dialog<'a>(
             .on_toggle(Message::MergeNoFfToggled)
             .font(reading.font)
             .text_size(reading.size),
+        previewed,
         note(
-            "If files conflict, the merge stays open: resolve them in the working tree, then Continue or Abort from the bar at the top.",
+            "This preview changes nothing. If files conflict, the merge stays open: use Resolve next conflict, then Commit merge or Abort, from the bar at the top.",
             tokens,
             reading,
         ),
@@ -375,4 +430,36 @@ pub(super) fn stash_dialog<'a>(prompt: &StashPrompt, tokens: DesignTokens, readi
         .align_y(Alignment::Center),
     );
     modal(card, tokens)
+}
+
+#[cfg(test)]
+mod merge_preview_tests {
+    use super::merge_preview_text;
+    use crate::app::MergePreviewState as State;
+    use core_domain::MergePreview;
+
+    #[test]
+    fn the_preview_says_what_would_happen_in_words() {
+        assert_eq!(merge_preview_text(&State::Looking).0, "Checking what this merge would do…");
+        assert_eq!(
+            merge_preview_text(&State::Ready(MergePreview::default())).0,
+            "Already up to date: there is nothing to merge."
+        );
+        let clean = MergePreview { commits: 1, fast_forward: true, files: vec!["a".into()], conflicts: vec![] };
+        assert_eq!(
+            merge_preview_text(&State::Ready(clean)),
+            ("Brings in 1 commit, changing 1 file. Fast-forward: the branch only moves ahead. No conflicts.".to_string(), vec![], false)
+        );
+    }
+
+    #[test]
+    fn conflicts_are_named_and_a_long_list_is_cut_with_a_count() {
+        let files: Vec<String> = (0..12).map(|index| format!("f{index}.rs")).collect();
+        let preview = MergePreview { commits: 3, fast_forward: false, files: files.clone(), conflicts: files[..10].to_vec() };
+        let (headline, names, conflicts) = merge_preview_text(&State::Ready(preview));
+        assert_eq!(headline, "Brings in 3 commits, changing 12 files. 10 files would conflict:");
+        assert_eq!(names.len(), 9);
+        assert_eq!(names[8], "… and 2 more");
+        assert!(conflicts);
+    }
 }

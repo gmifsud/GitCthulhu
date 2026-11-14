@@ -80,6 +80,8 @@ pub(crate) enum ContextActionKind {
     /// Open the New Branch dialog starting from any ref or commit.
     NewBranchFrom { start: String },
     MergeIntoCurrent { name: String },
+    /// Merge this commit, whatever branch it is on, into the current branch.
+    MergeCommit { id: String },
     RebaseCurrentOnto { name: String },
     RenameBranch { name: String },
     DeleteBranch { name: String },
@@ -173,6 +175,7 @@ pub(crate) fn context_actions(
                     },
                 ),
                 action("Detach HEAD here", idle && !on_head, ContextActionKind::DetachHead { commit_id: id.clone() }),
+                action("Merge into current…", idle && !on_head, ContextActionKind::MergeCommit { id: id.clone() }),
                 action("Cherry-pick onto current…", idle && !on_head, ContextActionKind::CherryPick { id: id.clone() }),
                 action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
                 action("Copy hash", true, ContextActionKind::CopyText { text: id.clone() }),

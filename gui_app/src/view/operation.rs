@@ -48,6 +48,15 @@ pub(super) fn operation_banner<'a>(app: &'a GitApp, tokens: DesignTokens, readin
                 Length::Shrink,
             ),
             horizontal_space(),
+            labelled_button(
+                Icon::Merge,
+                "Resolve next conflict".to_string(),
+                Message::ResolveNextConflict,
+                conflicts > 0 && !busy,
+                conflicts > 0,
+                tokens,
+                reading,
+            ),
             labelled_button(Icon::Check, finish, Message::ContinueOperation, ready && !busy, true, tokens, reading),
             labelled_button(Icon::Discard, format!("Abort {}", operation.noun()), Message::AbortOperation, !busy, false, tokens, reading),
         ]
