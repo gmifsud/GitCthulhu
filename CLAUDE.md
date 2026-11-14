@@ -72,6 +72,7 @@ Keep each bullet under 15 words. No explanations. Only add things that will save
 Review weekly — prune anything stale.
 -->
 - Perf: fix rebuild frequency before per-pane cost. Three sprints missed this (ADR 0007).
+- Squashed columns: iced 0.13 ignored `Wrapping::None`; fixed once in `vendor/iced_graphics` (drop at iced 0.14). In a row, give fixed parts a measured width and the flexible part `Fill`: plain order starves whatever comes last.
 
 ## 9. Decisions Log
 <!-- Stable architectural decisions. One line each. Link to ADR if it deserves more. -->

@@ -30,9 +30,9 @@ pub(super) fn one_line_height(size: f32) -> f32 {
 
 /// A text cell that never shows a second line.
 ///
-/// iced_graphics 0.13.0 ignores `Wrapping::None`: `Paragraph::with_text` stores the wrapping but
-/// never calls `buffer.set_wrap`, so cosmic-text word-wraps anyway. Clamping the height and
-/// clipping hides the wrapped remainder, which reads as truncation. Remove once on iced 0.14.
+/// `Wrapping::None` keeps the text on one line (iced_graphics 0.13.0 ignored it; the copy in
+/// vendor/iced_graphics applies it). Text wider than its cell would then draw over what
+/// follows, so the cell has a fixed height and clips: the overflow reads as truncation.
 pub(super) fn one_line<'a>(
     content: impl Into<Element<'a, Message>>,
     size: f32,

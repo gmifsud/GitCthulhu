@@ -117,3 +117,35 @@ mod tests {
         assert!(other_width.height >= fresh.height, "a narrower width is its own entry");
     }
 }
+
+#[cfg(test)]
+mod no_wrap_tests {
+    use iced::advanced::text::{LineHeight, Paragraph as _, Shaping, Text, Wrapping};
+    use iced::{alignment, Font, Pixels, Size};
+
+    fn height(wrapping: Wrapping, width: f32) -> f32 {
+        iced::advanced::graphics::text::Paragraph::with_text(Text {
+            content: "seventy-eight files",
+            bounds: Size::new(width, f32::INFINITY),
+            size: Pixels(14.0),
+            line_height: LineHeight::default(),
+            font: Font::DEFAULT,
+            horizontal_alignment: alignment::Horizontal::Left,
+            vertical_alignment: alignment::Vertical::Top,
+            shaping: Shaping::Advanced,
+            wrapping,
+        })
+        .min_bounds()
+        .height
+    }
+
+    /// The bug behind every "squashed column": iced 0.13.0 ignored `Wrapping::None`, so text
+    /// squeezed into a few pixels stood one letter per line. vendor/iced_graphics fixes it;
+    /// this fails if the build ever goes back to the unpatched crate.
+    #[test]
+    fn text_told_not_to_wrap_stays_on_one_line_however_narrow() {
+        let one_line = height(Wrapping::None, 10_000.0);
+        assert_eq!(height(Wrapping::None, 8.0), one_line);
+        assert!(height(Wrapping::WordOrGlyph, 8.0) > one_line * 5.0, "wrapping text still wraps");
+    }
+}

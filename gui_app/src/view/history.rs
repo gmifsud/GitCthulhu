@@ -737,6 +737,11 @@ fn wip_description_cell<'a>(
     wip_cell(wip.label.clone(), files, wip.active, worktree, worktree, small, tokens, reading)
 }
 
+/// Follows the worktree's name on the row of the tab in front.
+const ACTIVE_MARK: &str = "· active";
+/// Space between the parts of a working-changes pill.
+const WIP_GAP: f32 = 3.0;
+
 #[allow(clippy::too_many_arguments)]
 fn wip_cell<'a>(
     label: String,
@@ -748,27 +753,46 @@ fn wip_cell<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    // The short fixed parts ("· active", the file count) are measured and keep their width;
+    // the name takes what is left and wraps there. Laid out in plain order instead, the name
+    // took the whole row first and the fixed parts were squeezed to a letter per line.
+    let icon = (reading.size - 3.0).max(9.0);
+    let fixed = |value: &str, size: f32| crate::text_measure::width(value, reading.font, size).ceil() + 1.0;
+    let label_width = fixed(&label, small);
+    let active_width = if active { fixed(ACTIVE_MARK, small) + WIP_GAP } else { 0.0 };
+    let files_width = fixed(&files, reading.size);
     let mut body = row![
-        glyph(Icon::Edit, (reading.size - 3.0).max(9.0), ink, &reading),
+        glyph(Icon::Edit, icon, ink, &reading),
         // Whole, wrapping if the column is narrow: never cut.
-        text(label)
-            .font(reading.font)
-            .size(small)
-            .wrapping(Wrapping::WordOrGlyph)
-            .style(move |_| text::Style { color: Some(ink) }),
+        container(
+            text(label)
+                .font(reading.font)
+                .size(small)
+                .wrapping(Wrapping::WordOrGlyph)
+                .style(move |_| text::Style { color: Some(ink) }),
+        )
+        .width(Length::Fill),
     ]
-    .spacing(3)
+    .spacing(WIP_GAP)
     .align_y(Alignment::Center);
     if active {
         body = body.push(
-            text("· active")
-                .font(reading.font)
-                .size(small)
-                .wrapping(Wrapping::None)
-                .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+            container(
+                text(ACTIVE_MARK)
+                    .font(reading.font)
+                    .size(small)
+                    .wrapping(Wrapping::None)
+                    .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+            )
+            .width(Length::Fixed(active_width - WIP_GAP))
+            .clip(true),
         );
     }
+    // As wide as its content when there is room, narrower (the name wraps) when there is not.
+    let pill_width = icon + WIP_GAP + label_width + active_width + PILL_PAD_X * 2.0 + 4.0;
     let pill = container(body)
+        .width(Length::Fill)
+        .max_width(pill_width)
         .align_y(Alignment::Center)
         .padding([PILL_PAD_Y + 2.0, PILL_PAD_X])
         .style(move |_theme: &Theme| container::Style {
@@ -784,13 +808,17 @@ fn wip_cell<'a>(
     // The pill first: it names the worktree. The count follows, muted.
     let stack = row![
         pill,
-        text(files)
-            .font(reading.font)
-            .size(reading.size)
-            .wrapping(Wrapping::None)
-            .style(move |_| text::Style {
-                color: Some(tokens.text_muted),
-            }),
+        container(
+            text(files)
+                .font(reading.font)
+                .size(reading.size)
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style {
+                    color: Some(tokens.text_muted),
+                }),
+        )
+        .width(Length::Fixed(files_width))
+        .clip(true),
     ]
     .spacing(SUBJECT_PILL_GAP)
     .align_y(Alignment::Center);

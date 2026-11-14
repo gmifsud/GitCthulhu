@@ -38,3 +38,8 @@ strip = true
 inherits = "release"
 debug = 1
 strip = false
+
+# iced 0.13 ignores `Wrapping::None` (text meant to stay on one line wraps a letter per line when
+# squeezed). vendor/iced_graphics is 0.13.0 with that one fix. Remove with the move to iced 0.14.
+[patch.crates-io]
+iced_graphics = { path = "vendor/iced_graphics" }
