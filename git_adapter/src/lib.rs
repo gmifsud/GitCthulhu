@@ -27,6 +27,22 @@ pub(crate) fn unknown(error: impl Display) -> DomainError {
     DomainError::Unknown(error.to_string())
 }
 
+/// An adapter error with every cause behind it. gix's top-level messages ("Could not create
+/// index from tree at …") say what failed, not why; the why is in the sources.
+pub(crate) fn unknown_with_causes(error: impl std::error::Error) -> DomainError {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !message.contains(&cause_text) {
+            message.push_str(": ");
+            message.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    DomainError::Unknown(message)
+}
+
 pub struct GitoxideAdapter {
     repo_path: String,
 }
@@ -299,12 +315,12 @@ impl GitRepository for GitoxideAdapter {
         } else {
             let changes = repo
                 .status(gix::progress::Discard)
-                .map_err(unknown)?
+                .map_err(unknown_with_causes)?
                 .untracked_files(gix::status::UntrackedFiles::Files)
                 .into_index_worktree_iter(Vec::<BString>::new())
-                .map_err(unknown)?;
+                .map_err(unknown_with_causes)?;
             for change in changes {
-                let change = change.map_err(unknown)?;
+                let change = change.map_err(unknown_with_causes)?;
                 // `None` is a stat-only refresh of an unchanged entry.
                 if let Some(summary) = change.summary() {
                     record_change(&mut status, summary, change.rela_path().to_string());

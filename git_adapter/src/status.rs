@@ -8,7 +8,7 @@ use gix::status::index_worktree::iter::Summary;
 use gix::status::plumbing::index_as_worktree::traits::{FastEq, SubmoduleStatus};
 use gix::status::plumbing::index_as_worktree_with_renames::{Entry as StatusEntry, VisitEntry};
 
-use super::unknown;
+use super::{unknown, unknown_with_causes};
 
 /// Stage-0 index entries keyed by path, for comparing two indices.
 fn entries_by_path(
@@ -35,8 +35,8 @@ pub(crate) fn staged_changes(
     let head_entries = if head_is_unborn {
         BTreeMap::new()
     } else {
-        let head_tree = repo.head_tree_id().map_err(unknown)?;
-        let head_index = repo.index_from_tree(&head_tree).map_err(unknown)?;
+        let head_tree = repo.head_tree_id().map_err(unknown_with_causes)?;
+        let head_index = repo.index_from_tree(&head_tree).map_err(unknown_with_causes)?;
         entries_by_path(&head_index)
     };
     let index_entries = entries_by_path(&index);

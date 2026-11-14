@@ -21,6 +21,51 @@ pub(crate) fn progress_label(app: &GitApp) -> Option<String> {
     ))
 }
 
+/// The loading card over a dimmed window: what is running, and for how long. It is in the
+/// middle of the window and large on purpose: the window takes no input while it shows.
+pub(super) fn loading_cover<'a>(label: String, seconds: u64, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let card = container(
+        iced::widget::column![
+            row![
+                super::chrome::glyph(crate::icons::Icon::Refresh, reading.size + 8.0, tokens.accent_primary, &reading),
+                text(label)
+                    .font(reading.font)
+                    .size(reading.size + 4.0)
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .style(move |_| text::Style { color: Some(tokens.text_primary) }),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            text(format!("{seconds} s · the window is paused until this finishes"))
+                .font(reading.font)
+                .size(reading.size)
+                .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+        ]
+        .spacing(10),
+    )
+    .padding([20, 28])
+    .max_width(560)
+    .style(move |_theme: &Theme| container::Style {
+        background: Some(Background::Color(tokens.bg_raised)),
+        border: Border {
+            color: tokens.accent_primary,
+            width: 2.0,
+            radius: 8.0.into(),
+        },
+        ..container::Style::default()
+    });
+    container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(iced::Color { a: 0.55, ..tokens.bg_app })),
+            ..container::Style::default()
+        })
+        .into()
+}
+
 pub(super) fn open_banner<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let line = |label: String, color| {
         text(label)

@@ -128,6 +128,8 @@ pub(crate) struct GitApp {
     workspace_path: Option<String>,
     /// Putting back the tabs this repository had open at the last launch.
     tab_restore: TabRestore,
+    /// When the work that holds the window began: see [`Self::holding_label`].
+    pub(crate) held_since: Option<std::time::Instant>,
     /// Right-click menu over a commit or local branch.
     pub(crate) context_menu: Option<crate::context_menu::ContextMenuState>,
     /// Commit id waiting for detach confirmation when the worktree is dirty.
@@ -637,6 +639,9 @@ enum TabRestore {
     Done,
 }
 
+/// Work shorter than this never shows the loading card.
+const HOLD_CARD_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
 struct ParkedWorkspace {
     /// [`core_domain::repository_key`] of its first tab's folder.
     key: String,
@@ -814,6 +819,7 @@ impl GitApp {
             worktree_opening: None,
             workspace_path,
             tab_restore,
+            held_since: None,
             context_menu: None,
             confirm_detach: None,
             tip_hover: None,
@@ -1305,6 +1311,11 @@ impl GitApp {
         };
         let handled = self.handle(message);
         let remembered = self.remember_open_tabs();
+        if self.holding_label().is_none() {
+            self.held_since = None;
+        } else if self.held_since.is_none() {
+            self.held_since = Some(std::time::Instant::now());
+        }
         let loaded = self.load_activity_once();
         let restored = if std::mem::take(&mut self.scroll_restore) {
             self.restore_scroll()
@@ -4338,6 +4349,32 @@ impl GitApp {
         None
     }
 
+    /// The work the window must not be disturbed during, in words: opening a repository or a
+    /// worktree, putting tabs back, and anything the tab in front is running or reading.
+    /// Background tabs and older history streaming in never hold the window.
+    pub(crate) fn holding_label(&self) -> Option<String> {
+        let held = self.opening
+            || self.open_progress.is_some()
+            || self.worktree_opening.is_some()
+            || matches!(self.tab_restore, TabRestore::Opening { .. })
+            || self.active_session().is_some_and(|session| session.state.loading);
+        if !held {
+            return None;
+        }
+        Some(self.busy_label().unwrap_or_else(|| "Working…".to_string()))
+    }
+
+    /// The loading card's text and how long the work has run, once it has run long enough to
+    /// be worth covering the window for. A refresh that lands at once never flashes a card.
+    pub(crate) fn loading_card(&self) -> Option<(String, u64)> {
+        let since = self.held_since?;
+        let elapsed = since.elapsed();
+        if elapsed < HOLD_CARD_AFTER {
+            return None;
+        }
+        Some((self.holding_label()?, elapsed.as_secs()))
+    }
+
     /// Label for the status strip: the work in flight, or "Ready".
     pub(crate) fn activity_label(&self) -> String {
         self.busy_label().unwrap_or_else(|| "Ready".to_string())
@@ -4937,7 +4974,12 @@ impl GitApp {
             );
         }
         // Keep the running time counting and let a finished result fade out of the status bar.
-        if self.activity.running().is_some()
+        if self.held_since.is_some() {
+            // Held: tick often enough for the loading card to appear on time and count.
+            subscriptions.push(
+                iced::time::every(iced::time::Duration::from_millis(150)).map(|_| Message::ActivityTick),
+            );
+        } else if self.activity.running().is_some()
             || self.activity.recent_result().is_some()
             || self.open_progress.is_some()
         {
@@ -7365,6 +7407,32 @@ mod tests {
         assert_eq!(app.history_scroll, 40_000.0);
         assert_eq!(app.history_viewport, 600.0);
         assert_eq!(app.sessions[0].history_offset, 40_000.0);
+    }
+
+    #[test]
+    fn the_window_is_held_for_the_tab_in_front_and_never_for_a_background_one() {
+        let mut app = two_session_app();
+        assert_eq!(app.holding_label(), None);
+
+        app.sessions[1].state.loading = true;
+        let _ = app.update(Message::ActivityTick);
+        assert_eq!(app.holding_label(), None, "a background tab loading leaves the window free");
+        assert!(app.held_since.is_none());
+
+        app.sessions[0].history_more_pending = true;
+        assert_eq!(app.holding_label(), None, "older history streaming in leaves the window free");
+
+        app.sessions[0].state.loading = true;
+        let _ = app.update(Message::ActivityTick);
+        assert_eq!(app.holding_label().as_deref(), Some("Loading first…"));
+        assert!(app.loading_card().is_none(), "work that has only just begun shows no card");
+
+        app.held_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        assert_eq!(app.loading_card(), Some(("Loading first…".to_string(), 2)));
+
+        app.sessions[0].state.loading = false;
+        let _ = app.update(Message::ActivityTick);
+        assert!(app.held_since.is_none() && app.loading_card().is_none());
     }
 
     #[test]

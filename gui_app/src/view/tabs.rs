@@ -11,7 +11,8 @@ use crate::worktree_ink::WorktreeInks;
 use core_domain::Worktree;
 use iced::widget::button::Status;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, horizontal_space, row, scrollable, text, tooltip};
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::{button, column, container, row, scrollable, text, tooltip};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 use super::chrome::{glyph, hairline, Reading};
@@ -33,7 +34,12 @@ pub(super) fn tab_strip<'a>(
 
     // Full-width chrome bar; tabs stay content-sized chips on the left, and what the window
     // is working on is named on the right, where it never moves the tabs or the panes.
-    let mut top = row![strip, horizontal_space()].align_y(Alignment::Center).spacing(12);
+    // More tabs than fit scroll sideways. Squeezed instead, a tab wrapped its name one letter
+    // per line, and that height took the whole window from the workspace.
+    let tabs = scrollable(strip)
+        .direction(Direction::Horizontal(Scrollbar::new().width(4).scroller_width(4).spacing(2)))
+        .width(Length::Fill);
+    let mut top = row![tabs].align_y(Alignment::Center).spacing(12);
     if let Some(label) = app.busy_label() {
         top = top.push(busy_chip(label, tokens, reading));
     }

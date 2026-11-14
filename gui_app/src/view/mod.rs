@@ -124,6 +124,9 @@ impl GitApp {
             overlay
         } else if let Some(overlay) = context_menu_overlay(self, tokens, reading) {
             overlay
+        } else if let Some((label, seconds)) = self.loading_card() {
+            // Covers the window and takes every click until the work lands.
+            opaque(opening::loading_cover(label, seconds, tokens, reading))
         } else {
             Space::new(Length::Shrink, Length::Shrink).into()
         };
