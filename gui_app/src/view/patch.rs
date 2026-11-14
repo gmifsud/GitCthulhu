@@ -11,7 +11,7 @@ use core_domain::{DiffLineKind, FileDisposition, Patch};
 use iced::widget::{canvas, column, container, horizontal_space, row, scrollable, stack, text, Space};
 
 use super::diff_overlay::{Columns, DiffOverlay};
-use crate::diff_select::Pane;
+use crate::diff_select::{Pane, Surface};
 
 /// Measured to find how wide one character of the diff's font is.
 const CHAR_SAMPLE: &str = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM";
@@ -64,25 +64,7 @@ pub(super) fn patch_pane<'a>(
             .padding([6, 8]),
         );
     }
-    // The layer that makes the rows read like a read-only editor: selection, caret, copy.
-    let columns = Columns {
-        split: app.diff_split,
-        gutter: if app.diff_split { LINE_NO_WIDTH } else { LINE_NO_WIDTH * 2.0 + MARK_WIDTH },
-        divider: DIVIDER_WIDTH,
-    };
-    let mode = |pane: Pane| (pane == Pane::Unified) != app.diff_split;
-    let overlay = DiffOverlay {
-        tops: crate::diff_select::tops(layout),
-        text_rows: layout.lines.iter().map(|line| matches!(line, Line::Split { .. } | Line::Unified { .. })).collect(),
-        columns,
-        char_width: crate::text_measure::width(CHAR_SAMPLE, reading.mono, reading.size) / CHAR_SAMPLE.len() as f32,
-        // A selection made in the other mode names columns this one does not have.
-        selection: session.diff_selection.filter(|held| mode(held.pane)),
-        focused: app.diff_focused,
-        page: app.diff_page(),
-        tokens,
-    };
-    let body = stack![body, canvas(overlay).width(Length::Fill).height(Length::Fill)];
+    let body = selectable(body, layout, Surface::Pane, session.diff_selection, app, tokens, reading);
     // Vertical only: iced panics if content fills the horizontal axis of a horizontally
     // scrolling scrollable. Long lines clip at the edge of their column.
     scrollable(body)
@@ -94,6 +76,38 @@ pub(super) fn patch_pane<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// `rows` with the layer over them that makes a diff read like a read-only editor: selection,
+/// caret and copy. `surface` says which diff it is, so each keeps its own selection.
+pub(super) fn selectable<'a>(
+    rows: iced::widget::Column<'a, Message>,
+    layout: &diff_view::Layout,
+    surface: Surface,
+    selection: Option<crate::diff_select::DiffSelection>,
+    app: &GitApp,
+    tokens: DesignTokens,
+    reading: Reading,
+) -> Element<'a, Message> {
+    let columns = Columns {
+        split: app.diff_split,
+        gutter: if app.diff_split { LINE_NO_WIDTH } else { LINE_NO_WIDTH * 2.0 + MARK_WIDTH },
+        divider: DIVIDER_WIDTH,
+    };
+    let mode = |pane: Pane| (pane == Pane::Unified) != app.diff_split;
+    let overlay = DiffOverlay {
+        surface,
+        tops: crate::diff_select::tops(layout),
+        text_rows: layout.lines.iter().map(|line| matches!(line, Line::Split { .. } | Line::Unified { .. })).collect(),
+        columns,
+        char_width: crate::text_measure::width(CHAR_SAMPLE, reading.mono, reading.size) / CHAR_SAMPLE.len() as f32,
+        // A selection made in the other mode names columns this one does not have.
+        selection: selection.filter(|held| mode(held.pane)),
+        focused: app.diff_focus == Some(surface),
+        page: app.diff_page(surface),
+        tokens,
+    };
+    stack![rows, canvas(overlay).width(Length::Fill).height(Length::Fill)].into()
 }
 
 /// The rows of a laid-out diff. `hunk_place` adds Stage / Discard hunk buttons for a

@@ -9,12 +9,13 @@ use crate::theme::DesignTokens;
 use core_domain::ConflictSide;
 use iced::overlay::menu;
 use iced::widget::{button, column, combo_box, container, horizontal_space, row, scrollable, text, text_input, tooltip, Space};
+
+use crate::diff_select::Surface;
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
 use super::chrome::{accent_button, command_button, field_style, glyph, labelled_button, Reading};
 
 /// Lines drawn before "show more" would be needed. Compare has no paging, so draw plenty.
-const LINE_BUDGET: usize = 50_000;
 const SIDE_WIDTH_LABEL: f32 = 44.0;
 
 pub(super) fn compare_window<'a>(
@@ -341,8 +342,17 @@ fn body<'a>(app: &'a GitApp, state: &'a CompareState, tokens: DesignTokens, read
     if patch.hunks.is_empty() {
         return note("No differences: both sides are the same.".to_string());
     }
-    let layout = crate::diff_view::layout(std::slice::from_ref(patch), None, LINE_BUDGET, app.diff_split);
-    container(scrollable(super::patch::diff_rows(&layout, None, false, tokens, reading)).height(Length::Fill))
+    let layout = crate::diff_view::layout(std::slice::from_ref(patch), None, crate::compare::LINE_BUDGET, app.diff_split);
+    let rows = super::patch::diff_rows(&layout, None, false, tokens, reading);
+    let body = super::patch::selectable(rows, &layout, Surface::Compare, state.selection, app, tokens, reading);
+    let list = scrollable(body)
+        .id(scrollable::Id::new(crate::app::COMPARE_DIFF_SCROLL_ID))
+        .on_scroll(|viewport| Message::CompareDiffScrolled {
+            offset: viewport.absolute_offset().y,
+            height: viewport.bounds().height,
+        })
+        .height(Length::Fill);
+    container(list)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_theme: &Theme| container::Style {

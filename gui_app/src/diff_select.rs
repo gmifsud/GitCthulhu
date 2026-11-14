@@ -7,6 +7,13 @@
 
 use crate::diff_view::{Cell, Layout, Line, Side};
 
+/// Which diff a selection is in: the Diff pane, or the Compare window's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Surface {
+    Pane,
+    Compare,
+}
+
 /// Which column of text a position is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pane {

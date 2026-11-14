@@ -13,7 +13,7 @@ use iced::widget::canvas::{self, event, Event};
 use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::Message;
-use crate::diff_select::{line_at, DiffKey, DiffSelection, Grain, Motion, Pane, Pos};
+use crate::diff_select::{line_at, DiffKey, DiffSelection, Grain, Motion, Pane, Pos, Surface};
 use crate::diff_view::ROW_HEIGHT;
 use crate::theme::DesignTokens;
 
@@ -65,6 +65,8 @@ impl Columns {
 
 /// The overlay for one frame.
 pub(crate) struct DiffOverlay {
+    /// Which diff this layer is over.
+    pub surface: Surface,
     /// `tops[i]..tops[i + 1]` is line `i` ([`crate::diff_select::tops`]).
     pub tops: Vec<f32>,
     /// Whether each line is a row of text (not a file, hunk or note row).
@@ -143,7 +145,7 @@ impl canvas::Program<Message> for DiffOverlay {
                 let Some((pane, pos)) = hit else {
                     // A press anywhere else takes the caret away from the diff.
                     state.dragging = false;
-                    return (event::Status::Ignored, self.focused.then_some(Message::DiffBlur));
+                    return (event::Status::Ignored, self.focused.then_some(Message::DiffBlur(self.surface)));
                 };
                 let now = Instant::now();
                 let repeat = state
@@ -157,7 +159,7 @@ impl canvas::Program<Message> for DiffOverlay {
                     3 => Grain::Line,
                     _ => Grain::Caret,
                 };
-                (event::Status::Ignored, Some(Message::DiffPress { pane, pos, grain }))
+                (event::Status::Ignored, Some(Message::DiffPress { surface: self.surface, pane, pos, grain }))
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
                 let (Some(held), Some(at)) = (self.selection, cursor.position()) else {
@@ -165,7 +167,7 @@ impl canvas::Program<Message> for DiffOverlay {
                 };
                 let at = Point::new(at.x - bounds.x, at.y - bounds.y);
                 let pos = self.drag_target(at, bounds.width, held.pane);
-                (event::Status::Ignored, Some(Message::DiffDrag(pos)))
+                (event::Status::Ignored, Some(Message::DiffDrag { surface: self.surface, pos }))
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 state.dragging = false;
@@ -264,6 +266,7 @@ mod tests {
 
     fn overlay() -> DiffOverlay {
         DiffOverlay {
+            surface: Surface::Pane,
             tops: vec![0.0, 26.0, 50.0, 70.0, 90.0],
             text_rows: vec![false, false, true, true],
             columns: SPLIT,

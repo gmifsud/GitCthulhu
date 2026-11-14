@@ -48,7 +48,7 @@ pub(crate) enum MergeTool {
 }
 
 /// The open Compare window.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompareState {
     /// The tab it was opened from; results for another tab are dropped.
     pub session_path: String,
@@ -63,7 +63,15 @@ pub(crate) struct CompareState {
     pub result: Option<Result<Patch, String>>,
     /// The tool "Open in …" launches for a conflicted file.
     pub merge_tool: MergeTool,
+    /// Text selected in the diff, or its bare caret. Dropped whenever a new result lands.
+    pub selection: Option<crate::diff_select::DiffSelection>,
+    /// Where the diff is scrolled to and how tall it is, for keeping the caret in view.
+    pub offset: f32,
+    pub viewport: f32,
 }
+
+/// Most diff lines the Compare window draws.
+pub(crate) const LINE_BUDGET: usize = 50_000;
 
 impl CompareState {
     /// A conflicted file opens on yours against theirs; anything else on HEAD against the disk.
@@ -87,6 +95,9 @@ impl CompareState {
             loading: false,
             result: None,
             merge_tool: MergeTool::Looking,
+            selection: None,
+            offset: 0.0,
+            viewport: 0.0,
         }
     }
 
