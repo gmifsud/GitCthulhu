@@ -67,7 +67,7 @@ public sealed partial class MergeToolWindow : Window
         Closing += OnClosing;
         Navigator.RegionChosen += id => Safely(() => GoTo(id, announce: false));
         View.ResultEdited += () => Safely(() => Update(refreshNavigator: true));
-        View.Problem += reason => Announce(FailureMessage(reason));
+        View.Problem += reason => Announce(EditFailureMessage(reason));
         Update(refreshNavigator: false);
     }
 
@@ -227,12 +227,16 @@ public sealed partial class MergeToolWindow : Window
     /// </summary>
     private Button Footer(string text, char? accessKey, WindowCommand command)
     {
-        var content = accessKey is { } key && text.IndexOf(key, StringComparison.OrdinalIgnoreCase) is var at and >= 0 ? text.Insert(at, "_") : text;
+        // macOS has no Alt access keys, and Avalonia's would fire on Option+letter, which is typing there:
+        // the exits are Cmd+Option chords from the key table instead, and the label carries no marker.
+        var style = Keymap.Current;
+        var marked = style == KeyStyle.Standard && accessKey is { } key && text.IndexOf(key, StringComparison.OrdinalIgnoreCase) is var at and >= 0;
+        var content = marked ? text.Insert(text.IndexOf(accessKey!.Value.ToString(), StringComparison.OrdinalIgnoreCase), "_") : text;
         var button = new Button { Content = content };
         AutomationProperties.SetName(button, text);
         if (accessKey is { } shortcut)
         {
-            AutomationProperties.SetAccessKey(button, $"Alt+{shortcut}");
+            AutomationProperties.SetAccessKey(button, Keymap.ExitKeyName(shortcut, style));
         }
         button.Click += (_, _) => Run(command);
         return button;

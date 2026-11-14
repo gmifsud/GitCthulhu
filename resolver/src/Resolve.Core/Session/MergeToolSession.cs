@@ -135,7 +135,9 @@ public sealed partial class MergeToolSession
             var document = ResolutionDocument.Create(plan, inputs.Base.Lines, inputs.Left.Lines, inputs.Right.Lines, options.Clock);
             return new OpenOutcome.Opened(new MergeToolSession(inputs, plan, document, options));
         }
-        catch (Exception error) when (error is GitCommandException or FormatException or IOException or UnauthorizedAccessException)
+        // ArgumentException is a planner defect on these inputs: the file cannot be opened, so it is reported
+        // like any other unreadable input (exit 3) and MERGED is never touched.
+        catch (Exception error) when (error is GitCommandException or FormatException or IOException or UnauthorizedAccessException or ArgumentException)
         {
             return new OpenOutcome.Failed(ExitCode.InputUnreadable, error.Message);
         }

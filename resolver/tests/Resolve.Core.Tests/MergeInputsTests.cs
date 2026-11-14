@@ -24,6 +24,44 @@ public sealed class MergeInputsTests
     }
 
     [Fact]
+    public async Task A_repository_reached_through_a_symlink_still_finds_its_conflict()
+    {
+        // macOS's temp folder is such a path: /var is a symlink to /private/var.
+        using var fx = await GitFixture.CreateAsync();
+        await fx.ConflictAsync(f => f.Write("seed.txt", "seed\n"), f => f.Write("a.txt", "left\n"), f => f.Write("a.txt", "right\n"));
+        var args = await MergeToolCall.WriteStageFilesAsync(fx, "a.txt");
+        var link = Path.Join(Path.GetTempPath(), "cthulhu-link-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateSymbolicLink(link, fx.Worktree);
+        }
+        catch (Exception error) when (OperatingSystem.IsWindows() && error is UnauthorizedAccessException or IOException)
+        {
+            // Windows without Developer Mode cannot make a symlink. A junction needs no permission,
+            // and git reports its target as the top level just the same.
+            using var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe")
+            {
+                ArgumentList = { "/c", "mklink", "/J", link, fx.Worktree },
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            })!;
+            await mklink.WaitForExitAsync();
+            Assert.Equal(0, mklink.ExitCode);
+        }
+        try
+        {
+            var throughLink = args with { Merged = Path.Join(link, "a.txt") };
+            var loaded = Assert.IsType<LoadOutcome.Loaded>(await MergeInputLoader.LoadAsync(fx.Git, throughLink, default)).Inputs;
+            Assert.Equal("a.txt", loaded.RelativePath?.Value);
+            Assert.Equal(BaseKind.Absent, loaded.BaseKind);
+        }
+        finally
+        {
+            Directory.Delete(link);
+        }
+    }
+
+    [Fact]
     public async Task Labels_from_the_command_line_become_details()
     {
         using var fx = await GitFixture.CreateAsync();

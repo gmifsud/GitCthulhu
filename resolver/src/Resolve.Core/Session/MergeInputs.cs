@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text;
 using Resolve.Core.Cli;
 using Resolve.Core.Git;
 using Resolve.Core.Persistence;
@@ -86,7 +87,7 @@ public static class MergeInputLoader
 
         var mergedPath = Path.GetFullPath(arguments.Merged);
         var repo = await FindRepoAsync(runner, arguments, mergedPath, ct).ConfigureAwait(false);
-        var relative = repo is null ? null : RelativeTo(repo, mergedPath);
+        var relative = repo is null ? null : await RepoPathOfAsync(runner, repo, mergedPath, ct).ConfigureAwait(false);
 
         BaseKind kind;
         if (baseText is not null)
@@ -158,11 +159,41 @@ public static class MergeInputLoader
         }
     }
 
-    private static RepoPath? RelativeTo(RepoLocation repo, string mergedPath)
+    /// <summary>
+    /// The merged file's path in the index, as git spells it, or <c>null</c> when it is not in
+    /// <paramref name="repo"/>'s worktree. Asked of git, never worked out from the two strings: git
+    /// reports its top-level folder with symlinks resolved (<c>/private/var</c> for macOS's
+    /// <c>/var</c>), so a repository reached through a symlink looked like it held no such file,
+    /// and the check that refuses a path git does not list as conflicted was skipped.
+    /// </summary>
+    private static async Task<RepoPath?> RepoPathOfAsync(IGitRunner runner, RepoLocation repo, string mergedPath, CancellationToken ct)
     {
-        var relative = Path.GetRelativePath(repo.Worktree, mergedPath).Replace('\\', '/');
-        return relative == ".." || relative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(relative)
-            ? null
-            : new RepoPath(relative);
+        var directory = Path.GetDirectoryName(mergedPath);
+        var name = Path.GetFileName(mergedPath);
+        if (string.IsNullOrEmpty(directory) || string.IsNullOrEmpty(name))
+        {
+            return null;
+        }
+        GitResult result;
+        try
+        {
+            result = await runner.RunCheckedAsync(
+                new GitInvocation(directory, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--show-prefix"]) { ReadOnly = true },
+                ct).ConfigureAwait(false);
+        }
+        catch (GitCommandException)
+        {
+            return null;
+        }
+        // "<top level>\n<prefix>\n". The prefix is empty at the top level, so empty lines are kept.
+        var lines = Encoding.UTF8.GetString(result.StandardOutput).Split('\n');
+        if (lines.Length < 2)
+        {
+            return null;
+        }
+        // Both top levels come from git, spelled the same way: the file must be in this worktree.
+        var sameWorktree = string.Equals(
+            Path.TrimEndingDirectorySeparator(lines[0]), Path.TrimEndingDirectorySeparator(repo.Worktree), StringComparison.Ordinal);
+        return sameWorktree ? new RepoPath(lines[1] + name) : null;
     }
 }

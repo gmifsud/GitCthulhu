@@ -151,6 +151,27 @@ public sealed class ThreePaneView : Grid
         ResultEdited?.Invoke();
     }
 
+    /// <summary>
+    /// Shows the document's text in RESULT again if the two have drifted apart. For the window's safety nets: a
+    /// command that failed part-way may have left RESULT behind the document, and the document is what is saved.
+    /// Never throws; if this fails too, the next edit or command tries again.
+    /// </summary>
+    internal void ShowDocument()
+    {
+        try
+        {
+            if (_result.Text != _session.Document.Text)
+            {
+                _result.Resync(_session.Document.Text);
+            }
+            Decorate();
+        }
+        catch (Exception)
+        {
+            // Called from a catch already: there is nothing further to report or to do.
+        }
+    }
+
     /// <summary>The document is the truth: show its text again, redraw what can be redrawn, and tell the user.</summary>
     private void Recover(Exception error)
     {

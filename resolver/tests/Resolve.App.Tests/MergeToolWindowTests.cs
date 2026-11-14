@@ -71,7 +71,7 @@ public class MergeToolWindowTests
         Assert.Equal(ResolutionChoice.Left, Conflict(w).Choice);
         Assert.NotEqual(typed, Result(w).Text);
 
-        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.Z, Keys.Command);
         Assert.Equal(typed, Result(w).Text);
         Assert.Equal(ResolutionChoice.Manual, Conflict(w).Choice);
         Assert.Equal("0 conflicts · 2 changes · 1 manual", w.CounterText);
@@ -236,7 +236,7 @@ public class MergeToolWindowTests
         var asked = new List<string>();
         var w = MergeWindows.Criterion1(MergeWindows.Answering(true, asked));
 
-        w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.S, Keys.Command);
 
         Assert.Single(asked);
         Assert.StartsWith("Saves exactly what RESULT shows;", asked[0], StringComparison.Ordinal);
@@ -348,12 +348,12 @@ public class MergeToolWindowTests
     {
         var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
         w.Run(WindowCommand.AcceptLeft);
-        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.Z, Keys.Command);
         Assert.Equal(ResolutionChoice.Unresolved, Conflict(w).Choice);
-        w.KeyPressQwerty(PhysicalKey.Y, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.Y, Keys.Command);
         Assert.Equal(ResolutionChoice.Left, Conflict(w).Choice);
-        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Control);
-        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Control | RawInputModifiers.Shift);
+        w.KeyPressQwerty(PhysicalKey.Z, Keys.Command);
+        w.KeyPressQwerty(PhysicalKey.Z, Keys.Command | RawInputModifiers.Shift);
         Assert.Equal(ResolutionChoice.Left, Conflict(w).Choice);
     }
 
@@ -441,7 +441,7 @@ public class MergeToolWindowTests
         var w = MergeWindows.Criterion1(MergeWindows.Answering(true, asked));
         w.Run(WindowCommand.NextConflict);
         w.Run(WindowCommand.AcceptLeft);
-        w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.S, Keys.Command);
         Assert.True(w.Session.IsSaved);
         var saved = File.ReadAllBytes(w.Session.Inputs.MergedPath);
 
@@ -460,7 +460,7 @@ public class MergeToolWindowTests
         var w = MergeWindows.Criterion1(MergeWindows.Answering(true, asked));
         w.Run(WindowCommand.NextConflict);
         w.Run(WindowCommand.AcceptLeft);
-        w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.S, Keys.Command);
         w.Run(WindowCommand.AcceptRight);
         asked.Clear();
 
@@ -551,7 +551,7 @@ public class MergeToolWindowTests
 
         using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
         {
-            w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.Control);
+            w.KeyPressQwerty(PhysicalKey.S, Keys.Command);
             Assert.StartsWith("Save failed:", Status(w), StringComparison.Ordinal);
         }
 
@@ -596,14 +596,59 @@ public class MergeToolWindowTests
         ];
         foreach (var (key, mods, command) in rows)
         {
-            Assert.Equal(command, Keymap.For(key, mods));
+            Assert.Equal(command, Keymap.For(key, mods, KeyStyle.Standard));
         }
-        Assert.Null(Keymap.For(Key.F8, KeyModifiers.Control));
-        Assert.Null(Keymap.For(Key.Left, KeyModifiers.Alt));
-        Assert.Null(Keymap.For(Key.Left, KeyModifiers.None));
-        Assert.Null(Keymap.For(Key.S, KeyModifiers.None));
-        Assert.Null(Keymap.For(Key.Enter, KeyModifiers.None));
-        Assert.Null(Keymap.For(Key.Z, KeyModifiers.None));
+        Assert.Null(Keymap.For(Key.F8, KeyModifiers.Control, KeyStyle.Standard));
+        Assert.Null(Keymap.For(Key.Left, KeyModifiers.Alt, KeyStyle.Standard));
+        Assert.Null(Keymap.For(Key.Left, KeyModifiers.None, KeyStyle.Standard));
+        Assert.Null(Keymap.For(Key.S, KeyModifiers.None, KeyStyle.Standard));
+        Assert.Null(Keymap.For(Key.Enter, KeyModifiers.None, KeyStyle.Standard));
+        Assert.Null(Keymap.For(Key.Z, KeyModifiers.None, KeyStyle.Standard));
+    }
+
+    [Fact]
+    public void On_macOS_Cmd_stands_for_Ctrl_and_Option_letters_stay_typing()
+    {
+        const KeyModifiers cmd = KeyModifiers.Meta;
+        (Key Key, KeyModifiers Mods, WindowCommand Command)[] rows =
+        [
+            (Key.F8, KeyModifiers.None, WindowCommand.NextConflict),
+            (Key.F8, KeyModifiers.Shift, WindowCommand.PreviousConflict),
+            (Key.Left, KeyModifiers.Control | KeyModifiers.Alt, WindowCommand.AcceptLeft),
+            (Key.R, KeyModifiers.Control | KeyModifiers.Alt, WindowCommand.ResetRegion),
+            (Key.Enter, cmd, WindowCommand.AcknowledgeRegion),
+            (Key.Z, cmd, WindowCommand.Undo),
+            (Key.Z, cmd | KeyModifiers.Shift, WindowCommand.Redo),
+            (Key.Y, cmd, WindowCommand.Redo),
+            (Key.S, cmd, WindowCommand.Save),
+            (Key.S, cmd | KeyModifiers.Alt, WindowCommand.SaveAndExit),
+            (Key.U, cmd | KeyModifiers.Alt, WindowCommand.ExitUnresolved),
+            (Key.C, cmd | KeyModifiers.Alt, WindowCommand.Cancel),
+        ];
+        foreach (var (key, mods, command) in rows)
+        {
+            Assert.Equal(command, Keymap.For(key, mods, KeyStyle.Mac));
+        }
+        // Option+S, Option+U and Option+C type ß, ¨ and ç: they must never end the session.
+        Assert.Null(Keymap.For(Key.S, KeyModifiers.Alt, KeyStyle.Mac));
+        Assert.Null(Keymap.For(Key.U, KeyModifiers.Alt, KeyStyle.Mac));
+        Assert.Null(Keymap.For(Key.C, KeyModifiers.Alt, KeyStyle.Mac));
+        Assert.Null(Keymap.For(Key.Z, KeyModifiers.Control, KeyStyle.Mac));   // Ctrl+Z is not Undo on macOS
+        Assert.Null(Keymap.For(Key.Left, cmd | KeyModifiers.Alt, KeyStyle.Mac));   // not a region command
+        Assert.Equal("Cmd+Option+S", Keymap.ExitKeyName('s', KeyStyle.Mac));
+        Assert.Equal("Alt+U", Keymap.ExitKeyName('U', KeyStyle.Standard));
+    }
+
+    [AvaloniaFact]
+    public void A_safety_net_puts_RESULT_back_in_line_with_the_document()
+    {
+        var w = MergeWindows.Criterion1(_ => Task.FromResult(true));
+        Result(w).Resync("drifted\n");   // as a command failing part-way might leave it
+
+        w.AnnounceFailure(new InvalidOperationException("boom."));
+
+        Assert.Equal(w.Session.Document.Text, Result(w).Text);
+        Assert.Equal("Something went wrong: boom. Your changes are still here.", Status(w));
     }
 
     private static object? Focused(MergeToolWindow window) => window.FocusManager?.GetFocusedElement();
@@ -690,7 +735,7 @@ public class MergeToolWindowTests
         Assert.True(w.Session.Document.IsComplete);
         Pane(w.View.Result).Focus();
 
-        Press(w, PhysicalKey.S, RawInputModifiers.Alt);
+        Press(w, PhysicalKey.S, Keys.Exit);
 
         Assert.Equal(ExitCode.Resolved, w.Result);
         Assert.Equal(w.Session.Document.Text, File.ReadAllText(w.Session.Inputs.MergedPath));
@@ -703,11 +748,11 @@ public class MergeToolWindowTests
         var w = MergeWindows.Criterion1(MergeWindows.Answering(false, asked));
         var before = File.ReadAllBytes(w.Session.Inputs.MergedPath);
 
-        Press(w, PhysicalKey.U, RawInputModifiers.Alt);
+        Press(w, PhysicalKey.U, Keys.Exit);
         Assert.Equal(["Saves exactly what RESULT shows; 1 region still unresolved."], asked);
         Assert.Null(w.Result);
 
-        Press(w, PhysicalKey.C, RawInputModifiers.Alt);
+        Press(w, PhysicalKey.C, Keys.Exit);
         Assert.Equal(ExitCode.Unresolved, w.Result);   // no edits, so Cancel asks nothing
         Assert.True(w.Session.IsCancelled);
         Assert.Equal(before, File.ReadAllBytes(w.Session.Inputs.MergedPath));
@@ -811,7 +856,7 @@ public class MergeToolWindowTests
         var w = MergeWindows.Criterion1(_ => throw new InvalidOperationException("boom"));
         var before = File.ReadAllBytes(w.Session.Inputs.MergedPath);
 
-        Press(w, PhysicalKey.U, RawInputModifiers.Alt);   // Exit unresolved asks first, and asking throws
+        Press(w, PhysicalKey.U, Keys.Exit);   // Exit unresolved asks first, and asking throws
 
         Assert.Equal("Something went wrong: boom. Your changes are still here.", Status(w));
         Assert.Null(w.Result);
@@ -830,7 +875,7 @@ public class MergeToolWindowTests
         Assert.True(w.Session.Document.IsComplete);
         var before = File.ReadAllBytes(w.Session.Inputs.MergedPath);
 
-        Press(w, PhysicalKey.S, RawInputModifiers.Alt);
+        Press(w, PhysicalKey.S, Keys.Exit);
 
         Assert.Null(w.Result);
         Assert.Equal("Could not write the file. Your changes are still here.", Status(w));

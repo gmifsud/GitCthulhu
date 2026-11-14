@@ -20,7 +20,17 @@ public sealed partial class MergeToolWindow
     private const string ExternalChangePrompt = "The file changed on disk since it was opened. Overwrite it?";
 
     /// <summary>Ruling R32: what the user hears when a command fails unexpectedly.</summary>
-    internal static string FailureMessage(string reason) => $"Something went wrong: {reason}. Your changes are still here.";
+    internal static string FailureMessage(string reason) => $"Something went wrong: {Sentence(reason)}. Your changes are still here.";
+
+    /// <summary>
+    /// After an edit in RESULT could not be applied: that one keystroke may be lost, so "your changes are still
+    /// here" would not be true. RESULT has been reset to the document, which is what will be saved.
+    /// </summary>
+    internal static string EditFailureMessage(string reason) =>
+        $"Something went wrong: {Sentence(reason)}. Your last edit may not have been applied: the result shows what will be saved.";
+
+    /// <summary>A reason ready to sit before a full stop: exception messages often end with one already.</summary>
+    private static string Sentence(string reason) => reason.TrimEnd().TrimEnd('.');
 
     /// <summary>
     /// Runs a command. Region commands act on the region at the RESULT caret when RESULT has focus, else on the
@@ -104,8 +114,12 @@ public sealed partial class MergeToolWindow
         }
     }
 
-    private void AnnounceFailure(Exception error) =>
+    /// <summary>A safety net caught <paramref name="error"/>: put RESULT back in line with the document, then say so.</summary>
+    internal void AnnounceFailure(Exception error)
+    {
+        View?.ShowDocument();
         Announce(FailureMessage(error.Message));
+    }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {

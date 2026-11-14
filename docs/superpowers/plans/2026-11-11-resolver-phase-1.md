@@ -681,3 +681,14 @@ Decisions the controller made while executing this plan, from the run ledger, in
 - Final: parked — Alt+S/U/C collide with macOS Option-character input (ß, ¨, ç) and could end a session while typing — Ruling: parked for Phase 1 (Windows is the primary target; content saved is always exactly the document); must be checked in the hand check and remapped before macOS use — costs an unintended session end on macOS.
 - Final: parked — an in-process planner defect (ArgumentException) exits 1 via Main's net, not 3 — Ruling: parked; never exit 0, MERGED untouched; add ArgumentException to OpenAsync's filter in a follow-up — costs a less precise exit code for an internal defect.
 - Final: parked — FailureMessage double full stop; "still here" wording after a dropped keystroke — Ruling: parked, wording only.
+
+### Parked items resolved (2026-11-14)
+
+The first push (CI run 43060472502) failed on macOS only, which exposed a real bug alongside the parked items:
+
+- **macOS conflict lookup (new, data-safety).** `MergeInputs` compared git's top level (symlinks resolved: `/private/var`) with the merged path as given (`/var`), so on any repository reached through a symlink the file was "not in the repository": the base kind fell back to `AbsentAssumed` and the refusal of a path git does not list as both-modified was skipped. The path is now asked of git (`rev-parse --show-toplevel --show-prefix` in the file's folder). A test reproduces it through a symlink, or a junction on Windows.
+- **Select-all in tests.** The gesture tests pressed Ctrl+A, which is Cmd+A on macOS; they now press the platform's command modifier.
+- **Catch-alls resync RESULT.** `AnnounceFailure` first shows the document's text in RESULT again (`ThreePaneView.ShowDocument`).
+- **macOS keys.** `Keymap` has a `KeyStyle`: on macOS Cmd stands for Ctrl and the exits are Cmd+Option+S/U/C, so Option+S/U/C stay typing; the footer shows no Alt access-key markers there. Not hand-checked on a Mac.
+- **Planner defect exit code.** `ArgumentException` from planning is reported as unreadable input (exit 3).
+- **Wording.** No doubled full stop; a failed RESULT edit says the last edit may not have been applied, instead of "your changes are still here".
