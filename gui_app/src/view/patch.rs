@@ -8,7 +8,7 @@ use crate::diff_view::{self, Cell, Line, Side, FILE_HEIGHT, HUNK_HEIGHT, NOTE_HE
 use crate::icons::Icon;
 use crate::theme::DesignTokens;
 use core_domain::{DiffLineKind, FileDisposition, Patch};
-use iced::widget::{canvas, column, container, horizontal_space, row, scrollable, stack, text, Space};
+use iced::widget::{canvas, column, container, horizontal_space, row, scrollable, stack, text, text_input, Space};
 
 use super::diff_overlay::{Columns, DiffOverlay};
 use crate::diff_select::{Pane, Surface};
@@ -67,16 +67,70 @@ pub(super) fn patch_pane<'a>(
     let body = selectable(body, layout, Surface::Pane, session.diff_selection, app, tokens, reading);
     // Vertical only: iced panics if content fills the horizontal axis of a horizontally
     // scrolling scrollable. Long lines clip at the edge of their column.
-    scrollable(body)
+    let list = scrollable(body)
         .id(scrollable::Id::new(DIFF_SCROLL_ID))
         .on_scroll(|viewport| Message::DiffViewport {
             offset: viewport.absolute_offset().y,
             height: viewport.bounds().height,
         })
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+    // Always a column of two, so the list keeps its scroll position when the bar opens.
+    let bar: Element<'a, Message> =
+        find_bar(app, Surface::Pane, tokens, reading).unwrap_or_else(|| Space::new(Length::Fill, Length::Fixed(0.0)).into());
+    column![bar, list].width(Length::Fill).height(Length::Fill).into()
 }
+
+/// The find bar over a diff: the text, "3 of 12", previous, next and close.
+pub(super) fn find_bar<'a>(app: &'a GitApp, surface: Surface, tokens: DesignTokens, reading: Reading) -> Option<Element<'a, Message>> {
+    let find = app.diff_find.as_ref().filter(|find| find.surface == surface)?;
+    let count = match (find.at, find.count) {
+        (_, 0) if find.query.is_empty() => String::new(),
+        (_, 0) => "No matches".to_string(),
+        (Some(at), count) => format!("{at} of {count}"),
+        (None, count) => format!("{count} matches"),
+    };
+    let found = find.count > 0;
+    Some(
+        container(
+            row![
+                glyph(Icon::Search, reading.size, tokens.text_muted, &reading),
+                text_input("Find in diff", &find.query)
+                    .id(text_input::Id::new(crate::app::DIFF_FIND_ID))
+                    .on_input(Message::DiffFindChanged)
+                    .on_submit(Message::DiffFindStep(true))
+                    .font(reading.font)
+                    .size(reading.size)
+                    .padding([3, 6])
+                    .width(Length::Fixed(FIND_WIDTH))
+                    .style(super::chrome::field_style(tokens)),
+                text(count)
+                    .font(reading.font)
+                    .size((reading.size - 1.0).max(11.0))
+                    .style(move |_| text::Style {
+                        color: Some(if found || find.query.is_empty() { tokens.text_muted } else { tokens.removed }),
+                    }),
+                horizontal_space(),
+                command_button("Previous", Message::DiffFindStep(false), found, tokens, reading),
+                command_button("Next", Message::DiffFindStep(true), found, tokens, reading),
+                command_button("Close", Message::DiffFindClose, true, tokens, reading),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([4, 8])
+        .width(Length::Fill)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(tokens.bg_raised)),
+            border: Border { color: tokens.border, width: 1.0, radius: 0.0.into() },
+            ..container::Style::default()
+        })
+        .into(),
+    )
+}
+
+/// Width of the find bar's text field.
+const FIND_WIDTH: f32 = 260.0;
 
 /// `rows` with the layer over them that makes a diff read like a read-only editor: selection,
 /// caret and copy. `surface` says which diff it is, so each keeps its own selection.

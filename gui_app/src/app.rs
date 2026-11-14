@@ -131,6 +131,8 @@ pub(crate) struct GitApp {
     tab_restore: TabRestore,
     /// The diff that has the caret, if one does: its keys (arrows, Ctrl+C, Ctrl+A) go to it.
     pub(crate) diff_focus: Option<crate::diff_select::Surface>,
+    /// The find bar over a diff, while it is open.
+    pub(crate) diff_find: Option<DiffFind>,
     /// Height of the Diff pane, from its last scroll. Zero until it has scrolled.
     pub(crate) diff_viewport: f32,
     /// When the work that holds the window began: see [`Self::holding_label`].
@@ -457,6 +459,11 @@ pub(crate) enum Message {
     },
     /// The pointer moved with the button held: the selection follows.
     DiffDrag { surface: crate::diff_select::Surface, pos: crate::diff_select::Pos },
+    /// What the find bar searches for changed.
+    DiffFindChanged(String),
+    /// The next match (true) or the previous one.
+    DiffFindStep(bool),
+    DiffFindClose,
     /// The Compare window's diff scrolled: where to, and how tall it is.
     CompareDiffScrolled { offset: f32, height: f32 },
     /// A key while the diff has the caret.
@@ -682,6 +689,19 @@ pub(crate) enum MergePreviewState {
 /// The Diff pane's height before its first scroll has reported the real one.
 const DIFF_VIEWPORT_GUESS: f32 = 400.0;
 
+/// The find bar over a diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiffFind {
+    pub surface: crate::diff_select::Surface,
+    pub query: String,
+    /// The match on screen, counted from one, and how many there are.
+    pub at: Option<usize>,
+    pub count: usize,
+}
+
+/// The find bar's text field.
+pub(crate) const DIFF_FIND_ID: &str = "diff-find";
+
 struct ParkedWorkspace {
     /// [`core_domain::repository_key`] of its first tab's folder.
     key: String,
@@ -861,6 +881,7 @@ impl GitApp {
             tab_restore,
             held_since: None,
             diff_focus: None,
+            diff_find: None,
             diff_viewport: 0.0,
             context_menu: None,
             confirm_detach: None,
@@ -1151,6 +1172,73 @@ impl GitApp {
         }
     }
 
+    /// Go to the next or previous match of the find bar's text, select it and bring it into
+    /// view. `restart` searches again from the start of the selection, as typing does, so the
+    /// match under the caret is kept while the text still matches there.
+    fn diff_find_step(&mut self, forward: bool, restart: bool) -> Task<Message> {
+        use crate::diff_select::{DiffSelection, Pane};
+        let Some(find) = self.diff_find.clone() else {
+            return Task::none();
+        };
+        let layout = self.diff_layout(find.surface);
+        let split = self.diff_split;
+        let Some((selection, _, _)) = self.diff_view_state(find.surface) else {
+            return Task::none();
+        };
+        // The column the caret is in; with no caret, the new side (or the single column).
+        let pane = selection.map_or(if split { Pane::Right } else { Pane::Unified }, |held| held.pane);
+        let matches = crate::diff_select::find(&layout, pane, &find.query);
+        let from = selection.map(|held| held.range().0);
+        let next = if restart {
+            // Typing keeps the match at the selection while the text still matches there.
+            from.and_then(|from| matches.iter().position(|(start, _)| *start >= from))
+                .or_else(|| crate::diff_select::next_match(&matches, None, true))
+        } else {
+            crate::diff_select::next_match(&matches, from, forward)
+        };
+        if let Some(index) = next {
+            let (start, end) = matches[index];
+            *selection = Some(DiffSelection { pane, anchor: start, caret: end });
+        }
+        if let Some(bar) = &mut self.diff_find {
+            bar.count = matches.len();
+            bar.at = next.map(|index| index + 1);
+        }
+        match next {
+            Some(index) => self.scroll_diff_to(find.surface, matches[index].0.line),
+            None => Task::none(),
+        }
+    }
+
+    /// Scroll a diff just far enough to show `line`.
+    fn scroll_diff_to(&mut self, surface: crate::diff_select::Surface, line: usize) -> Task<Message> {
+        use crate::diff_select::Surface;
+        let layout = self.diff_layout(surface);
+        let Some((_, offset, viewport)) = self.diff_view_state(surface) else {
+            return Task::none();
+        };
+        let tops = crate::diff_select::tops(&layout);
+        let (Some(top), Some(bottom)) = (tops.get(line), tops.get(line + 1)) else {
+            return Task::none();
+        };
+        let target = if *top < *offset {
+            *top
+        } else if *bottom > *offset + viewport {
+            *bottom - viewport
+        } else {
+            return Task::none();
+        };
+        *offset = target.max(0.0);
+        let id = match surface {
+            Surface::Pane => DIFF_SCROLL_ID,
+            Surface::Compare => COMPARE_DIFF_SCROLL_ID,
+        };
+        iced::widget::scrollable::scroll_to(
+            iced::widget::scrollable::Id::new(id),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: target.max(0.0) },
+        )
+    }
+
     /// Lines a Page key moves a diff's caret by: a screenful, less one line of overlap.
     pub(crate) fn diff_page(&self, surface: crate::diff_select::Surface) -> usize {
         let height = match surface {
@@ -1163,18 +1251,30 @@ impl GitApp {
 
     /// A key in the diff with the caret: copy, select all, or move the caret and keep it in view.
     fn diff_key(&mut self, key: crate::diff_select::DiffKey) -> Task<Message> {
-        use crate::diff_select::{DiffKey, Surface};
+        use crate::diff_select::DiffKey;
         let Some(surface) = self.diff_focus else {
             return Task::none();
         };
         let layout = self.diff_layout(surface);
-        let Some((selection, offset, viewport)) = self.diff_view_state(surface) else {
+        let Some((selection, _, _)) = self.diff_view_state(surface) else {
             return Task::none();
         };
         let Some(held) = *selection else {
             return Task::none();
         };
         match key {
+            DiffKey::Find => {
+                let query = self.diff_find.as_ref().filter(|find| find.surface == surface).map(|find| find.query.clone());
+                self.diff_find = Some(DiffFind { surface, query: query.unwrap_or_default(), at: None, count: 0 });
+                // The keys belong to the field now: arrows and Ctrl+C there must not move or copy in the diff.
+                // Closing the bar gives them back.
+                self.diff_focus = None;
+                return Task::batch([
+                    iced::widget::text_input::focus(iced::widget::text_input::Id::new(DIFF_FIND_ID)),
+                    iced::widget::text_input::select_all(iced::widget::text_input::Id::new(DIFF_FIND_ID)),
+                ]);
+            }
+            DiffKey::FindNext(forward) => return self.diff_find_step(forward, false),
             DiffKey::Copy if held.is_caret() => Task::none(),
             DiffKey::Copy => iced::clipboard::write(crate::diff_select::selected_text(&layout, &held)),
             DiffKey::SelectAll => {
@@ -1186,27 +1286,8 @@ impl GitApp {
             DiffKey::Move(motion, extend) => {
                 let moved = crate::diff_select::moved(&layout, held, motion, extend);
                 *selection = Some(moved);
-                // Keep the caret's line in view: scroll just far enough to show it.
-                let tops = crate::diff_select::tops(&layout);
-                let (Some(top), Some(bottom)) = (tops.get(moved.caret.line), tops.get(moved.caret.line + 1)) else {
-                    return Task::none();
-                };
-                let target = if *top < *offset {
-                    *top
-                } else if *bottom > *offset + viewport {
-                    *bottom - viewport
-                } else {
-                    return Task::none();
-                };
-                *offset = target.max(0.0);
-                let id = match surface {
-                    Surface::Pane => DIFF_SCROLL_ID,
-                    Surface::Compare => COMPARE_DIFF_SCROLL_ID,
-                };
-                iced::widget::scrollable::scroll_to(
-                    iced::widget::scrollable::Id::new(id),
-                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: target.max(0.0) },
-                )
+                // Keep the caret's line in view.
+                self.scroll_diff_to(surface, moved.caret.line)
             }
         }
     }
@@ -2564,6 +2645,24 @@ impl GitApp {
                 if let Some(compare) = &mut self.compare {
                     compare.offset = offset;
                     compare.viewport = height;
+                }
+                Task::none()
+            }
+            Message::DiffFindChanged(query) => {
+                if let Some(find) = &mut self.diff_find {
+                    find.query = query;
+                }
+                self.diff_find_step(true, true)
+            }
+            Message::DiffFindStep(forward) => {
+                // Enter steps forward, Shift+Enter back.
+                let forward = forward && !self.modifiers.shift();
+                self.diff_find_step(forward, false)
+            }
+            Message::DiffFindClose => {
+                if let Some(find) = self.diff_find.take() {
+                    // Back to the diff, with the match still selected.
+                    self.diff_focus = Some(find.surface);
                 }
                 Task::none()
             }
@@ -4448,6 +4547,9 @@ impl GitApp {
         if self.diff_focus == Some(crate::diff_select::Surface::Compare) {
             self.diff_focus = None;
         }
+        if self.diff_find.as_ref().is_some_and(|find| find.surface == crate::diff_select::Surface::Compare) {
+            self.diff_find = None;
+        }
         self.compare = None;
         self.compare_lookups = None;
     }
@@ -5244,6 +5346,9 @@ impl GitApp {
     fn handle_escape(&mut self) -> Task<Message> {
         if self.palette.take().is_some() {
             return Task::none();
+        }
+        if self.diff_find.is_some() {
+            return self.update(Message::DiffFindClose);
         }
         if self.compare.is_some() {
             self.close_compare();
@@ -7766,6 +7871,44 @@ mod tests {
 
         let _ = app.update(Message::CloseCompare);
         assert_eq!(app.diff_focus, None);
+    }
+
+    #[test]
+    fn find_selects_each_match_in_turn_and_escape_closes_the_bar() {
+        use crate::diff_select::{DiffKey, Grain, Pane, Pos, Surface};
+        let mut app = app_with_a_diff();
+        let layout = app.diff_layout(Surface::Pane);
+        let first = layout
+            .lines
+            .iter()
+            .position(|line| crate::diff_select::line_text(line, Pane::Right).is_some())
+            .expect("a text line");
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line: first, col: 0 }, grain: Grain::Caret });
+        let _ = app.update(Message::DiffKey(DiffKey::Find));
+        assert!(app.diff_find.is_some());
+        assert_eq!(app.diff_focus, None, "typing in the field never moves the diff's caret");
+
+        let _ = app.update(Message::DiffFindChanged("N".into()));
+        let shown = |app: &GitApp| {
+            let held = app.session().diff_selection.expect("a match is selected");
+            crate::diff_select::selected_text(&app.diff_layout(Surface::Pane), &held)
+        };
+        assert_eq!(shown(&app), "n", "fn main(): the first n after the caret");
+        let find = app.diff_find.clone().expect("open");
+        assert_eq!((find.at, find.count), (Some(1), 3), "the n of fn, main and new");
+
+        let _ = app.update(Message::DiffFindChanged("new_".into()));
+        assert_eq!(shown(&app), "new_");
+        let _ = app.update(Message::DiffFindStep(true));
+        assert_eq!(app.diff_find.as_ref().and_then(|find| find.at), Some(1), "one match: it wraps to itself");
+
+        let _ = app.update(Message::DiffFindChanged("nothing like it".into()));
+        assert_eq!(app.diff_find.as_ref().map(|find| (find.at, find.count)), Some((None, 0)));
+        assert_eq!(shown(&app), "new_", "no match: the last one stays selected");
+
+        let _ = app.update(Message::Escape);
+        assert!(app.diff_find.is_none());
+        assert_eq!(app.diff_focus, Some(Surface::Pane), "back to the diff");
     }
 
     #[test]

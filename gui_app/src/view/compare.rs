@@ -352,7 +352,10 @@ fn body<'a>(app: &'a GitApp, state: &'a CompareState, tokens: DesignTokens, read
             height: viewport.bounds().height,
         })
         .height(Length::Fill);
-    container(list)
+    // Always a column of two, so the list keeps its scroll position when the bar opens.
+    let bar: Element<'a, Message> = super::patch::find_bar(app, Surface::Compare, tokens, reading)
+        .unwrap_or_else(|| Space::new(Length::Fill, Length::Fixed(0.0)).into());
+    container(column![bar, list])
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_theme: &Theme| container::Style {

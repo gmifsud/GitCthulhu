@@ -67,6 +67,10 @@ pub(crate) enum Motion {
 pub(crate) enum DiffKey {
     Copy,
     SelectAll,
+    /// Ctrl+F: open the find bar.
+    Find,
+    /// F3, Shift+F3: the next or previous match.
+    FindNext(bool),
     Move(Motion, bool),
 }
 
@@ -242,6 +246,53 @@ pub(crate) fn selected_text(layout: &Layout, held: &DiffSelection) -> String {
     lines.join("\n")
 }
 
+/// Every place `needle` occurs in `pane`, in reading order, as (start, end) of each match.
+/// Case is ignored; matches never span lines. An empty needle matches nothing.
+pub(crate) fn find(layout: &Layout, pane: Pane, needle: &str) -> Vec<(Pos, Pos)> {
+    let needle: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    for (line, entry) in layout.lines.iter().enumerate() {
+        let Some(text) = line_text(entry, pane) else {
+            continue;
+        };
+        // Lowered a character at a time, keeping each one's column, so a character whose
+        // lower case is longer (İ) still reports the column the caret uses.
+        let lowered: Vec<(usize, char)> =
+            text.chars().enumerate().flat_map(|(col, c)| c.to_lowercase().map(move |low| (col, low))).collect();
+        let mut at = 0;
+        while at + needle.len() <= lowered.len() {
+            if lowered[at..at + needle.len()].iter().map(|(_, c)| *c).eq(needle.iter().copied()) {
+                let start = lowered[at].0;
+                let end = lowered[at + needle.len() - 1].0 + 1;
+                found.push((Pos { line, col: start }, Pos { line, col: end }));
+                at += needle.len();
+            } else {
+                at += 1;
+            }
+        }
+    }
+    found
+}
+
+/// The match to go to from `from`: the first that starts after it going forward, the last that
+/// starts before it going back, wrapping round at either end. `None` when there are none.
+pub(crate) fn next_match(matches: &[(Pos, Pos)], from: Option<Pos>, forward: bool) -> Option<usize> {
+    if matches.is_empty() {
+        return None;
+    }
+    let Some(from) = from else {
+        return Some(if forward { 0 } else { matches.len() - 1 });
+    };
+    if forward {
+        Some(matches.iter().position(|(start, _)| *start > from).unwrap_or(0))
+    } else {
+        Some(matches.iter().rposition(|(start, _)| *start < from).unwrap_or(matches.len() - 1))
+    }
+}
+
 /// The top of every line, and the bottom of the last: `tops[i]..tops[i + 1]` is line `i`.
 pub(crate) fn tops(layout: &Layout) -> Vec<f32> {
     let mut tops = Vec::with_capacity(layout.lines.len() + 1);
@@ -398,6 +449,31 @@ mod tests {
         };
         let all = select_all(&layout, Pane::Unified).expect("text");
         assert_eq!(selected_text(&layout, &all), "old\nnew");
+    }
+
+    #[test]
+    fn find_ignores_case_stays_in_its_column_and_never_spans_lines() {
+        let layout = split();
+        let right = find(&layout, Pane::Right, "CALL");
+        assert_eq!(right, vec![(at(3, 8), at(3, 12))], "new_call(1) on the new side only");
+        let left = find(&layout, Pane::Left, "call");
+        assert_eq!(left, vec![(at(3, 8), at(3, 12))], "old_call() on the old side");
+        assert_eq!(find(&layout, Pane::Left, "extra"), vec![], "the filler holds no text");
+        assert_eq!(find(&layout, Pane::Right, "{\n"), vec![]);
+        assert_eq!(find(&layout, Pane::Right, ""), vec![]);
+        assert_eq!(find(&layout, Pane::Right, "()").len(), 2, "main() and extra()");
+    }
+
+    #[test]
+    fn the_next_match_wraps_round_both_ways() {
+        let matches = vec![(at(2, 0), at(2, 1)), (at(3, 4), at(3, 5)), (at(6, 0), at(6, 1))];
+        assert_eq!(next_match(&matches, None, true), Some(0));
+        assert_eq!(next_match(&matches, None, false), Some(2));
+        assert_eq!(next_match(&matches, Some(at(2, 0)), true), Some(1), "after the one the caret is on");
+        assert_eq!(next_match(&matches, Some(at(6, 0)), true), Some(0), "past the last: the first");
+        assert_eq!(next_match(&matches, Some(at(3, 4)), false), Some(0));
+        assert_eq!(next_match(&matches, Some(at(2, 0)), false), Some(2), "before the first: the last");
+        assert_eq!(next_match(&[], None, true), None);
     }
 
     #[test]

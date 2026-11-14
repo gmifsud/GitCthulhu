@@ -113,6 +113,8 @@ impl DiffOverlay {
         let motion = match key {
             Key::Character(c) if command && c.as_str().eq_ignore_ascii_case("c") => return Some(DiffKey::Copy),
             Key::Character(c) if command && c.as_str().eq_ignore_ascii_case("a") => return Some(DiffKey::SelectAll),
+            Key::Character(c) if command && c.as_str().eq_ignore_ascii_case("f") => return Some(DiffKey::Find),
+            Key::Named(Named::F3) => return Some(DiffKey::FindNext(!shift)),
             Key::Named(Named::ArrowLeft) => Motion::Left,
             Key::Named(Named::ArrowRight) => Motion::Right,
             Key::Named(Named::ArrowUp) => Motion::Up,
@@ -300,6 +302,8 @@ mod tests {
         let ctrl = keyboard::Modifiers::COMMAND;
         assert_eq!(overlay.key(&Key::Character("c".into()), ctrl), Some(DiffKey::Copy));
         assert_eq!(overlay.key(&Key::Character("A".into()), ctrl), Some(DiffKey::SelectAll));
+        assert_eq!(overlay.key(&Key::Character("f".into()), ctrl), Some(DiffKey::Find));
+        assert_eq!(overlay.key(&Key::Named(Named::F3), keyboard::Modifiers::SHIFT), Some(DiffKey::FindNext(false)));
         assert_eq!(overlay.key(&Key::Character("c".into()), none), None, "typing does nothing: read-only");
         assert_eq!(overlay.key(&Key::Named(Named::ArrowDown), keyboard::Modifiers::SHIFT), Some(DiffKey::Move(Motion::Down, true)));
         assert_eq!(overlay.key(&Key::Named(Named::End), ctrl), Some(DiffKey::Move(Motion::Bottom, false)));
