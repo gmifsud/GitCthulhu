@@ -183,6 +183,8 @@ pub(crate) struct WorktreeSession {
     pub(crate) diff_offset: f32,
     /// The text selected in the Diff pane, or its bare caret.
     pub(crate) diff_selection: Option<crate::diff_select::DiffSelection>,
+    /// How far the Diff pane's text is scrolled sideways, in characters, and how many fit.
+    pub(crate) diff_columns: crate::diff_select::Columns,
     /// Put the Diff pane back at `diff_offset` once the diff loads (after a return to this tab).
     pub(crate) diff_restore_pending: bool,
 }
@@ -229,6 +231,7 @@ impl WorktreeSession {
             history_layout: std::cell::RefCell::new(HistoryLayout::default()),
             diff_offset: 0.0,
             diff_selection: None,
+            diff_columns: Default::default(),
             diff_restore_pending: false,
         }
     }

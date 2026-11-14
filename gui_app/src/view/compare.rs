@@ -343,7 +343,7 @@ fn body<'a>(app: &'a GitApp, state: &'a CompareState, tokens: DesignTokens, read
         return note("No differences: both sides are the same.".to_string());
     }
     let layout = crate::diff_view::layout(std::slice::from_ref(patch), None, crate::compare::LINE_BUDGET, app.diff_split);
-    let rows = super::patch::diff_rows(&layout, None, false, tokens, reading);
+    let rows = super::patch::diff_rows(&layout, None, false, state.columns.first, tokens, reading);
     let body = super::patch::selectable(rows, &layout, Surface::Compare, state.selection, app, tokens, reading);
     let list = scrollable(body)
         .id(scrollable::Id::new(crate::app::COMPARE_DIFF_SCROLL_ID))

@@ -133,6 +133,8 @@ pub(crate) struct GitApp {
     pub(crate) diff_focus: Option<crate::diff_select::Surface>,
     /// The find bar over a diff, while it is open.
     pub(crate) diff_find: Option<DiffFind>,
+    /// A drag is held at a diff's top (false) or bottom (true) edge: keep scrolling that way.
+    pub(crate) diff_autoscroll: Option<(crate::diff_select::Surface, bool)>,
     /// Height of the Diff pane, from its last scroll. Zero until it has scrolled.
     pub(crate) diff_viewport: f32,
     /// When the work that holds the window began: see [`Self::holding_label`].
@@ -456,9 +458,16 @@ pub(crate) enum Message {
         pane: crate::diff_select::Pane,
         pos: crate::diff_select::Pos,
         grain: crate::diff_select::Grain,
+        /// Characters that fit across a column, as measured by the press.
+        visible: usize,
     },
-    /// The pointer moved with the button held: the selection follows.
-    DiffDrag { surface: crate::diff_select::Surface, pos: crate::diff_select::Pos },
+    /// The pointer moved with the button held: the selection follows. `y` is the pointer's
+    /// height in the list, to tell when it is at the top or bottom edge.
+    DiffDrag { surface: crate::diff_select::Surface, pos: crate::diff_select::Pos, y: f32 },
+    /// A drag is held at an edge: scroll one line further and take it into the selection.
+    DiffAutoscroll,
+    /// Scroll a diff's text sideways by this many characters.
+    DiffScrollX { surface: crate::diff_select::Surface, by: i32 },
     /// What the find bar searches for changed.
     DiffFindChanged(String),
     /// The next match (true) or the previous one.
@@ -699,6 +708,11 @@ pub(crate) struct DiffFind {
     pub count: usize,
 }
 
+/// How close to a diff's top or bottom edge a drag starts it scrolling.
+const AUTOSCROLL_EDGE: f32 = 6.0;
+/// How often a drag held at an edge scrolls one more line.
+const AUTOSCROLL_EVERY_MS: u64 = 50;
+
 /// The find bar's text field.
 pub(crate) const DIFF_FIND_ID: &str = "diff-find";
 
@@ -882,6 +896,7 @@ impl GitApp {
             held_since: None,
             diff_focus: None,
             diff_find: None,
+            diff_autoscroll: None,
             diff_viewport: 0.0,
             context_menu: None,
             confirm_detach: None,
@@ -1205,7 +1220,7 @@ impl GitApp {
             bar.at = next.map(|index| index + 1);
         }
         match next {
-            Some(index) => self.scroll_diff_to(find.surface, matches[index].0.line),
+            Some(index) => self.follow_caret(find.surface, matches[index].1),
             None => Task::none(),
         }
     }
@@ -1237,6 +1252,29 @@ impl GitApp {
             iced::widget::scrollable::Id::new(id),
             iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: target.max(0.0) },
         )
+    }
+
+    /// How far a diff's text is scrolled sideways.
+    pub(crate) fn diff_columns(&self, surface: crate::diff_select::Surface) -> crate::diff_select::Columns {
+        match surface {
+            crate::diff_select::Surface::Pane => self.active_session().map(|session| session.diff_columns).unwrap_or_default(),
+            crate::diff_select::Surface::Compare => self.compare.as_ref().map(|compare| compare.columns).unwrap_or_default(),
+        }
+    }
+
+    fn diff_columns_mut(&mut self, surface: crate::diff_select::Surface) -> Option<&mut crate::diff_select::Columns> {
+        match surface {
+            crate::diff_select::Surface::Pane => self.active_session_mut().map(|session| &mut session.diff_columns),
+            crate::diff_select::Surface::Compare => self.compare.as_mut().map(|compare| &mut compare.columns),
+        }
+    }
+
+    /// Bring a diff's caret into view: down or up to its line, and sideways to its column.
+    fn follow_caret(&mut self, surface: crate::diff_select::Surface, caret: crate::diff_select::Pos) -> Task<Message> {
+        if let Some(columns) = self.diff_columns_mut(surface) {
+            *columns = columns.following(caret.col);
+        }
+        self.scroll_diff_to(surface, caret.line)
     }
 
     /// Lines a Page key moves a diff's caret by: a screenful, less one line of overlap.
@@ -1286,8 +1324,7 @@ impl GitApp {
             DiffKey::Move(motion, extend) => {
                 let moved = crate::diff_select::moved(&layout, held, motion, extend);
                 *selection = Some(moved);
-                // Keep the caret's line in view.
-                self.scroll_diff_to(surface, moved.caret.line)
+                self.follow_caret(surface, moved.caret)
             }
         }
     }
@@ -2407,6 +2444,7 @@ impl GitApp {
             }
             Message::PointerReleased => {
                 self.terminal_drag = None;
+                self.diff_autoscroll = None;
                 match self.repository_drag.take() {
                     Some(drag) => self.drop_repository(drag),
                     None => Task::none(),
@@ -2577,6 +2615,7 @@ impl GitApp {
                         compare.result = Some(result.map_err(|error| error_message(&error)));
                         // Another diff: the old selection points at lines that are gone.
                         compare.selection = None;
+                        compare.columns.first = 0;
                     }
                 }
                 Task::none()
@@ -2622,8 +2661,11 @@ impl GitApp {
                 self.diff_viewport = height;
                 self.handle(Message::DiffScrolled(offset))
             }
-            Message::DiffPress { surface, pane, pos, grain } => {
+            Message::DiffPress { surface, pane, pos, grain, visible } => {
                 let extend = self.modifiers.shift();
+                if let Some(columns) = self.diff_columns_mut(surface) {
+                    columns.visible = visible;
+                }
                 let layout = self.diff_layout(surface);
                 let Some((selection, _, _)) = self.diff_view_state(surface) else {
                     return Task::none();
@@ -2634,10 +2676,50 @@ impl GitApp {
                 }
                 Task::none()
             }
-            Message::DiffDrag { surface, pos } => {
+            Message::DiffDrag { surface, pos, y } => {
                 let layout = self.diff_layout(surface);
-                if let Some((selection, _, _)) = self.diff_view_state(surface) {
-                    *selection = selection.map(|held| crate::diff_select::dragged(&layout, held, pos));
+                let Some((selection, offset, viewport)) = self.diff_view_state(surface) else {
+                    return Task::none();
+                };
+                *selection = selection.map(|held| crate::diff_select::dragged(&layout, held, pos));
+                // At the top or bottom edge the list keeps scrolling while the button is held: the
+                // pointer may leave the list, and then no more moves arrive to drive it.
+                self.diff_autoscroll = if y < *offset + AUTOSCROLL_EDGE {
+                    Some((surface, false))
+                } else if y > *offset + viewport - AUTOSCROLL_EDGE {
+                    Some((surface, true))
+                } else {
+                    None
+                };
+                Task::none()
+            }
+            Message::DiffAutoscroll => {
+                let Some((surface, down)) = self.diff_autoscroll else {
+                    return Task::none();
+                };
+                let layout = self.diff_layout(surface);
+                let Some((selection, _, _)) = self.diff_view_state(surface) else {
+                    self.diff_autoscroll = None;
+                    return Task::none();
+                };
+                let Some(held) = *selection else {
+                    self.diff_autoscroll = None;
+                    return Task::none();
+                };
+                let motion = if down { crate::diff_select::Motion::Down } else { crate::diff_select::Motion::Up };
+                let moved = crate::diff_select::moved(&layout, held, motion, true);
+                if moved == held {
+                    // At the first or last line: nothing more to scroll to.
+                    self.diff_autoscroll = None;
+                    return Task::none();
+                }
+                *selection = Some(moved);
+                self.scroll_diff_to(surface, moved.caret.line)
+            }
+            Message::DiffScrollX { surface, by } => {
+                let longest = crate::diff_select::longest_line(&self.diff_layout(surface));
+                if let Some(columns) = self.diff_columns_mut(surface) {
+                    *columns = columns.scrolled(by, longest);
                 }
                 Task::none()
             }
@@ -2780,6 +2862,7 @@ impl GitApp {
                         session.patches = patches;
                         // Another diff: the old selection points at lines that are gone.
                         session.diff_selection = None;
+                        session.diff_columns.first = 0;
                         session.patch_error = None;
                         if !restoring {
                             session.diff_change = None;
@@ -5319,6 +5402,11 @@ impl GitApp {
             );
         }
         // Keep the running time counting and let a finished result fade out of the status bar.
+        if self.diff_autoscroll.is_some() {
+            subscriptions.push(
+                iced::time::every(iced::time::Duration::from_millis(AUTOSCROLL_EVERY_MS)).map(|_| Message::DiffAutoscroll),
+            );
+        }
         if self.held_since.is_some() {
             // Held: tick often enough for the loading card to appear on time and count.
             subscriptions.push(
@@ -7819,9 +7907,9 @@ mod tests {
         let _ = app.update(Message::DiffKey(DiffKey::SelectAll));
         assert!(app.session().diff_selection.is_none());
 
-        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line: first, col: 3 }, grain: Grain::Caret });
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line: first, col: 3 }, grain: Grain::Caret, visible: 40 });
         assert_eq!(app.diff_focus, Some(Surface::Pane));
-        let _ = app.update(Message::DiffDrag { surface: Surface::Pane, pos: Pos { line: first + 1, col: 99 } });
+        let _ = app.update(Message::DiffDrag { surface: Surface::Pane, pos: Pos { line: first + 1, col: 99 }, y: 30.0 });
         let held = app.session().diff_selection.expect("selected");
         assert_eq!(crate::diff_select::selected_text(&layout, &held), "main() {
     new_call(1);");
@@ -7846,7 +7934,7 @@ mod tests {
     fn the_compare_window_keeps_its_own_selection_and_takes_the_keys_while_open() {
         use crate::diff_select::{DiffKey, Grain, Pane, Pos, Surface};
         let mut app = app_with_a_diff();
-        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Left, pos: Pos { line: 2, col: 0 }, grain: Grain::Line });
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Left, pos: Pos { line: 2, col: 0 }, grain: Grain::Line, visible: 40 });
         let pane_selection = app.session().diff_selection;
         assert!(pane_selection.is_some());
 
@@ -7862,7 +7950,7 @@ mod tests {
             .iter()
             .position(|line| crate::diff_select::line_text(line, Pane::Right).is_some())
             .expect("a text line");
-        let _ = app.update(Message::DiffPress { surface: Surface::Compare, pane: Pane::Right, pos: Pos { line, col: 0 }, grain: Grain::Caret });
+        let _ = app.update(Message::DiffPress { surface: Surface::Compare, pane: Pane::Right, pos: Pos { line, col: 0 }, grain: Grain::Caret, visible: 40 });
         let _ = app.update(Message::DiffKey(DiffKey::SelectAll));
 
         let held = app.compare.as_ref().and_then(|compare| compare.selection).expect("selected");
@@ -7883,7 +7971,7 @@ mod tests {
             .iter()
             .position(|line| crate::diff_select::line_text(line, Pane::Right).is_some())
             .expect("a text line");
-        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line: first, col: 0 }, grain: Grain::Caret });
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line: first, col: 0 }, grain: Grain::Caret, visible: 40 });
         let _ = app.update(Message::DiffKey(DiffKey::Find));
         assert!(app.diff_find.is_some());
         assert_eq!(app.diff_focus, None, "typing in the field never moves the diff's caret");
@@ -7912,10 +8000,62 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_held_at_the_bottom_edge_keeps_scrolling_until_the_button_is_released() {
+        use crate::diff_select::{Grain, Pane, Pos, Surface};
+        let mut app = app_with_a_diff();
+        app.diff_viewport = 60.0;
+        let layout = app.diff_layout(Surface::Pane);
+        let first = layout
+            .lines
+            .iter()
+            .position(|line| crate::diff_select::line_text(line, Pane::Right).is_some())
+            .expect("a text line");
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line: first, col: 0 }, grain: Grain::Caret, visible: 40 });
+
+        let _ = app.update(Message::DiffDrag { surface: Surface::Pane, pos: Pos { line: first, col: 2 }, y: 30.0 });
+        assert_eq!(app.diff_autoscroll, None, "inside the list: no scrolling");
+        let _ = app.update(Message::DiffDrag { surface: Surface::Pane, pos: Pos { line: first, col: 2 }, y: 58.0 });
+        assert_eq!(app.diff_autoscroll, Some((Surface::Pane, true)));
+
+        let _ = app.update(Message::DiffAutoscroll);
+        let caret = app.session().diff_selection.expect("selected").caret;
+        assert_eq!(caret.line, first + 1, "one line further, into the selection");
+        let _ = app.update(Message::DiffAutoscroll);
+        let _ = app.update(Message::DiffAutoscroll);
+        assert_eq!(app.diff_autoscroll, None, "the last line: it stops by itself");
+
+        let _ = app.update(Message::DiffDrag { surface: Surface::Pane, pos: Pos { line: first, col: 2 }, y: -3.0 });
+        assert_eq!(app.diff_autoscroll, Some((Surface::Pane, false)));
+        let _ = app.update(Message::PointerReleased);
+        assert_eq!(app.diff_autoscroll, None);
+    }
+
+    #[test]
+    fn the_text_scrolls_sideways_to_keep_the_caret_in_view() {
+        use crate::diff_select::{DiffKey, Grain, Motion, Pane, Pos, Surface};
+        let mut app = app_with_a_diff();
+        let layout = app.diff_layout(Surface::Pane);
+        let line = layout
+            .lines
+            .iter()
+            .position(|line| crate::diff_select::line_text(line, Pane::Right).as_deref() == Some("    new_call(1);"))
+            .expect("the changed line");
+        // A column only ten characters wide.
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Right, pos: Pos { line, col: 0 }, grain: Grain::Caret, visible: 10 });
+        let _ = app.update(Message::DiffKey(DiffKey::Move(Motion::End, false)));
+        assert_eq!(app.session().diff_columns.first, 11, "the end of a 16-character line, four short of the edge");
+        let _ = app.update(Message::DiffKey(DiffKey::Move(Motion::Home, false)));
+        assert_eq!(app.session().diff_columns.first, 0);
+
+        let _ = app.update(Message::DiffScrollX { surface: Surface::Pane, by: 600 });
+        assert_eq!(app.session().diff_columns.first, 6, "no further than the longest line's end");
+    }
+
+    #[test]
     fn a_new_diff_drops_the_old_selection() {
         use crate::diff_select::{Grain, Pane, Pos, Surface};
         let mut app = app_with_a_diff();
-        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Left, pos: Pos { line: 2, col: 0 }, grain: Grain::Line });
+        let _ = app.update(Message::DiffPress { surface: Surface::Pane, pane: Pane::Left, pos: Pos { line: 2, col: 0 }, grain: Grain::Line, visible: 40 });
         assert!(app.session().diff_selection.is_some());
 
         let key = app.active_key();

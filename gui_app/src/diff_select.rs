@@ -14,6 +14,51 @@ pub(crate) enum Surface {
     Compare,
 }
 
+/// Sideways scrolling of a diff's text: the first character drawn, and how many fit across a
+/// column (zero until the diff has been clicked, which is when its width is first known).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Columns {
+    pub first: usize,
+    pub visible: usize,
+}
+
+/// Characters kept between the caret and either edge when the text scrolls to follow it.
+const FOLLOW_MARGIN: usize = 4;
+
+impl Columns {
+    /// Scrolled just far enough to show column `col`.
+    pub(crate) fn following(self, col: usize) -> Self {
+        let first = if col < self.first + FOLLOW_MARGIN.min(self.first) {
+            col.saturating_sub(FOLLOW_MARGIN)
+        } else if self.visible > FOLLOW_MARGIN * 2 && col + FOLLOW_MARGIN >= self.first + self.visible {
+            col + FOLLOW_MARGIN + 1 - self.visible
+        } else {
+            self.first
+        };
+        Self { first, ..self }
+    }
+
+    /// Scrolled by `by` characters (negative: back towards the start), never past the point
+    /// where the longest line, `longest` characters, ends.
+    pub(crate) fn scrolled(self, by: i32, longest: usize) -> Self {
+        let last = longest.saturating_sub(self.visible.max(1));
+        let first = (self.first as i64 + i64::from(by)).clamp(0, last as i64) as usize;
+        Self { first, ..self }
+    }
+}
+
+/// The longest text line in the diff, in characters, over every column.
+pub(crate) fn longest_line(layout: &Layout) -> usize {
+    layout
+        .lines
+        .iter()
+        .flat_map(|line| [Pane::Left, Pane::Right, Pane::Unified].map(|pane| line_text(line, pane)))
+        .flatten()
+        .map(|text| text.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Which column of text a position is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pane {
@@ -474,6 +519,24 @@ mod tests {
         assert_eq!(next_match(&matches, Some(at(3, 4)), false), Some(0));
         assert_eq!(next_match(&matches, Some(at(2, 0)), false), Some(2), "before the first: the last");
         assert_eq!(next_match(&[], None, true), None);
+    }
+
+    #[test]
+    fn sideways_scrolling_follows_the_caret_with_a_margin_and_stops_at_the_longest_line() {
+        let view = Columns { first: 0, visible: 40 };
+        assert_eq!(view.following(10), view, "in view: no scroll");
+        assert_eq!(view.following(36).first, 1, "four characters short of the edge");
+        assert_eq!(view.following(100).first, 65);
+        let far = Columns { first: 60, visible: 40 };
+        assert_eq!(far.following(62).first, 58, "back towards the start, keeping the margin");
+        assert_eq!(far.following(2).first, 0);
+        assert_eq!(Columns { first: 0, visible: 0 }.following(500).first, 0, "width not known yet: never scrolls right");
+
+        assert_eq!(view.scrolled(12, 100).first, 12);
+        assert_eq!(view.scrolled(500, 100).first, 60, "the longest line's end stays at the right edge");
+        assert_eq!(view.scrolled(-5, 100).first, 0);
+        assert_eq!(view.scrolled(5, 20).first, 0, "everything fits: nothing to scroll");
+        assert_eq!(longest_line(&split()), 16);
     }
 
     #[test]

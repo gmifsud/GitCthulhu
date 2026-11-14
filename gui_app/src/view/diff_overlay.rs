@@ -78,12 +78,30 @@ pub(crate) struct DiffOverlay {
     pub focused: bool,
     /// Lines a Page key moves by.
     pub page: usize,
+    /// The first character drawn: the text is scrolled sideways by this many.
+    pub first_col: usize,
     pub tokens: DesignTokens,
+}
+
+/// Characters one notch of the wheel moves the text sideways.
+const COLUMNS_PER_NOTCH: f32 = 6.0;
+
+/// Sideways scroll for a wheel turn: Shift turns the wheel's vertical turn sideways, and a
+/// trackpad's sideways swipe counts as it is. Positive is towards the end of the lines.
+pub(crate) fn wheel_columns(delta: mouse::ScrollDelta, shift: bool, char_width: f32) -> i32 {
+    let (x, y, per) = match delta {
+        mouse::ScrollDelta::Lines { x, y } => (x, y, COLUMNS_PER_NOTCH),
+        mouse::ScrollDelta::Pixels { x, y } => (x, y, if char_width > 0.0 { 1.0 / char_width } else { 0.0 }),
+    };
+    let across = if shift && x == 0.0 { y } else { x };
+    (-across * per).round() as i32
 }
 
 /// What the pointer is doing here.
 #[derive(Debug, Default)]
 pub(crate) struct Pointer {
+    /// Shift is held: the wheel scrolls sideways.
+    shift: bool,
     dragging: bool,
     last_press: Option<(Instant, Pos, Pane)>,
     clicks: u8,
@@ -97,14 +115,20 @@ impl DiffOverlay {
             return None;
         }
         let pane = self.columns.pane_at(at.x, width);
-        Some((pane, Pos { line, col: self.columns.col_at(pane, at.x, width, self.char_width) }))
+        Some((pane, Pos { line, col: self.first_col + self.columns.col_at(pane, at.x, width, self.char_width) }))
     }
 
     /// While dragging, the pointer may leave the text: the nearest line still counts.
     fn drag_target(&self, at: Point, width: f32, pane: Pane) -> Pos {
         let last = self.tops.len().saturating_sub(2);
         let line = if at.y < 0.0 { 0 } else { line_at(&self.tops, at.y).unwrap_or(last) };
-        Pos { line, col: self.columns.col_at(pane, at.x, width, self.char_width) }
+        Pos { line, col: self.first_col + self.columns.col_at(pane, at.x, width, self.char_width) }
+    }
+
+    /// How many characters fit across one column of text.
+    fn visible_columns(&self, width: f32) -> usize {
+        let (from, to) = self.columns.span(if self.columns.split { Pane::Left } else { Pane::Unified }, width);
+        if self.char_width > 0.0 { ((to - from) / self.char_width).floor().max(0.0) as usize } else { 0 }
     }
 
     fn key(&self, key: &Key, modifiers: keyboard::Modifiers) -> Option<DiffKey> {
@@ -161,7 +185,8 @@ impl canvas::Program<Message> for DiffOverlay {
                     3 => Grain::Line,
                     _ => Grain::Caret,
                 };
-                (event::Status::Ignored, Some(Message::DiffPress { surface: self.surface, pane, pos, grain }))
+                let visible = self.visible_columns(bounds.width);
+                (event::Status::Ignored, Some(Message::DiffPress { surface: self.surface, pane, pos, grain, visible }))
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
                 let (Some(held), Some(at)) = (self.selection, cursor.position()) else {
@@ -169,7 +194,18 @@ impl canvas::Program<Message> for DiffOverlay {
                 };
                 let at = Point::new(at.x - bounds.x, at.y - bounds.y);
                 let pos = self.drag_target(at, bounds.width, held.pane);
-                (event::Status::Ignored, Some(Message::DiffDrag { surface: self.surface, pos }))
+                (event::Status::Ignored, Some(Message::DiffDrag { surface: self.surface, pos, y: at.y }))
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                match wheel_columns(delta, state.shift, self.char_width) {
+                    // Taken here, so the list does not also scroll up or down.
+                    0 => (event::Status::Ignored, None),
+                    by => (event::Status::Captured, Some(Message::DiffScrollX { surface: self.surface, by })),
+                }
+            }
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.shift = modifiers.shift();
+                (event::Status::Ignored, None)
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 state.dragging = false;
@@ -193,7 +229,8 @@ impl canvas::Program<Message> for DiffOverlay {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         if let Some(held) = self.selection {
             let (from, to) = self.columns.span(held.pane, bounds.width);
-            let x_of = |col: usize| (from + col as f32 * self.char_width).min(to);
+            let first = self.first_col as f32;
+            let x_of = |col: usize| (from + (col as f32 - first) * self.char_width).clamp(from, to);
             let (start, end) = held.range();
             let wash = Color { a: 0.32, ..self.tokens.accent_primary };
             if !held.is_caret() {
@@ -209,7 +246,8 @@ impl canvas::Program<Message> for DiffOverlay {
                     }
                 }
             }
-            if self.focused {
+            // A caret scrolled out of view sideways is not drawn at the edge.
+            if self.focused && held.caret.col >= self.first_col {
                 if let Some(top) = self.tops.get(held.caret.line) {
                     frame.fill_rectangle(
                         Point::new(x_of(held.caret.col), *top + 2.0),
@@ -276,6 +314,7 @@ mod tests {
             selection: None,
             focused: true,
             page: 20,
+            first_col: 0,
             tokens: DesignTokens::deep_focus(),
         }
     }
@@ -286,6 +325,22 @@ mod tests {
         assert_eq!(overlay.hit(Point::new(60.0, 55.0), 801.0), Some((Pane::Left, Pos { line: 2, col: 2 })));
         assert_eq!(overlay.hit(Point::new(60.0, 30.0), 801.0), None, "a hunk row keeps its buttons");
         assert_eq!(overlay.hit(Point::new(60.0, 500.0), 801.0), None, "below the last line");
+    }
+
+    #[test]
+    fn a_press_on_text_scrolled_sideways_names_the_character_under_it() {
+        let overlay = DiffOverlay { first_col: 30, ..overlay() };
+        assert_eq!(overlay.hit(Point::new(60.0, 55.0), 801.0), Some((Pane::Left, Pos { line: 2, col: 32 })));
+        assert_eq!(overlay.visible_columns(801.0), 44, "(400 - 44) / 8");
+    }
+
+    #[test]
+    fn shift_and_the_wheel_or_a_sideways_swipe_scroll_across() {
+        use mouse::ScrollDelta::{Lines, Pixels};
+        assert_eq!(wheel_columns(Lines { x: 0.0, y: -1.0 }, true, 8.0), 6, "Shift and the wheel down: towards the end");
+        assert_eq!(wheel_columns(Lines { x: 0.0, y: 1.0 }, true, 8.0), -6);
+        assert_eq!(wheel_columns(Lines { x: 0.0, y: -1.0 }, false, 8.0), 0, "the wheel alone scrolls up and down");
+        assert_eq!(wheel_columns(Pixels { x: -40.0, y: 0.0 }, false, 8.0), 5, "a trackpad swipe, in characters");
     }
 
     #[test]

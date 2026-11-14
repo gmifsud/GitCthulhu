@@ -47,7 +47,7 @@ pub(super) fn patch_pane<'a>(
         Some(crate::selection::Selection::File { place, .. }) => Some(*place),
         _ => None,
     };
-    let mut body = diff_rows(layout, hunk_place, busy, tokens, reading);
+    let mut body = diff_rows(layout, hunk_place, busy, session.diff_columns.first, tokens, reading);
     if layout.hidden > 0 {
         body = body.push(
             container(
@@ -159,6 +159,7 @@ pub(super) fn selectable<'a>(
         selection: selection.filter(|held| mode(held.pane)),
         focused: app.diff_focus == Some(surface),
         page: app.diff_page(surface),
+        first_col: app.diff_columns(surface).first,
         tokens,
     };
     stack![rows, canvas(overlay).width(Length::Fill).height(Length::Fill)].into()
@@ -170,6 +171,7 @@ pub(super) fn diff_rows<'a>(
     layout: &diff_view::Layout,
     hunk_place: Option<FileDisposition>,
     busy: bool,
+    first_col: usize,
     tokens: DesignTokens,
     reading: Reading,
 ) -> iced::widget::Column<'a, Message> {
@@ -179,8 +181,8 @@ pub(super) fn diff_rows<'a>(
             Line::File { path } => file_row(path, tokens, reading),
             Line::Note { text } => note_row(text, NOTE_HEIGHT, tokens, reading),
             Line::Hunk { path, index, header } => hunk_row(path, *index, header, hunk_place, busy, tokens, reading),
-            Line::Split { left, right } => split_row(left, right, tokens, reading),
-            Line::Unified { old, new, kind, text } => unified_row(*old, *new, *kind, text, tokens, reading),
+            Line::Split { left, right } => split_row(left, right, first_col, tokens, reading),
+            Line::Unified { old, new, kind, text } => unified_row(*old, *new, *kind, text, first_col, tokens, reading),
         });
     }
     body
@@ -307,14 +309,31 @@ fn cell_washes(cell: Cell, tokens: DesignTokens) -> (Color, Color) {
     }
 }
 
-fn side_cell<'a>(side: &Side, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+/// The pieces of a line from character `first` on: the text scrolled sideways. The font is
+/// monospaced, so dropping characters is the same as moving the text left by their width.
+pub(crate) fn from_column(pieces: &[diff_view::Piece], first: usize) -> Vec<diff_view::Piece> {
+    let mut skip = first;
+    let mut kept = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let length = piece.text.chars().count();
+        if skip >= length {
+            skip -= length;
+            continue;
+        }
+        kept.push(diff_view::Piece { text: piece.text.chars().skip(skip).collect(), changed: piece.changed });
+        skip = 0;
+    }
+    kept
+}
+
+fn side_cell<'a>(side: &Side, first_col: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let (line_wash, word_wash) = cell_washes(side.cell, tokens);
     let ink = if side.cell == Cell::Context { tokens.text_secondary } else { tokens.text_primary };
     // One text widget per piece, not `rich_text`: iced 0.13 ignores `Wrapping::None`, and a
     // rich paragraph broke at the first highlighted span, so the fixed-height row clipped
     // everything after the change.
     let mut pieces = row![].height(Length::Fixed(ROW_HEIGHT)).align_y(Alignment::Center);
-    for piece in &side.pieces {
+    for piece in &from_column(&side.pieces, first_col) {
         let words = text(piece.text.clone())
             .font(reading.mono)
             .size(reading.size)
@@ -344,11 +363,11 @@ fn side_cell<'a>(side: &Side, tokens: DesignTokens, reading: Reading) -> Element
     .into()
 }
 
-fn split_row<'a>(left: &Side, right: &Side, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+fn split_row<'a>(left: &Side, right: &Side, first_col: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     row![
-        side_cell(left, tokens, reading),
+        side_cell(left, first_col, tokens, reading),
         container(Space::new(Length::Fixed(DIVIDER_WIDTH), Length::Fixed(ROW_HEIGHT))).style(wash(tokens.border)),
-        side_cell(right, tokens, reading),
+        side_cell(right, first_col, tokens, reading),
     ]
     .height(Length::Fixed(ROW_HEIGHT))
     .width(Length::Fill)
@@ -360,6 +379,7 @@ fn unified_row<'a>(
     new: Option<u32>,
     kind: DiffLineKind,
     value: &str,
+    first_col: usize,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
@@ -380,7 +400,7 @@ fn unified_row<'a>(
             )
             .width(Length::Fixed(MARK_WIDTH)),
             container(
-                text(value.to_string())
+                text(value.chars().skip(first_col).collect::<String>())
                     .font(reading.mono)
                     .size(reading.size)
                     .wrapping(iced::widget::text::Wrapping::None)
@@ -467,6 +487,16 @@ mod tests {
             }],
         };
         assert_eq!(patch_stats(&sample), (2, 1));
+    }
+
+    #[test]
+    fn a_line_scrolled_sideways_starts_at_its_first_column_and_keeps_its_marks() {
+        let piece = |text: &str, changed| diff_view::Piece { text: text.to_string(), changed };
+        let pieces = vec![piece("let ", false), piece("total", true), piece(" = 1;", false)];
+        assert_eq!(from_column(&pieces, 0), pieces);
+        assert_eq!(from_column(&pieces, 6), vec![piece("tal", true), piece(" = 1;", false)]);
+        assert_eq!(from_column(&pieces, 9), vec![piece(" = 1;", false)], "a piece scrolled away whole is dropped");
+        assert_eq!(from_column(&pieces, 99), vec![]);
     }
 
     #[test]

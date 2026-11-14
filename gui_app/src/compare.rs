@@ -68,6 +68,8 @@ pub(crate) struct CompareState {
     /// Where the diff is scrolled to and how tall it is, for keeping the caret in view.
     pub offset: f32,
     pub viewport: f32,
+    /// How far its text is scrolled sideways, and how many characters fit.
+    pub columns: crate::diff_select::Columns,
 }
 
 /// Most diff lines the Compare window draws.
@@ -98,6 +100,7 @@ impl CompareState {
             selection: None,
             offset: 0.0,
             viewport: 0.0,
+            columns: Default::default(),
         }
     }
 
