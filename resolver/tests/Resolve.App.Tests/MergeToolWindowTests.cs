@@ -389,10 +389,12 @@ public class MergeToolWindowTests
         var buttons = w.GetVisualDescendants().OfType<Button>().ToList();
         // A footer button's content carries its access-key marker; its accessible name is the plain label.
         var labels = buttons.Select(b => AutomationProperties.GetName(b) is { Length: > 0 } name ? name : b.Content as string).ToList();
-        Assert.Equal("_Save & exit (0)", w.SaveAndExitButton.Content);
-        Assert.Equal("Exit _unresolved (1)", w.ExitUnresolvedButton.Content);
-        Assert.Equal("_Cancel — leave file untouched (1)", w.CancelButton.Content);
-        Assert.Equal("Alt+S", AutomationProperties.GetAccessKey(w.SaveAndExitButton));
+        // macOS has no Alt access keys: no underline marker, and the exits are Cmd+Option chords.
+        var mac = Keymap.Current == KeyStyle.Mac;
+        Assert.Equal(mac ? "Save & exit (0)" : "_Save & exit (0)", w.SaveAndExitButton.Content);
+        Assert.Equal(mac ? "Exit unresolved (1)" : "Exit _unresolved (1)", w.ExitUnresolvedButton.Content);
+        Assert.Equal(mac ? "Cancel — leave file untouched (1)" : "_Cancel — leave file untouched (1)", w.CancelButton.Content);
+        Assert.Equal(mac ? "Cmd+Option+S" : "Alt+S", AutomationProperties.GetAccessKey(w.SaveAndExitButton));
         Assert.Contains("Accept LEFT · Current branch", labels);
         Assert.Contains("Accept RIGHT · Incoming branch", labels);
         Assert.Contains("Both, LEFT first", labels);
