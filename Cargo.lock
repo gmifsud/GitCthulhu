@@ -2632,6 +2632,7 @@ dependencies = [
  "iced",
  "rfd",
  "serde_json",
+ "tempfile",
  "terminal_widget",
  "test_support",
 ]

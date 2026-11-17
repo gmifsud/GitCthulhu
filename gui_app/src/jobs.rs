@@ -750,14 +750,44 @@ pub(crate) fn init_in_background(
     )
 }
 
-pub(crate) fn clone_in_background(
+/// What a clone reports while it runs: git's progress lines, then how it ended.
+#[derive(Debug, Clone)]
+pub(crate) enum CloneEvent {
+    Line(String),
+    Done(Result<String, DomainError>),
+}
+
+/// Run a clone on its own thread, streaming its progress. Setting `cancel` stops git.
+pub(crate) fn clone_stream(
     clone_repository: crate::RepositoryCloner,
-    url: String,
-    parent: String,
-) -> impl Future<Output = Result<String, DomainError>> {
+    request: core_domain::CloneRequest,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> impl iced::futures::Stream<Item = CloneEvent> {
+    let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+    thread::spawn(move || {
+        let lines = sender.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            clone_repository(&request, &mut |line| {
+                let _ = lines.unbounded_send(CloneEvent::Line(line.to_string()));
+            }, &cancel)
+        }))
+        .unwrap_or_else(|_| Err(DomainError::Unknown("the clone stopped unexpectedly".to_string())));
+        let _ = sender.unbounded_send(CloneEvent::Done(result));
+    });
+    receiver
+}
+
+/// Pick a folder, starting in `start` when it is given.
+pub(crate) fn choose_folder_in(title: &'static str, start: Option<String>) -> impl Future<Output = Option<String>> {
     in_background(
-        move || clone_repository(&url, &parent),
-        || Err(DomainError::Unknown("clone was interrupted".to_string())),
+        move || {
+            let mut dialog = rfd::FileDialog::new().set_title(title);
+            if let Some(start) = start.filter(|start| std::path::Path::new(start).is_dir()) {
+                dialog = dialog.set_directory(start);
+            }
+            dialog.pick_folder().map(|path| path.to_string_lossy().into_owned())
+        },
+        || None,
     )
 }
 

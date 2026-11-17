@@ -6,6 +6,7 @@ mod chrome;
 mod compare;
 mod repositories;
 mod files_nav;
+mod clone;
 mod commands;
 mod confirm;
 mod context_overlay;
@@ -70,7 +71,11 @@ impl GitApp {
         let reading = compact(reading(&self.settings));
 
         if self.sessions.is_empty() {
-            return welcome(self, tokens, reading);
+            let layer: Element<'_, Message> = match &self.clone_dialog {
+                Some(dialog) => opaque(clone::clone_dialog(dialog, tokens, reading)),
+                None => Space::new(Length::Shrink, Length::Shrink).into(),
+            };
+            return stack![welcome(self, tokens, reading), layer].into();
         }
         let session = self.session();
         let selection = visible_selection(
@@ -136,6 +141,9 @@ impl GitApp {
 
     /// The modal dialog that is waiting for the user, if any.
     fn dialog(&self, tokens: DesignTokens, reading: Reading) -> Option<Element<'_, Message>> {
+        if let Some(dialog) = &self.clone_dialog {
+            return Some(clone::clone_dialog(dialog, tokens, reading));
+        }
         if let Some(state) = &self.compare {
             return Some(compare::compare_window(self, state, tokens, reading));
         }

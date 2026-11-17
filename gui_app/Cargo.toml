@@ -23,4 +23,5 @@ design-export = ["dep:serde_json"]
 
 [dev-dependencies]
 test_support = { path = "../test_support" }
+tempfile = "3.10.1" # Real folders for the Clone window's tests
 

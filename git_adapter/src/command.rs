@@ -39,7 +39,7 @@ pub(crate) fn git_output(repo_path: &str, args: &[&str]) -> Result<std::process:
         .map_err(|error| DomainError::Unknown(format!("could not run {GIT_EXECUTABLE}: {error}")))
 }
 
-fn git_program(repo_path: &str, args: &[&str]) -> std::process::Command {
+pub(crate) fn git_program(repo_path: &str, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(GIT_EXECUTABLE);
     command
         .arg("-C")

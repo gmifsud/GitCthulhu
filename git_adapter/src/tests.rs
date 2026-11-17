@@ -1290,6 +1290,70 @@ fn clone_repository_copies_a_local_repository_under_the_parent() {
 }
 
 #[test]
+fn a_clone_reports_progress_and_can_name_its_folder_and_branch() {
+    let source = TestRepo::new();
+    source.commit("first", &[("a.txt", "one\n")], 0);
+    git_in(source.workdir(), &["branch", "release"]);
+    let parent = tempfile::tempdir().expect("clone parent");
+    let request = core_domain::CloneRequest {
+        url: source.workdir().to_str().expect("utf-8").to_string(),
+        parent: parent.path().to_str().expect("utf-8").to_string(),
+        name: "my copy".to_string(),
+        branch: Some("release".to_string()),
+    };
+    let mut lines = Vec::new();
+
+    let created = GitoxideAdapter::clone_with_progress(&request, &mut |line| lines.push(line.to_string()), &std::sync::atomic::AtomicBool::new(false))
+        .expect("clone");
+
+    assert!(created.ends_with("my copy"));
+    assert!(lines.iter().any(|line| line.starts_with("Cloning into")), "{lines:?}");
+    let head = std::fs::read_to_string(std::path::Path::new(&created).join(".git").join("HEAD")).expect("HEAD");
+    assert_eq!(head.trim(), "ref: refs/heads/release");
+}
+
+#[test]
+fn a_cancelled_clone_leaves_no_folder_behind() {
+    let source = TestRepo::new();
+    source.commit("first", &[("a.txt", "one\n")], 0);
+    let parent = tempfile::tempdir().expect("clone parent");
+    let request = core_domain::CloneRequest {
+        url: source.workdir().to_str().expect("utf-8").to_string(),
+        parent: parent.path().to_str().expect("utf-8").to_string(),
+        name: "copy".to_string(),
+        branch: None,
+    };
+
+    let result = GitoxideAdapter::clone_with_progress(&request, &mut |_| {}, &std::sync::atomic::AtomicBool::new(true));
+
+    assert!(matches!(&result, Err(DomainError::Unknown(message)) if message.starts_with("Clone cancelled")), "{result:?}");
+    assert!(!parent.path().join("copy").exists());
+}
+
+#[test]
+fn a_failed_clone_says_why_and_bad_names_are_refused_before_git_runs() {
+    let parent = tempfile::tempdir().expect("clone parent");
+    let mut request = core_domain::CloneRequest {
+        url: parent.path().join("no such repository").to_str().expect("utf-8").to_string(),
+        parent: parent.path().to_str().expect("utf-8").to_string(),
+        name: "copy".to_string(),
+        branch: None,
+    };
+    let none = std::sync::atomic::AtomicBool::new(false);
+    let failed = GitoxideAdapter::clone_with_progress(&request, &mut |_| {}, &none);
+    assert!(matches!(&failed, Err(DomainError::Unknown(message)) if message.contains("does not appear to be a git repository")), "{failed:?}");
+    assert!(!parent.path().join("copy").exists());
+
+    for bad in ["", "..", "-x", "a/b", r"a\b", "c:"] {
+        request.name = bad.to_string();
+        assert!(GitoxideAdapter::clone_with_progress(&request, &mut |_| {}, &none).is_err(), "{bad:?}");
+    }
+    request.name = "copy".to_string();
+    request.branch = Some("--upload-pack=evil".to_string());
+    assert!(GitoxideAdapter::clone_with_progress(&request, &mut |_| {}, &none).is_err());
+}
+
+#[test]
 fn a_stash_lists_its_commit_and_its_patch_is_the_stashed_change() {
     let fixture = TestRepo::new();
     fixture.commit("first", &[("a.txt", "one\n")], 0);

@@ -24,7 +24,7 @@ fn initialiser() -> gui_app::RepositoryInitialiser {
 }
 
 fn cloner() -> gui_app::RepositoryCloner {
-    Arc::new(GitoxideAdapter::clone_repository)
+    Arc::new(GitoxideAdapter::clone_with_progress)
 }
 
 /// Opens a linked worktree into a tab. Deliberately takes no store: a tab must never

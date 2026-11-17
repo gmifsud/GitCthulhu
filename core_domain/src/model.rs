@@ -65,6 +65,16 @@ pub struct MergePreview {
     pub conflicts: Vec<String>,
 }
 
+/// A clone to make: from `url`, into the folder `name` under `parent`, optionally checking out
+/// `branch` instead of the remote's default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneRequest {
+    pub url: String,
+    pub parent: String,
+    pub name: String,
+    pub branch: Option<String>,
+}
+
 /// One entry from `git worktree list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {

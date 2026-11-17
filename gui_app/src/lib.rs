@@ -6,6 +6,7 @@ mod app;
 mod appearance;
 mod changes;
 mod commit_graph;
+mod clone_source;
 mod compare;
 mod context_menu;
 mod history_index;
@@ -58,7 +59,13 @@ pub type WorktreeOpener =
 pub type RepositoryInitialiser = Arc<dyn Fn(&str) -> Result<(), DomainError> + Send + Sync>;
 
 /// `git clone` of a URL into a new directory under the parent. Returns that directory.
-pub type RepositoryCloner = Arc<dyn Fn(&str, &str) -> Result<String, DomainError> + Send + Sync>;
+/// Clones a repository, handing each of git's progress lines to the callback, and stops when
+/// the flag is set. Returns the new folder. Built by the composition root.
+pub type RepositoryCloner = Arc<
+    dyn Fn(&core_domain::CloneRequest, &mut dyn FnMut(&str), &std::sync::atomic::AtomicBool) -> Result<String, DomainError>
+        + Send
+        + Sync,
+>;
 
 /// Persists Appearance and the Kilo token and model. The window never sees the config store.
 /// The composition root merges those fields into the settings already on disk.

@@ -2,7 +2,7 @@ use crate::app::{GitApp, Message};
 use crate::theme::DesignTokens;
 use crate::palette::repository_name;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme};
 
 const RECENT_WIDTH: f32 = 520.0;
@@ -40,19 +40,12 @@ pub(super) fn welcome<'a>(
                 .size(reading.size),
         )
         .on_press_maybe((!app.opening).then_some(Message::ChooseInitFolder)),
-        text_input("https://…", &app.clone_url)
-            .on_input(Message::CloneUrlChanged)
-            .padding(8)
-            .width(Length::Fixed(360.0)),
         button(
-            text("Clone into folder…")
+            text("Clone Repository…")
                 .font(reading.font)
                 .size(reading.size),
         )
-        .on_press_maybe(
-            (!app.opening && !app.clone_url.trim().is_empty())
-                .then_some(Message::ChooseCloneFolder),
-        ),
+        .on_press_maybe((!app.opening).then_some(Message::OpenClone)),
     ]
     .spacing(20)
     .padding(40);

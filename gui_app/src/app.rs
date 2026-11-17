@@ -12,7 +12,7 @@ use crate::changes::{marked_paths, matching_change_paths, MarkedFile};
 use crate::context_menu::{gitignore_pattern, ContextTarget};
 use crate::jobs::{
     add_worktree_in_background, append_gitignore_in_background, branch_in_background,
-    checkout_in_background, choose_repository_folder, clone_in_background,
+    checkout_in_background, choose_repository_folder,
     discard_hunk_in_background, discard_paths_in_background,
     edit_in_background, error_message, fetch_in_background, history_in_background,
     init_in_background, list_models_in_background, load_patch_in_background,
@@ -255,7 +255,10 @@ pub(crate) struct GitApp {
     /// answer. Read off-thread while the Merge dialog is open; nothing in the repository moves.
     pub(crate) merge_preview: Option<(String, MergePreviewState)>,
     pub(crate) stash_prompt: Option<StashPrompt>,
-    pub(crate) clone_url: String,
+    /// The Clone window, while it is open.
+    pub(crate) clone_dialog: Option<CloneDialog>,
+    /// The folder the last clone went into: the next one starts there.
+    last_clone_parent: Option<String>,
     open_repository: RepositoryOpener,
     /// Opens a linked worktree into a tab without remembering it.
     open_worktree: WorktreeOpener,
@@ -523,11 +526,18 @@ pub(crate) enum Message {
     InitFolderChosen(Option<String>),
     InitRepository(String),
     InitFinished(String, Result<(), DomainError>),
-    CloneUrlChanged(String),
-    ChooseCloneFolder,
-    /// The URL is captured when the dialog opens. `None` means the dialog was cancelled.
-    CloneFolderChosen(String, Option<String>),
-    CloneFinished(Result<String, DomainError>),
+    /// Open the Clone window.
+    OpenClone,
+    CloneInputChanged(String),
+    CloneParentChanged(String),
+    CloneNameChanged(String),
+    CloneBranchChanged(String),
+    CloneBrowse,
+    CloneParentChosen(Option<String>),
+    StartClone,
+    /// Stop a running clone, or close the window when nothing runs.
+    CancelClone,
+    CloneEvent(crate::jobs::CloneEvent),
     StashPush,
     /// Open the stash dialog for these paths (empty: every tracked change).
     AskStash(Vec<String>),
@@ -715,6 +725,112 @@ const AUTOSCROLL_EVERY_MS: u64 = 50;
 
 /// The find bar's text field.
 pub(crate) const DIFF_FIND_ID: &str = "diff-find";
+
+/// The Clone window's address field.
+pub(crate) const CLONE_URL_ID: &str = "clone-url";
+
+/// The Clone window: what was pasted, where it goes, and the clone while it runs.
+#[derive(Debug, Clone)]
+pub(crate) struct CloneDialog {
+    pub input: String,
+    pub source: Option<crate::clone_source::CloneSource>,
+    pub parent: String,
+    pub name: String,
+    /// Typed by the user: a new address no longer replaces it.
+    pub name_edited: bool,
+    pub branch: String,
+    pub branch_edited: bool,
+    /// The folder it would create is already there.
+    pub exists: bool,
+    pub running: Option<CloneRun>,
+    pub error: Option<String>,
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A clone in progress: git's current stage and how far it is.
+#[derive(Debug, Clone)]
+pub(crate) struct CloneRun {
+    pub stage: String,
+    pub percent: Option<u8>,
+    pub started: std::time::Instant,
+}
+
+impl CloneRun {
+    fn new(name: &str) -> Self {
+        Self { stage: format!("Starting to clone {name}"), percent: None, started: std::time::Instant::now() }
+    }
+}
+
+impl CloneDialog {
+    pub(crate) fn new(parent: String) -> Self {
+        Self {
+            input: String::new(),
+            source: None,
+            parent,
+            name: String::new(),
+            name_edited: false,
+            branch: String::new(),
+            branch_edited: false,
+            exists: false,
+            running: None,
+            error: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// A new address: read it, and fill in the name and branch it implies unless typed.
+    pub(crate) fn set_input(&mut self, input: String) {
+        self.source = crate::clone_source::parse(&input);
+        self.input = input;
+        self.error = None;
+        if let Some(source) = &self.source {
+            if !self.name_edited {
+                self.name = source.name.clone();
+            }
+            if !self.branch_edited {
+                self.branch = source.branch.clone().unwrap_or_default();
+            }
+        }
+        self.refresh();
+    }
+
+    /// Whether the folder it would create already exists. Asked when an input changes, never
+    /// while drawing.
+    pub(crate) fn refresh(&mut self) {
+        self.exists = self.destination().is_some_and(|path| std::path::Path::new(&path).exists());
+    }
+
+    /// The folder the clone would create.
+    pub(crate) fn destination(&self) -> Option<String> {
+        let (parent, name) = (self.parent.trim(), self.name.trim());
+        (!parent.is_empty() && !name.is_empty()).then(|| std::path::Path::new(parent).join(name).to_string_lossy().into_owned())
+    }
+
+    pub(crate) fn cancelling(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn can_start(&self) -> bool {
+        self.request().is_some()
+    }
+
+    /// What to clone, when everything needed is there.
+    pub(crate) fn request(&self) -> Option<core_domain::CloneRequest> {
+        let source = self.source.as_ref()?;
+        let parent = self.parent.trim();
+        let name = self.name.trim();
+        if self.running.is_some() || self.exists || name.is_empty() || !std::path::Path::new(parent).is_dir() {
+            return None;
+        }
+        let branch = self.branch.trim();
+        Some(core_domain::CloneRequest {
+            url: source.url.clone(),
+            parent: parent.to_string(),
+            name: name.to_string(),
+            branch: (!branch.is_empty()).then(|| branch.to_string()),
+        })
+    }
+}
 
 struct ParkedWorkspace {
     /// [`core_domain::repository_key`] of its first tab's folder.
@@ -969,7 +1085,8 @@ impl GitApp {
             history_prompt: None,
             merge_preview: None,
             stash_prompt: None,
-            clone_url: String::new(),
+            clone_dialog: None,
+            last_clone_parent: None,
             history_query: String::new(),
             palette: None,
             open_repository,
@@ -2243,41 +2360,109 @@ impl GitApp {
                 self.error = Some(error_message(&error));
                 Task::none()
             }
-            Message::CloneUrlChanged(url) => {
-                self.clone_url = url;
+            Message::OpenClone => {
+                if self.opening || self.clone_dialog.is_some() {
+                    return Task::none();
+                }
+                self.close_prompts();
+                self.context_menu = None;
+                self.palette = None;
+                self.diff_focus = None;
+                self.clone_dialog = Some(CloneDialog::new(self.default_clone_parent()));
+                iced::widget::text_input::focus(iced::widget::text_input::Id::new(CLONE_URL_ID))
+            }
+            Message::CloneInputChanged(input) => {
+                if let Some(dialog) = self.clone_dialog.as_mut().filter(|dialog| dialog.running.is_none()) {
+                    dialog.set_input(input);
+                }
                 Task::none()
             }
-            Message::ChooseCloneFolder => {
-                if self.opening || self.clone_url.trim().is_empty() {
-                    return Task::none();
+            Message::CloneParentChanged(parent) => {
+                if let Some(dialog) = self.clone_dialog.as_mut().filter(|dialog| dialog.running.is_none()) {
+                    dialog.parent = parent;
+                    dialog.refresh();
                 }
-                let url = self.clone_url.clone();
-                Task::perform(
-                    choose_repository_folder("Clone into folder"),
-                    move |parent| Message::CloneFolderChosen(url.clone(), parent),
-                )
+                Task::none()
             }
-            Message::CloneFolderChosen(_, None) => Task::none(),
-            Message::CloneFolderChosen(url, Some(parent)) => {
-                if self.opening {
-                    return Task::none();
+            Message::CloneNameChanged(name) => {
+                if let Some(dialog) = self.clone_dialog.as_mut().filter(|dialog| dialog.running.is_none()) {
+                    dialog.name = name;
+                    dialog.name_edited = true;
+                    dialog.refresh();
                 }
-                self.opening = true;
-                self.error = None;
+                Task::none()
+            }
+            Message::CloneBranchChanged(branch) => {
+                if let Some(dialog) = self.clone_dialog.as_mut().filter(|dialog| dialog.running.is_none()) {
+                    dialog.branch = branch;
+                    dialog.branch_edited = true;
+                }
+                Task::none()
+            }
+            Message::CloneBrowse => {
+                let Some(dialog) = self.clone_dialog.as_ref().filter(|dialog| dialog.running.is_none()) else {
+                    return Task::none();
+                };
+                let start = Some(dialog.parent.clone()).filter(|parent| !parent.trim().is_empty());
+                Task::perform(crate::jobs::choose_folder_in("Clone into folder", start), Message::CloneParentChosen)
+            }
+            Message::CloneParentChosen(Some(parent)) => self.update(Message::CloneParentChanged(parent)),
+            Message::CloneParentChosen(None) => Task::none(),
+            Message::StartClone => {
+                let Some(dialog) = self.clone_dialog.as_mut() else {
+                    return Task::none();
+                };
+                let Some(request) = dialog.request() else {
+                    return Task::none();
+                };
+                dialog.error = None;
+                dialog.cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                dialog.running = Some(CloneRun::new(&request.name));
+                let cancel = Arc::clone(&dialog.cancel);
+                self.last_clone_parent = Some(request.parent.clone());
                 let clone_repository = Arc::clone(&self.clone_repository);
-                Task::perform(
-                    clone_in_background(clone_repository, url, parent),
-                    Message::CloneFinished,
-                )
+                Task::run(crate::jobs::clone_stream(clone_repository, request, cancel), Message::CloneEvent)
             }
-            Message::CloneFinished(Ok(path)) => {
-                self.opening = false;
-                self.update(Message::OpenRepository(path))
-            }
-            Message::CloneFinished(Err(error)) => {
-                self.opening = false;
-                self.error = Some(error_message(&error));
+            Message::CancelClone => {
+                match self.clone_dialog.as_ref() {
+                    // git is stopped; the window closes when it reports back, with the folder gone.
+                    Some(dialog) if dialog.running.is_some() => dialog.cancel.store(true, std::sync::atomic::Ordering::Relaxed),
+                    Some(_) => self.clone_dialog = None,
+                    None => {}
+                }
                 Task::none()
+            }
+            Message::CloneEvent(crate::jobs::CloneEvent::Line(line)) => {
+                if let Some(run) = self.clone_dialog.as_mut().and_then(|dialog| dialog.running.as_mut()) {
+                    let (stage, percent) = crate::clone_source::progress_of(&line);
+                    if !stage.is_empty() {
+                        run.stage = stage;
+                        run.percent = percent;
+                    }
+                }
+                Task::none()
+            }
+            Message::CloneEvent(crate::jobs::CloneEvent::Done(result)) => {
+                let Some(dialog) = self.clone_dialog.as_mut() else {
+                    return Task::none();
+                };
+                let cancelled = dialog.cancelling();
+                dialog.running = None;
+                match result {
+                    Ok(path) => {
+                        self.clone_dialog = None;
+                        self.update(Message::OpenRepository(path))
+                    }
+                    // Cancelled by the user: nothing to explain, the window simply closes.
+                    Err(_) if cancelled => {
+                        self.clone_dialog = None;
+                        Task::none()
+                    }
+                    Err(error) => {
+                        dialog.error = Some(error_message(&error));
+                        Task::none()
+                    }
+                }
             }
             Message::Select(selection) => {
                 self.inspect = None;
@@ -4721,6 +4906,12 @@ impl GitApp {
         if let Some(entry) = self.activity.running() {
             return Some(crate::activity::running_label(&entry.record));
         }
+        if let Some((dialog, run)) = self.clone_dialog.as_ref().and_then(|dialog| Some((dialog, dialog.running.as_ref()?))) {
+            return Some(match run.percent {
+                Some(percent) => format!("Cloning {}: {} {percent}%…", dialog.name.trim(), run.stage),
+                None => format!("Cloning {}…", dialog.name.trim()),
+            });
+        }
         if self.shell_busy {
             return Some("Running command…".to_string());
         }
@@ -4770,6 +4961,18 @@ impl GitApp {
             return None;
         }
         Some((self.holding_label()?, elapsed.as_secs()))
+    }
+
+    /// Where the Clone window starts: where the last clone went, else beside the repository on
+    /// screen, else beside a known one, else the home folder.
+    fn default_clone_parent(&self) -> String {
+        let beside = |path: &str| std::path::Path::new(path).parent().map(|parent| parent.to_string_lossy().into_owned());
+        self.last_clone_parent
+            .clone()
+            .or_else(|| self.workspace_path.as_deref().and_then(beside))
+            .or_else(|| self.settings.recent_repositories.first().and_then(|path| beside(path)))
+            .or_else(|| std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).ok())
+            .unwrap_or_default()
     }
 
     /// Label for the status strip: the work in flight, or "Ready".
@@ -5402,6 +5605,10 @@ impl GitApp {
             );
         }
         // Keep the running time counting and let a finished result fade out of the status bar.
+        if self.clone_dialog.as_ref().is_some_and(|dialog| dialog.running.is_some()) {
+            // The elapsed seconds keep counting while git waits, for a sign-in say.
+            subscriptions.push(iced::time::every(iced::time::Duration::from_millis(500)).map(|_| Message::ActivityTick));
+        }
         if self.diff_autoscroll.is_some() {
             subscriptions.push(
                 iced::time::every(iced::time::Duration::from_millis(AUTOSCROLL_EVERY_MS)).map(|_| Message::DiffAutoscroll),
@@ -5437,6 +5644,11 @@ impl GitApp {
         }
         if self.diff_find.is_some() {
             return self.update(Message::DiffFindClose);
+        }
+        // A running clone is stopped with its own button, never by Escape.
+        if self.clone_dialog.as_ref().is_some_and(|dialog| dialog.running.is_none()) {
+            self.clone_dialog = None;
+            return Task::none();
         }
         if self.compare.is_some() {
             self.close_compare();
@@ -5758,7 +5970,7 @@ fn unavailable_initialiser() -> RepositoryInitialiser {
 
 #[cfg(test)]
 fn unavailable_cloner() -> RepositoryCloner {
-    Arc::new(|_, _| Err(DomainError::Unknown("no cloner".into())))
+    Arc::new(|_, _, _| Err(DomainError::Unknown("no cloner".into())))
 }
 
 #[cfg(test)]
@@ -7039,37 +7251,85 @@ mod tests {
         assert_eq!(app.error, None);
     }
 
-    #[test]
-    fn an_empty_clone_url_does_not_start() {
+    /// The Clone window over a real folder to clone into.
+    fn clone_window(parent: &std::path::Path) -> GitApp {
         let mut app = GitApp::welcome();
-        let _ = app.update(Message::ChooseCloneFolder);
-        assert!(!app.opening);
-        assert!(app.sessions.is_empty());
+        let _ = app.update(Message::OpenClone);
+        let _ = app.update(Message::CloneParentChanged(parent.to_string_lossy().into_owned()));
+        app
     }
 
     #[test]
-    fn clone_failure_stays_on_the_welcome_screen() {
-        let mut app = GitApp::welcome();
-        let _ = app.update(Message::CloneFolderChosen(
-            "https://example.com/repo.git".to_string(),
-            Some(r"D:\parent".to_string()),
-        ));
-        assert!(app.opening);
-        let _ = app.update(Message::CloneFinished(Err(DomainError::Unknown(
-            "repo already exists in D:\\parent".to_string(),
-        ))));
-        assert!(app.sessions.is_empty());
-        assert!(!app.opening);
-        assert_eq!(
-            app.error.as_deref(),
-            Some("repo already exists in D:\\parent")
-        );
+    fn the_clone_window_reads_the_address_and_starts_only_when_it_can() {
+        let parent = tempfile::tempdir().expect("parent");
+        let mut app = clone_window(parent.path());
+        assert!(!app.clone_dialog.as_ref().expect("open").can_start(), "no address yet");
+
+        let _ = app.update(Message::CloneInputChanged("https://github.com/gmifsud/GitCthulhu/tree/feature/x".into()));
+        let dialog = app.clone_dialog.clone().expect("open");
+        assert_eq!(dialog.name, "GitCthulhu");
+        assert_eq!(dialog.branch, "feature/x");
+        let request = dialog.request().expect("ready");
+        assert_eq!(request.url, "https://github.com/gmifsud/GitCthulhu.git");
+        assert_eq!(request.branch.as_deref(), Some("feature/x"));
+
+        // A typed name is kept when the address changes; a folder already there stops it.
+        let _ = app.update(Message::CloneNameChanged("taken".into()));
+        std::fs::create_dir(parent.path().join("taken")).expect("make it taken");
+        let _ = app.update(Message::CloneInputChanged("https://dev.azure.com/contoso/Platform/_git/Backend".into()));
+        let dialog = app.clone_dialog.clone().expect("open");
+        assert_eq!((dialog.name.as_str(), dialog.exists), ("taken", true));
+        assert!(!dialog.can_start());
+        assert_eq!(dialog.branch, "", "the new address names no branch");
+    }
+
+    #[test]
+    fn a_running_clone_shows_its_progress_then_opens_the_new_folder() {
+        let parent = tempfile::tempdir().expect("parent");
+        let mut app = clone_window(parent.path());
+        let _ = app.update(Message::CloneInputChanged("https://github.com/gmifsud/GitCthulhu".into()));
+        let _ = app.update(Message::StartClone);
+        assert!(app.clone_dialog.as_ref().is_some_and(|dialog| dialog.running.is_some()));
+
+        let _ = app.update(Message::CloneEvent(crate::jobs::CloneEvent::Line("Receiving objects:  45% (450/1000)".into())));
+        let run = app.clone_dialog.as_ref().and_then(|dialog| dialog.running.clone()).expect("running");
+        assert_eq!((run.stage.as_str(), run.percent), ("Receiving objects", Some(45)));
+        assert_eq!(app.busy_label().as_deref(), Some("Cloning GitCthulhu: Receiving objects 45%…"));
+
+        let _ = app.update(Message::Escape);
+        assert!(app.clone_dialog.is_some(), "Escape never abandons a running clone");
+
+        let created = parent.path().join("GitCthulhu").to_string_lossy().into_owned();
+        let _ = app.update(Message::CloneEvent(crate::jobs::CloneEvent::Done(Ok(created.clone()))));
+        assert!(app.clone_dialog.is_none());
+        assert!(app.opening, "the new folder opens");
+        assert_eq!(app.last_clone_parent.as_deref(), Some(parent.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn a_failed_clone_keeps_the_window_with_the_reason_and_cancel_closes_it() {
+        let parent = tempfile::tempdir().expect("parent");
+        let mut app = clone_window(parent.path());
+        let _ = app.update(Message::CloneInputChanged("https://github.com/gmifsud/Private".into()));
+        let _ = app.update(Message::StartClone);
+        let failed = DomainError::Unknown("fatal: Authentication failed for 'https://github.com/gmifsud/Private.git/'".into());
+        let _ = app.update(Message::CloneEvent(crate::jobs::CloneEvent::Done(Err(failed))));
+        let dialog = app.clone_dialog.clone().expect("still open");
+        assert!(dialog.error.as_deref().is_some_and(|error| error.contains("Authentication failed")));
+        assert!(dialog.can_start(), "it can be tried again");
+
+        let _ = app.update(Message::StartClone);
+        let _ = app.update(Message::CancelClone);
+        assert!(app.clone_dialog.as_ref().is_some_and(CloneDialog::cancelling), "git is told to stop");
+        let _ = app.update(Message::CloneEvent(crate::jobs::CloneEvent::Done(Err(DomainError::Unknown("Clone cancelled.".into())))));
+        assert!(app.clone_dialog.is_none(), "a cancelled clone just closes");
     }
 
     #[test]
     fn clone_then_opens_the_created_directory() {
-        let mut app = GitApp::welcome();
-        let _ = app.update(Message::CloneFinished(Ok(r"D:\parent\repo".to_string())));
+        let parent = tempfile::tempdir().expect("parent");
+        let mut app = clone_window(parent.path());
+        let _ = app.update(Message::CloneEvent(crate::jobs::CloneEvent::Done(Ok(r"D:\parent\repo".to_string()))));
         assert!(app.opening);
         let _ = app.update(Message::RepositoryOpened(
             r"D:\parent\repo".to_string(),

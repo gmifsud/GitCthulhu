@@ -19,6 +19,7 @@ const CLUSTER_SPACING: f32 = 8.0;
 const COMMAND_SPACING: f32 = 6.0;
 
 const OPEN_REPOSITORY: &str = "Open…";
+const CLONE_REPOSITORY: &str = "Clone…";
 const RECENT_REPOSITORIES: &str = "Recent";
 const SETTINGS: &str = "Settings";
 const MARK_HEIGHT: f32 = 11.0;
@@ -73,6 +74,13 @@ fn title_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Ele
         RECENT_REPOSITORIES,
         Message::TogglePalette(format!("{REPOSITORY_SCOPE} ")),
         !app.session().state.loading && app.settings.recent_repositories.len() > 1,
+        tokens,
+        reading,
+    ));
+    bar = bar.push(quiet_button(
+        CLONE_REPOSITORY,
+        Message::OpenClone,
+        !app.session().state.loading,
         tokens,
         reading,
     ));

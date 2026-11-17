@@ -14,7 +14,7 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LogCursor, MergePreview,
+    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LogCursor, MergePreview,
     Patch, RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
@@ -76,16 +76,113 @@ impl GitoxideAdapter {
     ///
     /// The name comes from the URL. No hosting provider is contacted except by git itself.
     pub fn clone_repository(url: &str, parent: &str) -> Result<String, DomainError> {
-        validate_clone_url(url)?;
-        validate_directory(parent)?;
-        let name = repository_name(url)?;
-        let destination = std::path::Path::new(parent).join(&name);
-        if destination.exists() {
-            return Err(DomainError::Unknown(format!(
-                "{name} already exists in {parent}"
-            )));
+        let request = CloneRequest {
+            url: url.to_string(),
+            parent: parent.to_string(),
+            name: repository_name(url)?,
+            branch: None,
+        };
+        Self::clone_with_progress(&request, &mut |_| {}, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// `git clone --progress`, handing each progress line to `progress` as git prints it, and
+    /// stopping when `cancel` is set. The new folder is removed if the clone does not finish:
+    /// it did not exist before (that is checked first), so nothing of the user's is touched.
+    ///
+    /// Sign-in is left to git's credential helper (Git Credential Manager opens its own window
+    /// for GitHub and Azure DevOps); git never waits on a terminal, which this window has not.
+    pub fn clone_with_progress(
+        request: &CloneRequest,
+        progress: &mut dyn FnMut(&str),
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<String, DomainError> {
+        use std::io::Read;
+        use std::sync::atomic::Ordering;
+        validate_clone_url(&request.url)?;
+        validate_directory(&request.parent)?;
+        validate_folder_name(&request.name)?;
+        if let Some(branch) = &request.branch {
+            require_branch_name(branch)?;
         }
-        run_git(parent, &["clone", "--", url.trim(), &name])?;
+        let destination = std::path::Path::new(&request.parent).join(&request.name);
+        if destination.exists() {
+            return Err(DomainError::Unknown(format!("{} already exists in {}", request.name, request.parent)));
+        }
+        let mut args = vec!["clone", "--progress"];
+        if let Some(branch) = &request.branch {
+            args.extend(["--branch", branch.as_str()]);
+        }
+        args.extend(["--", request.url.trim(), request.name.as_str()]);
+        let mut child = command::git_program(&request.parent, &args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| DomainError::Unknown(format!("could not run git: {error}")))?;
+        // git rewrites its progress line in place with \r: read raw and split on both.
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let (lines, received) = std::sync::mpsc::channel::<String>();
+        let reader = std::thread::spawn(move || {
+            let mut pending = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = stderr.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                for &byte in &chunk[..read] {
+                    if byte == b'\r' || byte == b'\n' {
+                        if !pending.is_empty() {
+                            let _ = lines.send(String::from_utf8_lossy(&pending).into_owned());
+                            pending.clear();
+                        }
+                    } else {
+                        pending.push(byte);
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                let _ = lines.send(String::from_utf8_lossy(&pending).into_owned());
+            }
+        });
+        let mut last = std::collections::VecDeque::with_capacity(CLONE_ERROR_LINES);
+        let mut cancelled = false;
+        loop {
+            if cancel.load(Ordering::Relaxed) && !cancelled {
+                cancelled = true;
+                let _ = child.kill();
+            }
+            match received.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(line) => {
+                    progress(&line);
+                    if last.len() == CLONE_ERROR_LINES {
+                        last.pop_front();
+                    }
+                    last.push_back(line);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let _ = reader.join();
+        let status = child.wait().map_err(|error| DomainError::Unknown(format!("git clone did not finish: {error}")))?;
+        if cancelled || !status.success() {
+            let leftover = remove_partial_clone(&destination);
+            let reason = if cancelled {
+                "Clone cancelled.".to_string()
+            } else {
+                // Only git's own messages, not its progress counters.
+                let said: Vec<&str> = last
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|line| !line.contains('%') && !line.starts_with("Cloning into"))
+                    .collect();
+                if said.is_empty() { "git clone failed.".to_string() } else { said.join("\n") }
+            };
+            return Err(DomainError::Unknown(match leftover {
+                Some(error) => format!("{reason}\nThe partly cloned folder {} could not be removed: {error}", destination.display()),
+                None => reason,
+            }));
+        }
         Ok(destination.to_string_lossy().into_owned())
     }
 
@@ -1002,6 +1099,41 @@ fn validate_clone_url(url: &str) -> Result<(), DomainError> {
     let url = url.trim();
     if url.is_empty() || url.contains(['\0', '\n', '\r']) || url.starts_with('-') {
         Err(DomainError::Unknown(format!("invalid clone URL: {url:?}")))
+    } else {
+        Ok(())
+    }
+}
+
+/// git's last lines kept to explain a failed clone.
+const CLONE_ERROR_LINES: usize = 12;
+
+/// Remove the folder a clone that did not finish left behind. git may still be releasing its
+/// files for a moment after it is stopped, so a few tries are made. `None` when it is gone.
+fn remove_partial_clone(destination: &std::path::Path) -> Option<std::io::Error> {
+    let mut last = None;
+    for attempt in 0..10 {
+        if !destination.exists() {
+            return None;
+        }
+        match std::fs::remove_dir_all(destination) {
+            Ok(()) => return None,
+            Err(error) => last = Some(error),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 * (attempt + 1)));
+    }
+    last
+}
+
+/// A folder name to clone into: one plain name, never a path or something git reads as an option.
+fn validate_folder_name(name: &str) -> Result<(), DomainError> {
+    let bad = name.trim().is_empty()
+        || name != name.trim()
+        || name == "."
+        || name == ".."
+        || name.starts_with('-')
+        || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '\n', '\r']);
+    if bad {
+        Err(DomainError::Unknown(format!("not a folder name: {name:?}")))
     } else {
         Ok(())
     }
