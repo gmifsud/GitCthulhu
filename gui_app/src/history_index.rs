@@ -17,6 +17,9 @@ pub(crate) const WHEN_WIDTH: f32 = 112.0;
 pub(crate) const AUTHOR_WIDTH: f32 = 120.0;
 /// The narrowest the Description column may get before a column steps aside.
 pub(crate) const MIN_DESCRIPTION_WIDTH: f32 = 380.0;
+/// The Refs column, left of the graph, and the narrowest it gets when room is short.
+pub(crate) const REFS_WIDTH: f32 = 240.0;
+pub(crate) const MIN_REFS_WIDTH: f32 = 130.0;
 
 /// What an index was built from. Any difference means rebuilding it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +51,7 @@ pub(crate) struct IndexRow {
     /// Worktree colours on this row's dot and lines.
     pub(crate) inks: RowInks,
     pub(crate) pills: Vec<RefPill>,
-    /// Height in px, from measured text.
+    /// Height in px: every row is one line, [`crate::commit_graph::ROW_HEIGHT`].
     pub(crate) height: f32,
     /// Distance from the first commit row's top, in px.
     pub(crate) top: f32,
@@ -82,20 +85,23 @@ impl HistoryIndex {
     }
 }
 
-/// Which of Author, Date and Hash fit beside a readable Description. They step aside in that
-/// order of least use: Hash first, then Author, then Date. All of them are in the Inspector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How wide the Refs column is, and which of Author, Date and Hash fit beside a readable
+/// Description. When room is short they give way in order of least use: Hash, then Author,
+/// then the Refs column narrows, then Date. All of them are in the Inspector.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Columns {
+    pub(crate) refs_width: f32,
     pub(crate) author: bool,
     pub(crate) when: bool,
     pub(crate) hash: bool,
 }
 
 impl Columns {
-    /// For `space` px right of the lane column.
+    /// For `space` px beside the lane column.
     pub(crate) fn for_width(space: f32) -> Self {
-        let mut columns = Columns { author: true, when: true, hash: true };
-        let drops: [fn(&mut Columns); 3] = [|c| c.hash = false, |c| c.author = false, |c| c.when = false];
+        let mut columns = Columns { refs_width: REFS_WIDTH, author: true, when: true, hash: true };
+        let drops: [fn(&mut Columns); 4] =
+            [|c| c.hash = false, |c| c.author = false, |c| c.refs_width = MIN_REFS_WIDTH, |c| c.when = false];
         for drop in drops {
             if columns.description_width(space) >= MIN_DESCRIPTION_WIDTH {
                 break;
@@ -107,7 +113,7 @@ impl Columns {
 
     /// What Description gets of `space` once the shown columns and gaps are taken.
     pub(crate) fn description_width(self, space: f32) -> f32 {
-        let mut used = COL_GAP;
+        let mut used = self.refs_width + COL_GAP * 2.0;
         for (shown, width) in [(self.author, AUTHOR_WIDTH), (self.when, WHEN_WIDTH), (self.hash, HASH_WIDTH)] {
             if shown {
                 used += width + COL_GAP;
@@ -156,7 +162,7 @@ mod tests {
             filter_unloaded: false,
             shown: 4,
             narrowing: false,
-            columns: Columns { author: true, when: true, hash: true },
+            columns: Columns { refs_width: REFS_WIDTH, author: true, when: true, hash: true },
             graph_width: 24.0,
         };
         assert_eq!(index.window(0.0, 30.0), (0, 2));
@@ -165,12 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn columns_step_aside_hash_then_author_then_date() {
-        assert_eq!(Columns::for_width(2_000.0), Columns { author: true, when: true, hash: true });
-        let narrower = Columns::for_width(MIN_DESCRIPTION_WIDTH + AUTHOR_WIDTH + WHEN_WIDTH + COL_GAP * 3.0 + 10.0);
-        assert_eq!(narrower, Columns { author: true, when: true, hash: false });
-        let narrow = Columns::for_width(MIN_DESCRIPTION_WIDTH + WHEN_WIDTH + COL_GAP * 2.0 + 10.0);
-        assert_eq!(narrow, Columns { author: false, when: true, hash: false });
-        assert_eq!(Columns::for_width(200.0), Columns { author: false, when: false, hash: false });
+    fn columns_step_aside_hash_then_author_then_the_refs_narrow_then_date() {
+        let all = |refs_width, author, when, hash| Columns { refs_width, author, when, hash };
+        assert_eq!(Columns::for_width(2_000.0), all(REFS_WIDTH, true, true, true));
+        let fixed = |refs: f32, widths: &[f32]| MIN_DESCRIPTION_WIDTH + refs + COL_GAP * 2.0 + widths.iter().map(|w| w + COL_GAP).sum::<f32>() + 5.0;
+        assert_eq!(Columns::for_width(fixed(REFS_WIDTH, &[AUTHOR_WIDTH, WHEN_WIDTH])), all(REFS_WIDTH, true, true, false));
+        assert_eq!(Columns::for_width(fixed(REFS_WIDTH, &[WHEN_WIDTH])), all(REFS_WIDTH, false, true, false));
+        assert_eq!(Columns::for_width(fixed(MIN_REFS_WIDTH, &[WHEN_WIDTH])), all(MIN_REFS_WIDTH, false, true, false));
+        assert_eq!(Columns::for_width(200.0), all(MIN_REFS_WIDTH, false, false, false));
     }
 }

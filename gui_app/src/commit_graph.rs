@@ -11,13 +11,21 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 
 use crate::theme::hex_color;
 
-/// Height of one commit row: one line of text, pills inline.
-pub(crate) const ROW_HEIGHT: f32 = 24.0;
+/// Height of every commit row: one line of text.
+pub(crate) const ROW_HEIGHT: f32 = 26.0;
 /// Horizontal distance between lane centres.
 const LANE_SPACING: f32 = 16.0;
-const DOT_RADIUS: f32 = 4.0;
-const RING_RADIUS: f32 = 6.5;
-const LINE_WIDTH: f32 = 2.0;
+/// An ordinary commit: a small hollow ring.
+const NODE_RADIUS: f32 = 3.5;
+/// A branch tip: a filled ring a little larger.
+const TIP_RADIUS: f32 = 4.5;
+/// A worktree's tip: an outer ring round a filled one.
+const RING_RADIUS: f32 = 6.0;
+const LINE_WIDTH: f32 = 1.5;
+/// How round a line's turn from one lane to another is.
+const CORNER: f32 = 6.0;
+/// The dotted line from a row's refs to its commit.
+const LEADER_DASH: [f32; 2] = [2.0, 3.0];
 /// Lane colours, cycled by lane index. Exported to the design system as `lane-0` … `lane-5`.
 pub(crate) const LANE_COLOURS: [u32; 6] = [0xF27D26, 0x3B82F6, 0x22C55E, 0xA855F7, 0xEC4899, 0x14B8A6];
 
@@ -172,6 +180,9 @@ pub(crate) struct GraphCell {
     pub row: GraphRow,
     pub mark: NodeMark,
     pub inks: RowInks,
+    /// The row has refs: a dotted line runs in from the left edge to the commit, carrying on
+    /// the one drawn after the refs in their column.
+    pub leader: Option<Color>,
 }
 
 /// Tessellated geometry kept between frames, with the row it was built from.
@@ -181,7 +192,7 @@ pub(crate) struct GraphCell {
 #[derive(Default)]
 pub(crate) struct GraphCache {
     geometry: canvas::Cache,
-    drawn: RefCell<Option<(GraphRow, NodeMark, RowInks)>>,
+    drawn: RefCell<Option<(GraphRow, NodeMark, RowInks, Option<Color>)>>,
 }
 
 impl<Message> canvas::Program<Message> for GraphCell {
@@ -195,13 +206,13 @@ impl<Message> canvas::Program<Message> for GraphCell {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let key = (self.row.clone(), self.mark, self.inks.clone());
+        let key = (self.row.clone(), self.mark, self.inks.clone(), self.leader);
         if state.drawn.borrow().as_ref() != Some(&key) {
             state.geometry.clear();
             *state.drawn.borrow_mut() = Some(key);
         }
         let geometry = state.geometry.draw(renderer, bounds.size(), |frame| {
-            paint_row(frame, &self.row, self.mark, &self.inks, bounds.width, bounds.height);
+            paint_row(frame, &self.row, self.mark, &self.inks, self.leader, bounds.width, bounds.height);
         });
         vec![geometry]
     }
@@ -212,60 +223,130 @@ fn ink_or_lane(inks: &[Option<Color>], index: usize, lane: usize) -> Color {
     inks.get(index).copied().flatten().unwrap_or_else(|| lane_colour(lane))
 }
 
+/// How far a line stops short of a node's centre, so it meets the ring's edge, never its inside.
+fn node_radius(mark: NodeMark) -> f32 {
+    match mark {
+        NodeMark::Plain => NODE_RADIUS,
+        NodeMark::Local | NodeMark::Remote => TIP_RADIUS,
+        NodeMark::Worktree => RING_RADIUS,
+    }
+}
+
+/// A line from `from` to `to` that runs straight along `from`'s lane, then turns with a
+/// rounded corner and runs level into `to`: how a branch comes in to the commit it forks from.
+fn turn_in(from: Point, to: Point) -> canvas::Path {
+    let side = (to.x - from.x).signum();
+    canvas::Path::new(|path| {
+        path.move_to(from);
+        path.line_to(Point::new(from.x, to.y - CORNER));
+        path.quadratic_curve_to(Point::new(from.x, to.y), Point::new(from.x + side * CORNER, to.y));
+        path.line_to(to);
+    })
+}
+
+/// The mirror of [`turn_in`]: level out of `from`, a rounded turn, then down `to`'s lane: how
+/// a merge's second parent leaves it.
+fn turn_out(from: Point, to: Point) -> canvas::Path {
+    let side = (to.x - from.x).signum();
+    canvas::Path::new(|path| {
+        path.move_to(from);
+        path.line_to(Point::new(to.x - side * CORNER, from.y));
+        path.quadratic_curve_to(Point::new(to.x, from.y), Point::new(to.x, from.y + CORNER));
+        path.line_to(to);
+    })
+}
+
 fn paint_row(
     frame: &mut canvas::Frame,
     row: &GraphRow,
     mark: NodeMark,
     inks: &RowInks,
+    leader: Option<Color>,
     width: f32,
     bottom: f32,
 ) {
     let colour = inks.dot.unwrap_or_else(|| lane_colour(row.lane));
     let dot = Point::new(lane_x(row.lane, width), bottom / 2.0);
-    let mut segment = |from: Point, to: Point, ink: Color| {
-        frame.stroke(
-            &canvas::Path::line(from, to),
-            canvas::Stroke::default()
-                .with_color(ink)
-                .with_width(LINE_WIDTH),
-        );
-    };
+    let gap = node_radius(mark) + 1.0;
+    let line = |ink: Color| canvas::Stroke::default().with_color(ink).with_width(LINE_WIDTH);
 
     for (index, &lane) in row.passing.iter().enumerate() {
-        segment(
-            Point::new(lane_x(lane, width), 0.0),
-            Point::new(lane_x(lane, width), bottom),
-            ink_or_lane(&inks.passing, index, lane),
-        );
+        let x = lane_x(lane, width);
+        frame.stroke(&canvas::Path::line(Point::new(x, 0.0), Point::new(x, bottom)), line(ink_or_lane(&inks.passing, index, lane)));
     }
     for (index, &lane) in row.incoming.iter().enumerate() {
-        segment(Point::new(lane_x(lane, width), 0.0), dot, ink_or_lane(&inks.incoming, index, lane));
+        let x = lane_x(lane, width);
+        let ink = line(ink_or_lane(&inks.incoming, index, lane));
+        if lane == row.lane {
+            frame.stroke(&canvas::Path::line(Point::new(x, 0.0), Point::new(x, dot.y - gap)), ink);
+        } else {
+            let side = (dot.x - x).signum();
+            frame.stroke(&turn_in(Point::new(x, 0.0), Point::new(dot.x - side * gap, dot.y)), ink);
+        }
     }
     for (index, &lane) in row.outgoing.iter().enumerate() {
-        segment(dot, Point::new(lane_x(lane, width), bottom), ink_or_lane(&inks.outgoing, index, lane));
+        let x = lane_x(lane, width);
+        let ink = line(ink_or_lane(&inks.outgoing, index, lane));
+        if lane == row.lane {
+            frame.stroke(&canvas::Path::line(Point::new(x, dot.y + gap), Point::new(x, bottom)), ink);
+        } else {
+            let side = (x - dot.x).signum();
+            frame.stroke(&turn_out(Point::new(dot.x + side * gap, dot.y), Point::new(x, bottom)), ink);
+        }
+    }
+    if let Some(ink) = leader {
+        let end = dot.x - gap - 1.0;
+        if end > 0.0 {
+            frame.stroke(
+                &canvas::Path::line(Point::new(0.0, dot.y), Point::new(end, dot.y)),
+                canvas::Stroke {
+                    line_dash: canvas::LineDash { segments: &LEADER_DASH, offset: 0 },
+                    ..canvas::Stroke::default().with_color(ink).with_width(1.0)
+                },
+            );
+        }
     }
 
+    let ring = |radius: f32| canvas::Path::circle(dot, radius);
     match mark {
-        NodeMark::Remote => {
-            frame.stroke(
-                &canvas::Path::circle(dot, DOT_RADIUS + 1.0),
-                canvas::Stroke::default()
-                    .with_color(colour)
-                    .with_width(LINE_WIDTH),
-            );
-        }
+        NodeMark::Plain => frame.stroke(&ring(NODE_RADIUS), line(colour)),
+        NodeMark::Remote => frame.stroke(&ring(TIP_RADIUS), line(colour)),
+        NodeMark::Local => frame.fill(&ring(TIP_RADIUS), colour),
         NodeMark::Worktree => {
-            frame.stroke(
-                &canvas::Path::circle(dot, RING_RADIUS),
-                canvas::Stroke::default()
-                    .with_color(colour)
-                    .with_width(1.5),
-            );
-            frame.fill(&canvas::Path::circle(dot, DOT_RADIUS), colour);
+            frame.stroke(&ring(RING_RADIUS), line(colour));
+            frame.fill(&ring(NODE_RADIUS), colour);
         }
-        NodeMark::Local | NodeMark::Plain => {
-            frame.fill(&canvas::Path::circle(dot, DOT_RADIUS), colour);
-        }
+    }
+}
+
+/// The dotted line after a row's refs, out to the edge of their column; the graph carries it on
+/// to the commit. Drawn across whatever width it is given, at mid-height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LeaderLine {
+    pub colour: Color,
+}
+
+impl<Message> canvas::Program<Message> for LeaderLine {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let y = bounds.height / 2.0;
+        frame.stroke(
+            &canvas::Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+            canvas::Stroke {
+                line_dash: canvas::LineDash { segments: &LEADER_DASH, offset: 0 },
+                ..canvas::Stroke::default().with_color(self.colour).with_width(1.0)
+            },
+        );
+        vec![frame.into_geometry()]
     }
 }
 

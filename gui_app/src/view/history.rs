@@ -1,10 +1,11 @@
-//! History table — Graph | Description | Author | When | Hash, one dense line per commit.
-//! The graph is only as wide as its lanes. Ref pills sit at the right end of the
-//! Description cell, after the subject, so rows without refs give the subject the room.
+//! History table — Refs | Graph | Description | Author | When | Hash, one line per commit and
+//! every row the same height. A commit's branches and tags sit in the Refs column, joined to its
+//! node by a dotted line; the graph is only as wide as its lanes. A name too long for the column
+//! is cut there, but shown whole on hover, and every name is in the row's right-click menu.
 //! The top-bar search narrows the table to matching loaded commits.
 
 use crate::app::{GitApp, Message};
-use crate::commit_graph::{graph_rows, graph_width, lane_colour, row_inks, GraphCell, GraphRow, NodeMark, RowInks, ROW_HEIGHT};
+use crate::commit_graph::{graph_rows, graph_width, lane_colour, row_inks, GraphCell, GraphRow, LeaderLine, NodeMark, RowInks, ROW_HEIGHT};
 use crate::worktree_ink::WorktreeInks;
 use crate::context_menu::ContextTarget;
 use crate::palette::commit_matches;
@@ -30,8 +31,6 @@ use super::chrome::{glyph, panel_style, Reading};
 use crate::dates::log_date;
 use crate::icons::Icon;
 
-/// Space between the subject and the first ref pill.
-const SUBJECT_PILL_GAP: f32 = 8.0;
 const MIN_GRAPH_COL_WIDTH: f32 = 24.0;
 /// Ten lanes. Wider histories clip at the right edge of the graph instead of taking the
 /// Description column: the subject is what is read, lanes beyond ten rarely are.
@@ -47,12 +46,10 @@ const PILL_GAP: f32 = 3.0;
 /// One text line inside a pill. iced 0.13 can still wrap `Wrapping::None` text when
 /// squeezed, so pills are clamped to this height and clipped.
 const PILL_HEIGHT: f32 = 16.0;
-/// Between wrapped lines of pills.
-const PILL_LINE_GAP: f32 = 3.0;
-/// Between the names line and the subject.
-const STACK_GAP: f32 = 2.0;
-/// Above and below a commit row's text.
-const ROW_PAD_Y: f32 = 3.0;
+/// Room kept after the pills for the dotted line to the commit.
+const LEADER_MIN: f32 = 10.0;
+/// How strongly the dotted line shows its lane's colour.
+const LEADER_ALPHA: f32 = 0.45;
 /// Left and right of the history list.
 const LIST_PAD_X: f32 = 8.0;
 /// Rows built above and below the view, in px, so a fast scroll never shows a gap.
@@ -160,14 +157,14 @@ pub(super) fn history_table<'a>(
                 && !inspecting
                 && matches!(selection, Selection::Branch { current: true, .. } | Selection::File { .. }));
         let line = button(history_row(
+            wip_refs_cell(wip, worktree_inks.colour(&wip.path), columns.refs_width, reading),
             graph_cell_empty(graph_w),
-            wip_description_cell(wip, worktree_inks.colour(&wip.path), tokens, reading),
+            wip_summary(wip, tokens, reading),
             "",
             "",
             "",
             false,
-            // A WIP row names a worktree, so it grows to show the name whole.
-            Length::Shrink,
+            Length::Fixed(ROW_HEIGHT),
             columns,
             tokens,
             reading,
@@ -197,12 +194,14 @@ pub(super) fn history_table<'a>(
         let mark = node_mark_for(&row.pills);
         // Pills without a worktree of their own match the line their commit sits on.
         let line = row.inks.dot.unwrap_or_else(|| lane_colour(row.graph.lane));
+        let leader = (!row.pills.is_empty()).then_some(Color { a: LEADER_ALPHA, ..line });
         let label = history_row(
-            canvas(GraphCell { row: row.graph.clone(), mark, inks: row.inks.clone() })
+            refs_cell(app, row, line, leader, &worktree_inks, columns.refs_width, tokens, reading),
+            canvas(GraphCell { row: row.graph.clone(), mark, inks: row.inks.clone(), leader })
                 .width(Length::Fixed(graph_w))
                 .height(Length::Fixed(row.height))
                 .into(),
-            description_cell(app, &row.commit_id, &row.subject, &row.pills, row.merge, row.height, line, &worktree_inks, tokens, reading),
+            description_cell(&row.subject, row.merge, tokens, reading),
             &row.author,
             &age,
             short_hash(&row.commit_id),
@@ -327,7 +326,7 @@ fn build_index(
     session: &WorktreeSession,
     key: crate::history_index::IndexKey,
     width: f32,
-    reading: Reading,
+    _reading: Reading,
 ) -> crate::history_index::HistoryIndex {
     let focus = session.focus_current_branch;
     let head_tip = session_head_tip(
@@ -397,8 +396,6 @@ fn build_index(
             .clamp(MIN_GRAPH_COL_WIDTH, MAX_GRAPH_COL_WIDTH)
     };
     let columns = crate::history_index::Columns::for_width(width - LIST_PAD_X * 2.0 - graph_w);
-    // Measured against the widest lane column: text never needs more room than measured.
-    let description_w = columns.description_width(width - LIST_PAD_X * 2.0 - graph_w);
 
     // Refs grouped by the commit they point at, once: looking each row up in every branch
     // was the other half of the slowness with a thousand remote branches.
@@ -431,7 +428,8 @@ fn build_index(
             }
         }
         let subject = subject_of(&commit.message).to_string();
-        let height = row_height(&subject, &pills, description_w, reading);
+        // One line each: nothing is measured, so building the index is cheap at any size.
+        let height = ROW_HEIGHT;
         out.push(crate::history_index::IndexRow {
             commit_id: commit.id.clone(),
             subject,
@@ -471,6 +469,7 @@ fn build_index(
 
 #[allow(clippy::too_many_arguments)]
 fn history_row<'a>(
+    refs: Element<'a, Message>,
     graph: Element<'a, Message>,
     description: Element<'a, Message>,
     author: &str,
@@ -482,7 +481,8 @@ fn history_row<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let mut line = row![graph, description].spacing(COL_GAP);
+    // No gap between the refs and the graph: the dotted line runs on from one into the other.
+    let mut line = row![row![refs, graph], description].spacing(COL_GAP);
     if columns.author {
         line = line.push(single_line(author, Length::Fixed(AUTHOR_WIDTH), reading, tokens, false, muted));
     }
@@ -502,8 +502,11 @@ fn history_row<'a>(
 /// toggle lives in the History toolbar, not here: an extra header cell shifted the columns.
 fn column_headers<'a>(graph_w: f32, columns: Columns, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let mut line = row![
-        // The graph column has no title: "Description" lines up with the subjects.
-        container(text("")).width(Length::Fixed(graph_w)),
+        row![
+            header_cell("Refs", Length::Fixed(columns.refs_width), tokens, reading),
+            // The graph column has no title: it is only as wide as its lanes.
+            container(text("")).width(Length::Fixed(graph_w)),
+        ],
         header_cell("Description", Length::Fill, tokens, reading),
     ]
     .spacing(COL_GAP);
@@ -552,41 +555,108 @@ fn graph_cell_empty(graph_w: f32) -> Element<'static, Message> {
         .into()
 }
 
-/// The worktree and branch names on top, then the subject, both whole and wrapping. Hovering
-/// the names lists every ref at the commit by its full name.
+/// The subject, on one line: cut at the column's edge, whole in the Inspector.
+fn description_cell<'a>(subject: &str, muted: bool, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let colour = if muted { tokens.text_muted } else { tokens.text_primary };
+    container(
+        text(subject.to_string())
+            .font(reading.font)
+            .size(reading.size)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style { color: Some(colour) }),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .align_y(Alignment::Center)
+    .clip(true)
+    .into()
+}
+
+/// A commit's branches and tags, as many as fit, then "+n" for the rest, then the dotted line
+/// out to the graph. Hovering lists every one by its full name; each pill opens its own menu,
+/// and "+n" the commit's, which can copy every name.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-fn description_cell<'a>(
+fn refs_cell<'a>(
     app: &GitApp,
-    commit_id: &str,
-    message: &str,
-    pills: &[RefPill],
-    muted: bool,
-    height: f32,
+    row: &crate::history_index::IndexRow,
     lane: Color,
+    leader: Option<Color>,
     worktree_inks: &WorktreeInks,
+    width: f32,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let subject_colour = if muted { tokens.text_muted } else { tokens.text_primary };
-    let subject = text(subject_of(message).to_string())
-        .font(reading.font)
-        .size(reading.size)
-        .wrapping(Wrapping::WordOrGlyph)
-        .style(move |_| text::Style { color: Some(subject_colour) });
-    let mut cell = column![].spacing(STACK_GAP).width(Length::Fill);
-    if !pills.is_empty() {
-        let folder_of = |path: &str| app.worktree_folder(path);
-        let names = pill_tooltip(pills, &app.worktree_catalogue, &folder_of);
-        cell = cell.push(hover_tip(pill_strip(commit_id, pills, lane, worktree_inks, tokens, reading), names, tokens, reading));
+    let Some(leader) = leader else {
+        return Space::new(Length::Fixed(width), Length::Fixed(ROW_HEIGHT)).into();
+    };
+    let pills = &row.pills;
+    let widths: Vec<f32> = pills.iter().map(|pill| pill_width(pill, reading)).collect();
+    let small = (reading.size - 3.0).max(10.0);
+    let more_width = crate::text_measure::width("+99", reading.font, small) + PILL_PAD_X * 2.0 + 2.0;
+    let shown = pills_that_fit(&widths, width - LEADER_MIN, more_width);
+    let mut line = row![].spacing(PILL_GAP).align_y(Alignment::Center);
+    for pill in &pills[..shown] {
+        // A branch checked out in a worktree wears that worktree's colour, as everywhere else.
+        let ink = pill.worktree.as_deref().map_or(lane, |path| worktree_inks.colour(path));
+        line = line.push(
+            mouse_area(ref_pill(pill, ink, tokens, reading))
+                .on_right_press(Message::OpenContextMenu { target: pill_target(pill, &row.commit_id) }),
+        );
     }
-    cell = cell.push(subject);
-    container(cell)
-        .width(Length::Fill)
-        .height(Length::Fixed(height))
-        .padding([ROW_PAD_Y, 0.0])
-        .align_y(Alignment::Center)
-        .into()
+    if shown < pills.len() {
+        let target = ContextTarget::Commit { id: row.commit_id.clone(), subject: row.subject.clone() };
+        line = line.push(mouse_area(more_chip(pills.len() - shown, tokens, reading)).on_right_press(Message::OpenContextMenu { target }));
+    }
+    line = line.push(canvas(LeaderLine { colour: leader }).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)));
+    let folder_of = |path: &str| app.worktree_folder(path);
+    let names = pill_tooltip(pills, &app.worktree_catalogue, &folder_of);
+    hover_tip(
+        container(line).width(Length::Fixed(width)).height(Length::Fixed(ROW_HEIGHT)).align_y(Alignment::Center).clip(true).into(),
+        names,
+        tokens,
+        reading,
+    )
+}
+
+/// How many pills, `widths` wide in order, fit in `space`, keeping room for a "+n" chip `more`
+/// wide when not all of them do. The first always shows, cut at the edge if it must be.
+fn pills_that_fit(widths: &[f32], space: f32, more: f32) -> usize {
+    let all: f32 = widths.iter().sum::<f32>() + PILL_GAP * widths.len().saturating_sub(1) as f32;
+    if all <= space {
+        return widths.len();
+    }
+    let mut used = 0.0;
+    let mut count = 0;
+    for width in widths {
+        let next = used + if count > 0 { PILL_GAP } else { 0.0 } + width;
+        if next + PILL_GAP + more > space {
+            break;
+        }
+        used = next;
+        count += 1;
+    }
+    count.max(1).min(widths.len())
+}
+
+/// The "+3" after the pills that fit.
+fn more_chip<'a>(hidden: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    container(
+        text(format!("+{hidden}"))
+            .font(reading.font)
+            .size((reading.size - 3.0).max(10.0))
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+    )
+    .height(Length::Fixed(PILL_HEIGHT))
+    .align_y(Alignment::Center)
+    .padding([PILL_PAD_Y, PILL_PAD_X])
+    .style(move |_theme: &Theme| container::Style {
+        background: Some(Background::Color(tokens.chip)),
+        text_color: Some(tokens.text_secondary),
+        border: Border { color: tokens.chip_border, width: 1.0, radius: PILL_RADIUS.into() },
+        shadow: Shadow::default(),
+    })
+    .into()
 }
 
 /// The first line of a commit message.
@@ -594,43 +664,16 @@ fn subject_of(message: &str) -> &str {
     message.lines().next().unwrap_or_default()
 }
 
-/// How tall a commit row is: its names line (wrapped across the column) above its subject
-/// (wrapped too), at least one base row.
-fn row_height(subject: &str, pills: &[RefPill], width: f32, reading: Reading) -> f32 {
-    let subject_h = crate::text_measure::height(subject, reading.font, reading.size, width);
-    let names_h = if pills.is_empty() {
-        0.0
-    } else {
-        pill_lines(pills, width, reading) as f32 * (PILL_HEIGHT + PILL_LINE_GAP) + STACK_GAP
-    };
-    (subject_h + names_h + ROW_PAD_Y * 2.0).max(ROW_HEIGHT)
-}
-
-/// Lines the pills take when wrapped into `width`.
-fn pill_lines(pills: &[RefPill], width: f32, reading: Reading) -> usize {
+/// The width a pill takes: its mark, its name and any ↓/↑ counts.
+fn pill_width(pill: &RefPill, reading: Reading) -> f32 {
     let small = (reading.size - 3.0).max(10.0);
-    let mut lines = 1;
-    let mut used = 0.0;
-    for pill in pills {
-        let mut pill_w = crate::text_measure::width(&pill.label, reading.font, small) + small + 3.0 + PILL_PAD_X * 2.0 + 2.0;
-        for count in [pill.behind, pill.ahead] {
-            if count > 0 {
-                pill_w += crate::text_measure::width(&format!("↓{count}"), reading.mono, (reading.size - 4.0).max(9.0)) + 3.0;
-            }
-        }
-        // A pill wider than the line wraps inside itself, taking a line per line it wraps to.
-        if pill_w > width {
-            lines += (pill_w / width).ceil() as usize - 1;
-        }
-        let pill_w = pill_w.min(width);
-        if used > 0.0 && used + PILL_GAP + pill_w > width {
-            lines += 1;
-            used = pill_w;
-        } else {
-            used += if used > 0.0 { PILL_GAP } else { 0.0 } + pill_w;
+    let mut width = crate::text_measure::width(&pill.label, reading.font, small) + small + 3.0 + PILL_PAD_X * 2.0 + 2.0;
+    for count in [pill.behind, pill.ahead] {
+        if count > 0 {
+            width += crate::text_measure::width(&format!("↓{count}"), reading.mono, (reading.size - 4.0).max(9.0)) + 3.0;
         }
     }
-    lines
+    width
 }
 
 /// "Branch: <name> · N commits  ✕" under the headers while the log is filtered to a branch.
@@ -716,133 +759,51 @@ fn ref_names_at<'s>(commit_id: &str, session: &'s WorktreeSession) -> Vec<&'s st
         .collect()
 }
 
-fn pill_strip<'a>(
-    commit_id: &str,
-    pills: &[RefPill],
-    lane: Color,
-    worktree_inks: &WorktreeInks,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    // Every ref at the commit, whole, wrapping onto more lines when they do not fit. Nothing
-    // hides behind a "+N": a hidden worktree is exactly the mix-up this row must prevent.
-    let mut pill_row = row![].spacing(PILL_GAP).align_y(Alignment::Center);
-    for pill in pills {
-        // A branch checked out in a worktree wears that worktree's colour, as everywhere else.
-        let ink = pill.worktree.as_deref().map_or(lane, |path| worktree_inks.colour(path));
-        // Its own menu on right-click, ahead of the row's: checkout, merge, copy the name…
-        pill_row = pill_row.push(
-            mouse_area(ref_pill(pill, ink, tokens, reading))
-                .on_right_press(Message::OpenContextMenu { target: pill_target(pill, commit_id) }),
-        );
-    }
-    pill_row.wrap().into()
-}
-
-/// "Working changes · n files" and the WIP pill. The pill is outlined, never filled, and
-/// carries the edit mark, so it cannot pass for a branch or tag pill. It is drawn in its
-/// worktree's colour; the active worktree's says so in words.
-fn wip_description_cell<'a>(
-    wip: &WipRow,
-    worktree: Color,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    let files = if wip.changes == 1 { "1 file".to_string() } else { format!("{} files", wip.changes) };
+/// A worktree's working changes, in the Refs column: the outlined pill with the edit mark, in
+/// the worktree's colour, so it cannot pass for a branch or tag. Cut at the column's edge if
+/// it must be; the row's hover text names the worktree and its folder whole.
+fn wip_refs_cell<'a>(wip: &WipRow, worktree: Color, width: f32, reading: Reading) -> Element<'a, Message> {
     let small = (reading.size - 3.0).max(10.0);
-    wip_cell(wip.label.clone(), files, wip.active, worktree, worktree, small, tokens, reading)
-}
-
-/// Follows the worktree's name on the row of the tab in front.
-const ACTIVE_MARK: &str = "· active";
-/// Space between the parts of a working-changes pill.
-const WIP_GAP: f32 = 3.0;
-
-#[allow(clippy::too_many_arguments)]
-fn wip_cell<'a>(
-    label: String,
-    files: String,
-    active: bool,
-    ink: iced::Color,
-    edge: iced::Color,
-    small: f32,
-    tokens: DesignTokens,
-    reading: Reading,
-) -> Element<'a, Message> {
-    // The short fixed parts ("· active", the file count) are measured and keep their width;
-    // the name takes what is left and wraps there. Laid out in plain order instead, the name
-    // took the whole row first and the fixed parts were squeezed to a letter per line.
-    let icon = (reading.size - 3.0).max(9.0);
-    let fixed = |value: &str, size: f32| crate::text_measure::width(value, reading.font, size).ceil() + 1.0;
-    let label_width = fixed(&label, small);
-    let active_width = if active { fixed(ACTIVE_MARK, small) + WIP_GAP } else { 0.0 };
-    let files_width = fixed(&files, reading.size);
-    let mut body = row![
-        glyph(Icon::Edit, icon, ink, &reading),
-        // Whole, wrapping if the column is narrow: never cut.
-        container(
-            text(label)
+    let pill = container(
+        row![
+            glyph(Icon::Edit, (reading.size - 3.0).max(9.0), worktree, &reading),
+            text(wip.label.clone())
                 .font(reading.font)
                 .size(small)
-                .wrapping(Wrapping::WordOrGlyph)
-                .style(move |_| text::Style { color: Some(ink) }),
-        )
-        .width(Length::Fill),
-    ]
-    .spacing(WIP_GAP)
-    .align_y(Alignment::Center);
-    if active {
-        body = body.push(
-            container(
-                text(ACTIVE_MARK)
-                    .font(reading.font)
-                    .size(small)
-                    .wrapping(Wrapping::None)
-                    .style(move |_| text::Style { color: Some(tokens.text_muted) }),
-            )
-            .width(Length::Fixed(active_width - WIP_GAP))
-            .clip(true),
-        );
-    }
-    // As wide as its content when there is room, narrower (the name wraps) when there is not.
-    let pill_width = icon + WIP_GAP + label_width + active_width + PILL_PAD_X * 2.0 + 4.0;
-    let pill = container(body)
-        .width(Length::Fill)
-        .max_width(pill_width)
-        .align_y(Alignment::Center)
-        .padding([PILL_PAD_Y + 2.0, PILL_PAD_X])
-        .style(move |_theme: &Theme| container::Style {
-            background: None,
-            text_color: Some(ink),
-            border: Border {
-                color: edge,
-                width: 1.0,
-                radius: PILL_RADIUS.into(),
-            },
-            shadow: Shadow::default(),
-        });
-    // The pill first: it names the worktree. The count follows, muted.
-    let stack = row![
-        pill,
-        container(
-            text(files)
-                .font(reading.font)
-                .size(reading.size)
                 .wrapping(Wrapping::None)
-                .style(move |_| text::Style {
-                    color: Some(tokens.text_muted),
-                }),
-        )
-        .width(Length::Fixed(files_width))
-        .clip(true),
-    ]
-    .spacing(SUBJECT_PILL_GAP)
-    .align_y(Alignment::Center);
-    container(stack)
-        .width(Length::Fill)
-        .padding([ROW_PAD_Y, 0.0])
-        .align_y(Alignment::Center)
-        .into()
+                .style(move |_| text::Style { color: Some(worktree) }),
+        ]
+        .spacing(3)
+        .align_y(Alignment::Center),
+    )
+    .height(Length::Fixed(PILL_HEIGHT))
+    .align_y(Alignment::Center)
+    .padding([PILL_PAD_Y, PILL_PAD_X])
+    .style(move |_theme: &Theme| container::Style {
+        background: None,
+        text_color: Some(worktree),
+        border: Border { color: worktree, width: 1.0, radius: PILL_RADIUS.into() },
+        shadow: Shadow::default(),
+    });
+    container(pill).width(Length::Fixed(width)).height(Length::Fixed(ROW_HEIGHT)).align_y(Alignment::Center).clip(true).into()
+}
+
+/// "Uncommitted changes · 78 files · active", in the Description column of a WIP row.
+fn wip_summary<'a>(wip: &WipRow, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let files = if wip.changes == 1 { "1 file".to_string() } else { format!("{} files", wip.changes) };
+    let active = if wip.active { " · active" } else { "" };
+    container(
+        text(format!("Uncommitted changes · {files}{active}"))
+            .font(reading.font)
+            .size(reading.size)
+            .wrapping(Wrapping::None)
+            .style(move |_| text::Style { color: Some(tokens.text_muted) }),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .align_y(Alignment::Center)
+    .clip(true)
+    .into()
 }
 
 /// `content` with `tip` shown under it on hover, in the tab strip's tooltip style.
@@ -898,11 +859,11 @@ fn ref_pill<'a>(pill: &RefPill, lane: Color, tokens: DesignTokens, reading: Read
     let mark = pill_mark(pill.kind);
     let mut body = row![
         glyph(mark, (reading.size - 3.0).max(9.0), fg, &reading),
-        // Whole: a long name wraps inside its pill.
+        // One line: a name too long for the column is cut there, and shown whole on hover.
         text(pill.label.clone())
             .font(reading.font)
             .size((reading.size - 3.0).max(10.0))
-            .wrapping(Wrapping::WordOrGlyph)
+            .wrapping(Wrapping::None)
             .style(move |_| text::Style { color: Some(fg) }),
     ]
     .spacing(3)
@@ -920,7 +881,7 @@ fn ref_pill<'a>(pill: &RefPill, lane: Color, tokens: DesignTokens, reading: Read
         }
     }
     container(body)
-        .height(Length::Shrink)
+        .height(Length::Fixed(PILL_HEIGHT))
         .align_y(Alignment::Center)
         .padding([PILL_PAD_Y, PILL_PAD_X])
         .style(move |_theme: &Theme| container::Style {
@@ -1019,20 +980,21 @@ mod measured_rows_tests {
     }
 
     #[test]
-    fn a_row_grows_to_hold_its_names_and_its_whole_subject() {
-        let plain = row_height("Update", &[], 400.0, reading());
-        assert_eq!(plain, ROW_HEIGHT, "a short subject is one base row");
-        let named = row_height("Update", &[pill("feature/tenant-db-isolation-shared-instance")], 400.0, reading());
-        assert!(named > plain, "the names line sits above the subject: {named}");
-        let long = "fix(plt): Correct tenant titles on first load and add notification page titles across every module";
-        let wrapped = row_height(long, &[], 150.0, reading());
-        assert!(wrapped > ROW_HEIGHT * 1.5, "a long subject wraps rather than being cut: {wrapped}");
+    fn as_many_refs_show_as_fit_and_the_rest_are_counted() {
+        assert_eq!(pills_that_fit(&[50.0, 50.0, 50.0], 200.0, 30.0), 3, "all fit: no count");
+        // 50 + 3 + 50 + 3 + "+1" (30) = 136 fits in 140; a third would not.
+        assert_eq!(pills_that_fit(&[50.0, 50.0, 50.0], 140.0, 30.0), 2);
+        assert_eq!(pills_that_fit(&[300.0, 50.0], 140.0, 30.0), 1, "the first always shows, cut at the edge");
+        assert_eq!(pills_that_fit(&[], 140.0, 30.0), 0);
     }
 
     #[test]
-    fn many_names_wrap_onto_more_lines() {
-        let names: Vec<RefPill> = (0..6).map(|i| pill(&format!("worktree-branch-number-{i}"))).collect();
-        assert!(pill_lines(&names, 300.0, reading()) >= 2);
-        assert_eq!(pill_lines(&names[..1], 3_000.0, reading()), 1);
+    fn a_pill_is_as_wide_as_its_name_and_its_counts() {
+        let plain = pill_width(&pill("main"), reading());
+        let long = pill_width(&pill("feature/tenant-db-isolation-shared-instance"), reading());
+        assert!(long > plain * 3.0, "{plain} vs {long}");
+        let mut counted = pill("main");
+        counted.ahead = 3;
+        assert!(pill_width(&counted, reading()) > plain);
     }
 }
