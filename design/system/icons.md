@@ -1,14 +1,15 @@
 # Icons
 
-All 44 icons come from Codicons 0.0.45 (`fonts/codicon.ttf`, © Microsoft, CC BY 4.0), compiled into the binary. Set them as text in the `icon` family at a `glyph` style; colour them with the text token of the row they sit in. A test checks that every codepoint below is in the font's cmap, so an icon never draws as a box.
+All 45 icons come from Codicons 0.0.45 (`fonts/codicon.ttf`, © Microsoft, CC BY 4.0), compiled into the binary. Set them as text in the `icon` family at a `glyph` style; colour them with the text token of the row they sit in. A test checks that every codepoint below is in the font's cmap, so an icon never draws as a box.
 
 | Icon | Codepoint | Where |
 |---|---|---|
+| account | U+EB99 | The author's avatar in the history |
 | add | U+EA60 | The tab-picker button; new branch, stash, worktree |
 | arrow-small-down | U+EA9D | Incoming count (`↓`), in `incoming` |
 | arrow-small-up | U+EAA0 | Outgoing count (`↑`), in `outgoing` |
-| branch | U+EA68 | The branch chip; Head and Local ref pills |
-| check | U+EAB2 | A succeeded job in the status bar; stage |
+| branch | U+EA68 | The branch chip; Local and Remote ref pills |
+| check | U+EAB2 | A succeeded job in the status bar; stage; the HEAD ref pill |
 | check-all | U+EBB1 | Stage all |
 | chevron-down | U+EAB4 | An open fold; the chip while its popup is open |
 | chevron-left | U+EAB5 | Back |
@@ -16,7 +17,7 @@ All 44 icons come from Codicons 0.0.45 (`fonts/codicon.ttf`, © Microsoft, CC BY
 | circle-filled | U+EA71 | A plain state dot |
 | clear-all | U+EABF | Clear the filter |
 | close | U+EA76 | Close a tab; a failed job; dismiss an error |
-| cloud | U+EBAA | Remote ref pills |
+| cloud | U+EBAA | Remote branches in the branch tree and the branch picker |
 | commit | U+EAFC | Commit |
 | compare | U+EAFD | Compare two refs |
 | discard | U+EAE2 | Discard changes |
@@ -49,4 +50,4 @@ All 44 icons come from Codicons 0.0.45 (`fonts/codicon.ttf`, © Microsoft, CC BY
 | trash | U+EA81 | Delete a branch or stash |
 | worktree | U+EA63 | Worktree ref pills; add a worktree |
 
-Fold chevrons: `chevron-right` closed, `chevron-down` open. Ref pill marks: Head and Local `branch`, Worktree `worktree`, Remote `cloud`, Tag `tag`.
+Fold chevrons: `chevron-right` closed, `chevron-down` open. Ref pill marks in the history: Head `check` ("HEAD → name"), Local and Remote `branch`, Worktree `worktree`, Tag `tag`.

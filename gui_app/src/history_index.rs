@@ -10,16 +10,18 @@
 use crate::commit_graph::{GraphRow, RowInks};
 use crate::ref_pills::RefPill;
 
-pub(crate) const COL_GAP: f32 = 10.0;
-pub(crate) const HASH_WIDTH: f32 = 64.0;
-/// Fits "Yesterday 23:59" and "28 Sep 2026".
-pub(crate) const WHEN_WIDTH: f32 = 112.0;
-pub(crate) const AUTHOR_WIDTH: f32 = 120.0;
+/// The divider between two columns.
+pub(crate) const COL_GAP: f32 = 1.0;
+/// Seven hex digits.
+pub(crate) const HASH_WIDTH: f32 = 76.0;
+/// Fits "17 Nov 2026 11:03".
+pub(crate) const WHEN_WIDTH: f32 = 128.0;
+pub(crate) const AUTHOR_WIDTH: f32 = 110.0;
 /// The narrowest the Description column may get before a column steps aside.
 pub(crate) const MIN_DESCRIPTION_WIDTH: f32 = 380.0;
 /// The Refs column, left of the graph, and the narrowest it gets when room is short.
-pub(crate) const REFS_WIDTH: f32 = 240.0;
-pub(crate) const MIN_REFS_WIDTH: f32 = 130.0;
+pub(crate) const REFS_WIDTH: f32 = 160.0;
+pub(crate) const MIN_REFS_WIDTH: f32 = 110.0;
 
 /// What an index was built from. Any difference means rebuilding it.
 #[derive(Debug, Clone, PartialEq, Eq)]

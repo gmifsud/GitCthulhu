@@ -42,6 +42,12 @@ pub(crate) fn log_date(now: i64, then: i64) -> String {
     }
 }
 
+/// The history's date column: "07 Nov 2026 08:00", every row the same shape.
+pub(crate) fn log_datetime(then: i64) -> String {
+    let (year, month, day) = civil_from_days(then.div_euclid(SECS_PER_DAY));
+    format!("{day:02} {} {year} {}", MONTHS[month - 1], clock(then))
+}
+
 /// Full date and time, for the commit details.
 pub(crate) fn full_date(then: i64) -> String {
     format!("{} {} UTC", calendar(then), clock(then))
@@ -67,6 +73,12 @@ mod tests {
         assert_eq!(log_date(NOW, NOW - 60), "Today 15:17");
         assert_eq!(log_date(NOW, NOW - SECS_PER_DAY), "Yesterday 15:18");
         assert_eq!(log_date(NOW, NOW - 3 * SECS_PER_DAY), "25 Oct 2026");
+    }
+
+    #[test]
+    fn the_history_shows_every_date_with_its_time() {
+        assert_eq!(log_datetime(NOW), "28 Oct 2026 15:18");
+        assert_eq!(log_datetime(NOW - 27 * SECS_PER_DAY), "01 Oct 2026 15:18", "the day is two digits");
     }
 
     #[test]

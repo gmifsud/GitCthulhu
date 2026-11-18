@@ -59,13 +59,15 @@ pub(crate) enum Icon {
     Target,
     Trash,
     Worktree,
+    /// A person in a circle: the author's avatar in the history.
+    Account,
 }
 
 impl Icon {
     /// Every icon, in declaration order: the font test and the design system walk this.
     /// Only those two builds have it, so the window build stays free of dead-code warnings.
     #[cfg(any(test, feature = "design-export"))]
-    pub(crate) const ALL: [Icon; 44] = [
+    pub(crate) const ALL: [Icon; 45] = [
         Icon::Add,
         Icon::ArrowSmallDown, Icon::ArrowSmallUp, Icon::Branch, Icon::Check, Icon::CheckAll, Icon::ChevronDown,
         Icon::ChevronLeft, Icon::ChevronRight, Icon::CircleFilled, Icon::ClearAll, Icon::Close, Icon::Cloud,
@@ -74,7 +76,7 @@ impl Icon {
         Icon::Merge, Icon::Pin, Icon::Pinned, Icon::Pull, Icon::Push, Icon::Refresh, Icon::Remove,
         Icon::Repo, Icon::Search, Icon::Stop, Icon::Terminal,
         Icon::Sparkle, Icon::StashApply, Icon::StashPop, Icon::Stash, Icon::SplitView, Icon::SwitchBranch,
-        Icon::Tag, Icon::Target, Icon::Trash, Icon::Worktree,
+        Icon::Tag, Icon::Target, Icon::Trash, Icon::Worktree, Icon::Account,
     ];
 
     pub(crate) fn codepoint(self) -> char {
@@ -123,6 +125,7 @@ impl Icon {
             Icon::Target => '\u{EBF8}',
             Icon::Trash => '\u{EA81}',
             Icon::Worktree => '\u{EA63}',
+            Icon::Account => '\u{EB99}',
         }
     }
 

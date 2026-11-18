@@ -89,18 +89,6 @@ pub(crate) fn width(text: &str, font: Font, size: f32) -> f32 {
     measure(text, font, size, f32::MAX / 4.0).width
 }
 
-/// Height of `text` wrapped to `width`.
-///
-/// Most text fits on one line, and saying so needs no layout: see [`fits_on_one_line`]. Only
-/// text that may wrap is laid out. On a first history load this skipped the shaping of nearly
-/// every subject, which was the whole of the freeze.
-pub(crate) fn height(text: &str, font: Font, size: f32, width: f32) -> f32 {
-    if fits_on_one_line(text, font, size, width) {
-        return one_line_height(font, size);
-    }
-    measure(text, font, size, width).height
-}
-
 /// Allowance on top of the summed advances, against rounding in the text engine.
 const FIT_MARGIN: f32 = 2.0;
 
@@ -143,10 +131,56 @@ fn measure_unwrapped(text: &str, font: Font, size: f32) -> f32 {
     measure(text, font, size, f32::MAX / 4.0).width
 }
 
-/// The height of one line of text at `size` in `font`.
-fn one_line_height(font: Font, size: f32) -> f32 {
-    measure("M", font, size, f32::MAX / 4.0).height
+/// `text` on one line `width` wide: whole when it fits, else cut and ended with "…".
+///
+/// Called for every row in view on every frame, so plain-ASCII text is cut with the advance
+/// table (no layout at all); anything else is laid out, and those layouts are cached.
+pub(crate) fn ellipsize(text: &str, font: Font, size: f32, width: f32) -> String {
+    if text.is_empty() || width <= 0.0 {
+        return String::new();
+    }
+    let ascii = text.bytes().all(|byte| (b' '..=b'~').contains(&byte));
+    if fits_on_one_line(text, font, size, width) || (!ascii && measure_unwrapped(text, font, size) + FIT_MARGIN <= width) {
+        return text.to_string();
+    }
+    let room = width - measure_unwrapped(ELLIPSIS, font, size) - FIT_MARGIN;
+    if room <= 0.0 {
+        return ELLIPSIS.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let keep = if ascii {
+        ADVANCES.with(|tables| {
+            let mut tables = tables.borrow_mut();
+            let table = tables.entry((font, (size * 10.0).round() as u32)).or_insert_with(|| ascii_advances(font, size));
+            let mut used = 0.0;
+            chars
+                .iter()
+                .take_while(|&&c| {
+                    used += table[usize::from(c as u8 - b' ')];
+                    used <= room
+                })
+                .count()
+        })
+    } else {
+        // The longest prefix that fits, by halving: laid-out widths grow with length.
+        let (mut low, mut high) = (0, chars.len());
+        while low < high {
+            let middle = (low + high + 1) / 2;
+            let prefix: String = chars[..middle].iter().collect();
+            if measure_unwrapped(&prefix, font, size) <= room {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        low
+    };
+    let mut cut: String = chars[..keep].iter().collect::<String>().trim_end().to_string();
+    cut.push_str(ELLIPSIS);
+    cut
 }
+
+const ELLIPSIS: &str = "…";
 
 thread_local! {
     /// Printable ASCII advances per (font, size in tenths).
@@ -162,8 +196,8 @@ mod tests {
         let short = width("main", Font::DEFAULT, 14.0);
         let long = width("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0);
         assert!(short > 0.0 && long > short * 4.0, "{short} vs {long}");
-        let one_line = height("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0, 2_000.0);
-        let wrapped = height("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0, 80.0);
+        let one_line = measure("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0, 2_000.0).height;
+        let wrapped = measure("feature/tenant-db-isolation-shared-instance", Font::DEFAULT, 14.0, 80.0).height;
         assert!(wrapped >= one_line * 2.0, "{one_line} vs {wrapped}");
     }
 
@@ -197,7 +231,22 @@ mod tests {
         }
         assert!(!fits_on_one_line("café", Font::DEFAULT, 14.0, 10_000.0), "not ASCII: laid out instead");
         assert!(!fits_on_one_line("", Font::DEFAULT, 14.0, 10_000.0));
-        assert_eq!(height("short", Font::DEFAULT, 14.0, 10_000.0), measure("short", Font::DEFAULT, 14.0, 10_000.0).height);
+    }
+
+    #[test]
+    fn text_too_long_is_cut_with_an_ellipsis_and_what_is_left_fits() {
+        for text in ["feature/tenant-db-isolation-shared-instance_LaneB", "Gregory Mifsud", "café crème brûlée au caramel"] {
+            let whole = width(text, Font::DEFAULT, 13.0);
+            assert_eq!(ellipsize(text, Font::DEFAULT, 13.0, whole + 10.0), text, "it fits: kept whole");
+            for room in [whole * 0.3, whole * 0.6, whole - 4.0] {
+                let cut = ellipsize(text, Font::DEFAULT, 13.0, room);
+                assert!(cut.ends_with('…'), "{cut:?}");
+                assert!(width(&cut, Font::DEFAULT, 13.0) <= room + 0.5, "{cut:?} is wider than {room}");
+                assert!(text.starts_with(cut.trim_end_matches('…')), "{cut:?} is not a start of {text:?}");
+            }
+        }
+        assert_eq!(ellipsize("anything", Font::DEFAULT, 13.0, 0.0), "");
+        assert_eq!(ellipsize("", Font::DEFAULT, 13.0, 100.0), "");
     }
 
     #[test]

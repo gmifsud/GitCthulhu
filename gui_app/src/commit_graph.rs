@@ -12,22 +12,23 @@ use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
 use crate::theme::hex_color;
 
 /// Height of every commit row: one line of text.
-pub(crate) const ROW_HEIGHT: f32 = 26.0;
+pub(crate) const ROW_HEIGHT: f32 = 25.0;
 /// Horizontal distance between lane centres.
-const LANE_SPACING: f32 = 16.0;
-/// An ordinary commit: a small hollow ring.
-const NODE_RADIUS: f32 = 3.5;
-/// A branch tip: a filled ring a little larger.
-const TIP_RADIUS: f32 = 4.5;
-/// A worktree's tip: an outer ring round a filled one.
-const RING_RADIUS: f32 = 6.0;
+const LANE_SPACING: f32 = 19.0;
+/// From the column's left edge to the first lane's centre.
+const LANE_INSET: f32 = 20.0;
+/// Every commit is a hollow ring, as in Zed.
+const NODE_RADIUS: f32 = 4.0;
+const TIP_RADIUS: f32 = 4.0;
+/// A worktree's tip: a dot inside the ring, so a worktree still reads as one.
+const RING_RADIUS: f32 = 4.0;
 const LINE_WIDTH: f32 = 1.5;
 /// How round a line's turn from one lane to another is.
 const CORNER: f32 = 6.0;
 /// The dotted line from a row's refs to its commit.
 const LEADER_DASH: [f32; 2] = [2.0, 3.0];
 /// Lane colours, cycled by lane index. Exported to the design system as `lane-0` … `lane-5`.
-pub(crate) const LANE_COLOURS: [u32; 6] = [0xF27D26, 0x3B82F6, 0x22C55E, 0xA855F7, 0xEC4899, 0x14B8A6];
+pub(crate) const LANE_COLOURS: [u32; 6] = [0xF0876A, 0xD6D6D6, 0xB4A0F5, 0xF2C46D, 0x86BDF0, 0x9DD7A6];
 
 /// How the graph's lanes cross one commit row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,13 +148,16 @@ pub(crate) fn graph_width(rows: &[GraphRow]) -> f32 {
         })
         .max()
         .map_or(0, |widest| widest + 1);
-    lanes as f32 * LANE_SPACING
+    if lanes == 0 {
+        return 0.0;
+    }
+    LANE_INSET * 2.0 + (lanes - 1) as f32 * LANE_SPACING
 }
 
 /// Lane centres grow right from the left edge so the tip (lane 0) sits
 /// against the left gutter — pills can touch the node.
 fn lane_x(lane: usize, _width: f32) -> f32 {
-    LANE_SPACING * (lane as f32 + 0.5)
+    LANE_INSET + LANE_SPACING * lane as f32
 }
 
 pub(crate) fn lane_colour(lane: usize) -> Color {
@@ -309,12 +313,10 @@ fn paint_row(
 
     let ring = |radius: f32| canvas::Path::circle(dot, radius);
     match mark {
-        NodeMark::Plain => frame.stroke(&ring(NODE_RADIUS), line(colour)),
-        NodeMark::Remote => frame.stroke(&ring(TIP_RADIUS), line(colour)),
-        NodeMark::Local => frame.fill(&ring(TIP_RADIUS), colour),
+        NodeMark::Plain | NodeMark::Remote | NodeMark::Local => frame.stroke(&ring(NODE_RADIUS), line(colour)),
         NodeMark::Worktree => {
             frame.stroke(&ring(RING_RADIUS), line(colour));
-            frame.fill(&ring(NODE_RADIUS), colour);
+            frame.fill(&ring(1.5), colour);
         }
     }
 }
@@ -477,7 +479,7 @@ mod tests {
             commit("C", &[]),
         ]);
 
-        assert_eq!(graph_width(&graph_rows(&nodes)), 3.0 * LANE_SPACING);
+        assert_eq!(graph_width(&graph_rows(&nodes)), LANE_INSET * 2.0 + 2.0 * LANE_SPACING);
         assert_eq!(graph_width(&[]), 0.0);
     }
 }
