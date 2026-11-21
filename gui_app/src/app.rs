@@ -424,7 +424,7 @@ pub(crate) enum Message {
     /// Ctrl+C was pressed; `focused` says whether the command line had focus.
     ShellCtrlC { focused: bool },
     /// Up / Down. `focused` says whether the command line had focus.
-    ShellHistory { step: i32, focused: bool },
+    ShellHistory { step: i32, focus: KeyFocus },
     /// Click in the terminal: put the caret on the command line.
     FocusShell,
     /// The terminal's top edge was grabbed.
@@ -2042,12 +2042,13 @@ impl GitApp {
                     palette.selected = step_selection(palette.selected, step, count);
                     return Task::none();
                 }
-                // No palette: Up / Down recall commands when the terminal's line has focus,
-                // and otherwise walk the list (`ShellHistory { focused: false }`).
-                if self.terminal_open {
-                    return when_shell_focused(move |focused| Message::ShellHistory { step, focused });
+                // No palette: ask what has focus. The terminal's line recalls commands, another
+                // field keeps its arrows, and with nothing focused the list walks
+                // (`ShellHistory { focus: Nothing }`). A prompt or modal owns the keys.
+                if self.modal_open() {
+                    return Task::none();
                 }
-                self.update(Message::ListKey { key: vertical_key(step), shift: self.modifiers.shift() })
+                when_key_focus(move |focus| Message::ShellHistory { step, focus })
             }
             Message::ListKey { key, shift } => self.walk_list(key, shift),
             Message::CtrlCPressed => {
@@ -2739,11 +2740,12 @@ impl GitApp {
                     Task::none()
                 }
             }
-            Message::ShellHistory { step, focused: false } => {
+            Message::ShellHistory { step, focus: KeyFocus::Nothing } => {
                 self.update(Message::ListKey { key: vertical_key(step), shift: self.modifiers.shift() })
             }
-            Message::ShellHistory { step, focused } => {
-                if focused && !self.shell_busy {
+            Message::ShellHistory { focus: KeyFocus::Field, .. } => Task::none(),
+            Message::ShellHistory { step, focus: KeyFocus::Shell } => {
+                if !self.shell_busy {
                     if let Some(line) = self.console.step_history(step) {
                         self.shell_input = line;
                         // Put the caret at the end, like a shell recalling a line.
@@ -4800,8 +4802,25 @@ impl GitApp {
 
     /// Arrow keys on the list last picked from. Up and Down step a row; in the changes tree,
     /// Left folds the selected file's folder and Right unfolds it with the folders above it.
+    /// A prompt, dialog, menu or sheet is open: it owns the keys, and selecting underneath
+    /// would close it.
+    fn modal_open(&self) -> bool {
+        self.confirm_discard.is_some()
+            || self.confirm_drop.is_some()
+            || self.branch_prompt.is_some()
+            || self.history_prompt.is_some()
+            || self.stash_prompt.is_some()
+            || self.confirm_detach.is_some()
+            || self.worktree_prompt.is_some()
+            || self.context_menu.is_some()
+            || self.clone_dialog.is_some()
+            || self.compare.is_some()
+            || self.settings_open
+            || self.shortcuts_open
+    }
+
     fn walk_list(&mut self, key: ListKeyName, shift: bool) -> Task<Message> {
-        if self.palette.is_some() {
+        if self.palette.is_some() || self.modal_open() {
             return Task::none();
         }
         let step = match key {
@@ -6200,6 +6219,22 @@ fn focus_shell() -> Task<Message> {
 /// Ask which widget has focus, then `to_message(true)` when it is the command line and
 /// `to_message(false)` otherwise, nothing focused included.
 fn when_shell_focused(to_message: impl Fn(bool) -> Message + Send + 'static) -> Task<Message> {
+    when_key_focus(move |focus| to_message(focus == KeyFocus::Shell))
+}
+
+/// What has keyboard focus, as far as the arrow keys care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyFocus {
+    /// No input has focus: the arrows belong to the lists.
+    Nothing,
+    /// The terminal's command line.
+    Shell,
+    /// Any other focusable widget (a text field): it keeps its keys.
+    Field,
+}
+
+/// Ask which widget has focus and answer with `to_message`.
+fn when_key_focus(to_message: impl Fn(KeyFocus) -> Message + Send + 'static) -> Task<Message> {
     use iced::advanced::widget::operation::{Focusable, Outcome};
     use iced::advanced::widget::{Id, Operation};
 
@@ -6226,7 +6261,13 @@ fn when_shell_focused(to_message: impl Fn(bool) -> Message + Send + 'static) -> 
 
     let shell = Id::from(iced::widget::text_input::Id::new(SHELL_INPUT_ID));
     iced::advanced::widget::operate(FindFocus(None))
-        .map(move |focused| to_message(focused.as_ref() == Some(&shell)))
+        .map(move |focused| {
+            to_message(match focused {
+                None => KeyFocus::Nothing,
+                Some(id) if id == shell => KeyFocus::Shell,
+                Some(_) => KeyFocus::Field,
+            })
+        })
 }
 
 fn vertical_key(step: i32) -> ListKeyName {
@@ -11226,16 +11267,75 @@ mod tests {
         assert_eq!(app.session().selection, Some(Selection::Commit { id: "aaaaaaa1".into() }), "the palette owns the arrows");
     }
 
-    #[test]
-    fn up_and_down_reach_the_list_unless_the_shell_line_has_focus() {
+    fn app_on_a_graph(ids: &[&str]) -> GitApp {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
-        *app.session().history_index.borrow_mut() = Some(crate::history_index::index_of(&["a", "b"]));
-        let _ = app.update(Message::Select(Selection::Commit { id: "a".into() }));
-        let _ = app.update(Message::ShellHistory { step: 1, focused: true });
-        assert_eq!(app.session().selection, Some(Selection::Commit { id: "a".into() }), "recall owns the key");
-        let _ = app.update(Message::ShellHistory { step: 1, focused: false });
-        assert_eq!(app.session().selection, Some(Selection::Commit { id: "b".into() }));
-        let _ = app.update(Message::PaletteMove(-1));
-        assert_eq!(app.session().selection, Some(Selection::Commit { id: "a".into() }), "no palette, no terminal");
+        *app.session().history_index.borrow_mut() = Some(crate::history_index::index_of(ids));
+        let _ = app.update(Message::Select(Selection::Commit { id: ids[0].into() }));
+        app
+    }
+
+    fn selected_commit(app: &GitApp) -> Option<&str> {
+        match &app.session().selection {
+            Some(Selection::Commit { id }) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn up_and_down_reach_the_list_only_when_nothing_has_focus() {
+        let mut app = app_on_a_graph(&["a", "b"]);
+        let _ = app.update(Message::ShellHistory { step: 1, focus: KeyFocus::Shell });
+        assert_eq!(selected_commit(&app), Some("a"), "recall owns the key");
+        let _ = app.update(Message::ShellHistory { step: 1, focus: KeyFocus::Field });
+        assert_eq!(selected_commit(&app), Some("a"), "a focused text input keeps its arrows");
+        let _ = app.update(Message::ShellHistory { step: 1, focus: KeyFocus::Nothing });
+        assert_eq!(selected_commit(&app), Some("b"));
+    }
+
+    #[test]
+    fn a_confirm_prompt_keeps_the_arrows_and_the_selection() {
+        let mut app = app_on_a_graph(&["a", "b"]);
+        app.confirm_discard = Some(vec![MarkedFile { path: "x.rs".into(), place: FileDisposition::Unstaged }]);
+        let _ = app.update(key(ListKeyName::Down, false));
+        let _ = app.update(Message::PaletteMove(1));
+        let _ = app.update(Message::ShellHistory { step: 1, focus: KeyFocus::Nothing });
+        assert!(app.confirm_discard.is_some(), "the prompt stays");
+        assert_eq!(selected_commit(&app), Some("a"));
+    }
+
+    #[test]
+    fn a_branch_name_prompt_keeps_its_text_when_arrows_are_pressed() {
+        let mut app = app_on_a_graph(&["a", "b"]);
+        app.branch_prompt = Some(BranchPrompt::Create { start: "a".into(), name: "feature/typed".into(), checkout: true });
+        let _ = app.update(key(ListKeyName::Down, false));
+        let _ = app.update(Message::ShellHistory { step: 1, focus: KeyFocus::Nothing });
+        match &app.branch_prompt {
+            Some(BranchPrompt::Create { name, .. }) => assert_eq!(name, "feature/typed"),
+            other => panic!("the prompt must stay, got {other:?}"),
+        }
+        assert_eq!(selected_commit(&app), Some("a"));
+    }
+
+    #[test]
+    fn walking_down_past_the_bottom_scrolls_the_history_without_a_new_index() {
+        let ids: Vec<String> = (0..40).map(|at| format!("c{at}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut app = app_on_a_graph(&refs);
+        let row = crate::commit_graph::ROW_HEIGHT;
+        // The view's layout holds each row's top in scroll px; rows are one ROW_HEIGHT apart.
+        *app.session().history_layout.borrow_mut() = crate::session::HistoryLayout {
+            rows: refs.iter().enumerate().map(|(at, id)| ((*id).to_string(), at as f32 * row)).collect(),
+        };
+        app.history_viewport = 3.0 * row;
+        app.history_scroll = 0.0;
+        let generation = app.session().history_generation;
+        for _ in 0..4 {
+            let _ = app.update(key(ListKeyName::Down, false));
+        }
+        assert_eq!(selected_commit(&app), Some("c4"));
+        assert_eq!(app.history_scroll, 2.0 * row, "row 4 ends the view of three rows");
+        assert_eq!(app.session().history_generation, generation);
+        let _ = app.update(key(ListKeyName::Up, false));
+        assert_eq!(app.history_scroll, 2.0 * row, "a row still in view does not scroll");
     }
 }
