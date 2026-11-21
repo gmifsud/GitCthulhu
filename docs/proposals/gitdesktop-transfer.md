@@ -1,5 +1,7 @@
 # GitDesktop → GitCthulhu transfer brief
 
+> **Refreshed 2026-11-21:** priorities and the feature matrix now live in [`../analysis/2026-11-21-gitdesktop-competitive-analysis.md`](../analysis/2026-11-21-gitdesktop-competitive-analysis.md). This brief keeps the stack contrast and transfer rule.
+
 Status: Living reference. Captures how [gmifsud/GitDesktop](https://github.com/gmifsud/GitDesktop) implements UI and features so we carry **behaviour and contracts** into this repo — not the Tauri/React stack.
 
 **Shipped on the binary (2026-10-25):** inspector section/folder collapse; commit files-changed → Diff focus; graph relative age + WIP row; unified Diff line numbers; status-bar expandable/dismissible errors + ahead/behind; keyboard Esc / F5 / Ctrl+R / Ctrl+S / Ctrl+Shift+L.
