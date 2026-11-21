@@ -9,11 +9,12 @@ pub(super) fn branch_prompt<'a>(
     prompt: &'a BranchPrompt,
     tokens: DesignTokens,
     reading: Reading,
+    current: &str,
 ) -> Element<'a, Message> {
     let (title, body, confirm_label, confirm_enabled, detail, field) = match prompt {
         BranchPrompt::Create { start, name, .. } => (
             "New branch",
-            "Created at this start point.",
+            "Created at this start point.".to_string(),
             "Create",
             !name.trim().is_empty(),
             start.as_str(),
@@ -21,7 +22,7 @@ pub(super) fn branch_prompt<'a>(
         ),
         BranchPrompt::Rename { from, to } => (
             "Rename branch",
-            "Renaming the current branch moves HEAD with it.",
+            "Renaming the current branch moves HEAD with it.".to_string(),
             "Rename",
             !to.trim().is_empty() && to.trim() != from,
             from.as_str(),
@@ -29,8 +30,16 @@ pub(super) fn branch_prompt<'a>(
         ),
         BranchPrompt::Delete { name } => (
             "Delete this branch?",
-            "A merged branch is deleted. The current branch is left as it is.",
+            "A merged branch is deleted. The current branch is left as it is.".to_string(),
             "Delete",
+            true,
+            name.as_str(),
+            None,
+        ),
+        BranchPrompt::Switch { name } => (
+            "Switch branch",
+            format!("You have changes on {current}."),
+            "Bring my changes",
             true,
             name.as_str(),
             None,
@@ -80,20 +89,25 @@ pub(super) fn branch_prompt<'a>(
                 .font(reading.font),
         );
     }
-    card = card.push(
-        row![
-            accent_button(
-                confirm_label,
-                Message::ConfirmBranch,
-                confirm_enabled,
-                tokens,
-                reading,
-            ),
-            command_button("Cancel", Message::CancelBranch, true, tokens, reading),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    );
+    let mut buttons = row![accent_button(
+        confirm_label,
+        Message::ConfirmBranch,
+        confirm_enabled,
+        tokens,
+        reading,
+    )]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if matches!(prompt, BranchPrompt::Switch { .. }) {
+        buttons = buttons.push(command_button(
+            "Stash and switch",
+            Message::SwitchStashingChanges,
+            true,
+            tokens,
+            reading,
+        ));
+    }
+    card = card.push(buttons.push(command_button("Cancel", Message::CancelBranch, true, tokens, reading)));
 
     container(
         container(card).style(move |_theme: &Theme| container::Style {

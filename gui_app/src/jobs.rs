@@ -541,6 +541,37 @@ pub(crate) fn checkout_in_background(
     )
 }
 
+/// Stash everything (untracked files too), switch, then put the stash back on the new branch.
+/// A failed switch pops the stash again, so the tree is as the user left it; the error says
+/// whether the changes are back or still in the stash.
+pub(crate) fn stash_and_checkout_in_background(
+    repo: SharedRepository,
+    name: String,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || stash_and_checkout(repo.as_ref(), &name),
+        || Err(DomainError::Unknown("switching branches was interrupted".to_string())),
+    )
+}
+
+fn stash_and_checkout(repo: &dyn GitRepository, name: &str) -> Result<(), DomainError> {
+    let message = format!("Switching to {name}");
+    repo.stash_push(&message, true)?;
+    // The stash just pushed is the newest one.
+    match repo.checkout_branch(name) {
+        Ok(()) => repo.stash_pop(0),
+        Err(error) => {
+            let reason = error_message(&error);
+            Err(DomainError::Unknown(match repo.stash_pop(0) {
+                Ok(()) => format!("{reason}
+Your changes are back."),
+                Err(_) => format!("{reason}
+Your changes are saved in the stash '{message}'."),
+            }))
+        }
+    }
+}
+
 pub(crate) fn checkout_detached_in_background(
     repo: SharedRepository,
     commit_id: String,
@@ -1408,6 +1439,51 @@ mod tests {
         ));
         assert_eq!(ok, Ok(()));
         assert_eq!(refused, Err(DomainError::AccessDenied));
+    }
+
+    fn stash_and_switch(repo: FakeGitRepository) -> Result<(), DomainError> {
+        iced::futures::executor::block_on(stash_and_checkout_in_background(Arc::new(repo), "feature".to_string()))
+    }
+
+    #[test]
+    fn stash_and_switch_pops_the_stash_back_when_the_checkout_fails() {
+        let refused = stash_and_switch(FakeGitRepository {
+            checkout_result: Err(DomainError::Unknown("error: pathspec 'feature' did not match".to_string())),
+            ..FakeGitRepository::ok()
+        });
+        assert_eq!(
+            refused,
+            Err(DomainError::Unknown(
+                "error: pathspec 'feature' did not match
+Your changes are back.".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn stash_and_switch_names_the_stash_when_it_cannot_be_popped_back() {
+        let stuck = stash_and_switch(FakeGitRepository {
+            checkout_result: Err(DomainError::Unknown("boom".to_string())),
+            stash_pop_result: Err(DomainError::Unknown("pop failed".to_string())),
+            ..FakeGitRepository::ok()
+        });
+        assert_eq!(
+            stuck,
+            Err(DomainError::Unknown(
+                "boom
+Your changes are saved in the stash 'Switching to feature'.".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn stash_and_switch_stops_when_nothing_could_be_stashed() {
+        let refused = stash_and_switch(FakeGitRepository {
+            stash_push_result: Err(DomainError::Unknown("no stash".to_string())),
+            ..FakeGitRepository::ok()
+        });
+        assert_eq!(refused, Err(DomainError::Unknown("no stash".to_string())));
+        assert_eq!(stash_and_switch(FakeGitRepository::ok()), Ok(()));
     }
 
     #[test]

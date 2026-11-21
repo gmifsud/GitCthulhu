@@ -12,7 +12,7 @@ use crate::changes::{filtered_marked_paths, matching_change_paths, ChangeChip, M
 use crate::context_menu::{gitignore_pattern, ContextTarget};
 use crate::jobs::{
     add_worktree_in_background, append_gitignore_in_background, branch_in_background,
-    checkout_in_background, choose_repository_folder,
+    checkout_in_background, choose_repository_folder, stash_and_checkout_in_background,
     discard_hunk_in_background, discard_paths_in_background,
     edit_in_background, error_message, fetch_in_background, force_push_in_background, history_in_background,
     init_in_background, list_models_in_background, load_patch_in_background,
@@ -610,6 +610,10 @@ pub(crate) enum Message {
     BranchNameChanged(String),
     ConfirmBranch,
     CancelBranch,
+    /// The switch prompt: check out and carry the working changes along.
+    SwitchBringingChanges,
+    /// The switch prompt: stash the changes, check out, then pop them on the new branch.
+    SwitchStashingChanges,
     BranchFinished(SessionKey, Result<(), DomainError>),
     AskCherryPick,
     AskReset,
@@ -1027,7 +1031,7 @@ pub(crate) struct StashPrompt {
     pub paths: Vec<String>,
 }
 
-/// A create, rename, or delete waiting for the user to confirm the name.
+/// A create, rename, delete, or switch waiting for the user to confirm the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BranchPrompt {
     /// `checkout` switches to the new branch once it exists (JetBrains' default).
@@ -1038,6 +1042,8 @@ pub(crate) enum BranchPrompt {
     },
     Rename { from: String, to: String },
     Delete { name: String },
+    /// A checkout waiting on what to do with staged or unstaged changes.
+    Switch { name: String },
 }
 
 enum BranchAsk {
@@ -2106,10 +2112,36 @@ impl GitApp {
             Message::StageMarked => self.edit_marked(true),
             Message::UnstageMarked => self.edit_marked(false),
             Message::CheckoutBranch(branch) => {
+                let Some(session) = self.active_session() else {
+                    return Task::none();
+                };
+                let key = session.key();
+                if !session.state.loading && self.switch_would_carry_changes(&branch) {
+                    self.confirm_discard = None;
+                    self.confirm_drop = None;
+                    self.history_prompt = None;
+                    self.branch_prompt = Some(BranchPrompt::Switch { name: branch });
+                    return Task::none();
+                }
+                self.checkout_for(&key, branch)
+            }
+            Message::SwitchBringingChanges => {
+                let Some(BranchPrompt::Switch { name }) = self.branch_prompt.take() else {
+                    return Task::none();
+                };
                 let Some(key) = self.active_session().map(WorktreeSession::key) else {
                     return Task::none();
                 };
-                self.checkout_for(&key, branch)
+                self.checkout_for(&key, name)
+            }
+            Message::SwitchStashingChanges => {
+                let Some(BranchPrompt::Switch { name }) = self.branch_prompt.take() else {
+                    return Task::none();
+                };
+                let Some(key) = self.active_session().map(WorktreeSession::key) else {
+                    return Task::none();
+                };
+                self.stash_and_checkout_for(&key, name)
             }
             Message::CheckoutFinished(path, result) => {
                 // A checkout moves this worktree's branch, which the explorer lists.
@@ -4590,8 +4622,35 @@ impl GitApp {
         })
     }
 
+    /// Whether checking out `branch` from the active tab has staged or unstaged changes to
+    /// carry or lose. Untracked files travel with any checkout, so they never count. Conflicted
+    /// files do not count either: a stash cannot hold unmerged paths, and git refuses the
+    /// checkout with its own reason, which the error strip shows. The branch already checked
+    /// out is a no-op, so it never asks.
+    fn switch_would_carry_changes(&self, branch: &str) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        let on_it = session.state.branches.iter().any(|b| b.is_head && !b.is_remote && b.name == branch);
+        !on_it
+            && session
+                .state
+                .current_status
+                .as_ref()
+                .is_some_and(|status| !status.staged_files.is_empty() || !status.unstaged_files.is_empty())
+    }
+
     /// Check out `branch` in the session at `path`, whichever tab is active.
     fn checkout_for(&mut self, key: &SessionKey, branch: String) -> Task<Message> {
+        self.start_checkout(key, branch, false)
+    }
+
+    /// Stash the changes (untracked included), check out `branch`, and pop the stash back.
+    fn stash_and_checkout_for(&mut self, key: &SessionKey, branch: String) -> Task<Message> {
+        self.start_checkout(key, branch, true)
+    }
+
+    fn start_checkout(&mut self, key: &SessionKey, branch: String, stash: bool) -> Task<Message> {
         let Some(session) = self.session_mut_for(key) else {
             return Task::none();
         };
@@ -4607,6 +4666,21 @@ impl GitApp {
             current: false,
         });
         self.error = None;
+        if stash {
+            self.begin_activity(
+                &path,
+                crate::activity::Action::new(
+                    "Stash and switch",
+                    branch.clone(),
+                    format!(
+                        "git stash push --include-untracked -m \"Switching to {branch}\" && git checkout {branch} && git stash pop"
+                    ),
+                ),
+            );
+            return Task::perform(stash_and_checkout_in_background(repo, branch), move |result| {
+                Message::CheckoutFinished(key.clone(), result)
+            });
+        }
         self.begin_activity(
             &path,
             crate::activity::Action::new("Checkout", branch.clone(), format!("git checkout {branch}")),
@@ -5398,6 +5472,8 @@ impl GitApp {
                 Some(false) => BranchAction::Delete { name },
                 None => return self.branch_is_gone(),
             },
+            // Enter on the prompt takes the default: bring the changes along.
+            BranchPrompt::Switch { .. } => return self.update(Message::SwitchBringingChanges),
         };
         self.run_branch(action)
     }
@@ -7784,6 +7860,101 @@ mod tests {
         let _ = app.update(Message::CheckoutBranch("feature".to_string()));
         assert!(app.session_mut().state.loading);
         assert_eq!(app.error, None);
+    }
+
+    fn status_with(
+        staged: &[&str],
+        unstaged: &[&str],
+        untracked: &[&str],
+        conflicted: &[&str],
+    ) -> core_domain::RepoStatus {
+        let list = |paths: &[&str]| paths.iter().map(|path| path.to_string()).collect();
+        core_domain::RepoStatus {
+            staged_files: list(staged),
+            unstaged_files: list(unstaged),
+            untracked_files: list(untracked),
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: list(conflicted),
+        }
+    }
+
+    /// An app on `main` with `feature` beside it and the given working tree.
+    fn app_on_main_with(status: core_domain::RepoStatus) -> GitApp {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.branches = vec![branch("main", true), branch("feature", false)];
+        app.session_mut().state.current_status = Some(status);
+        app
+    }
+
+    #[test]
+    fn a_dirty_tree_asks_before_switching_and_a_clean_one_does_not() {
+        for dirty in [status_with(&["a.rs"], &[], &[], &[]), status_with(&[], &["a.rs"], &[], &[])] {
+            let mut app = app_on_main_with(dirty);
+            let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+            assert_eq!(app.branch_prompt, Some(BranchPrompt::Switch { name: "feature".to_string() }));
+            assert!(!app.session().state.loading, "nothing runs until the user chooses");
+            assert!(app.modal_open(), "the prompt owns the arrow keys");
+        }
+        // Clean, or untracked files only: git carries those across, so there is nothing to ask.
+        for calm in [status_with(&[], &[], &[], &[]), status_with(&[], &[], &["new.txt"], &[])] {
+            let mut app = app_on_main_with(calm);
+            let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+            assert_eq!(app.branch_prompt, None);
+            assert!(app.session().state.loading, "the checkout started at once");
+        }
+    }
+
+    #[test]
+    fn switching_to_the_branch_you_are_on_never_asks() {
+        let mut app = app_on_main_with(status_with(&[], &["a.rs"], &[], &[]));
+        let _ = app.update(Message::CheckoutBranch("main".to_string()));
+        assert_eq!(app.branch_prompt, None);
+    }
+
+    #[test]
+    fn conflicted_files_alone_do_not_ask_and_git_gives_its_own_refusal() {
+        let mut app = app_on_main_with(status_with(&[], &[], &[], &["a.rs"]));
+        let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+        assert_eq!(app.branch_prompt, None, "a stash cannot hold unmerged files");
+        assert!(app.session().state.loading);
+    }
+
+    #[test]
+    fn bringing_the_changes_checks_out_without_stashing() {
+        let mut app = app_on_main_with(status_with(&[], &["a.rs"], &[], &[]));
+        let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+        let _ = app.update(Message::SwitchBringingChanges);
+        assert_eq!(app.branch_prompt, None);
+        assert!(app.session().state.loading);
+        let record = &app.activity.running().expect("logged").record;
+        assert_eq!(record.command, "git checkout feature");
+    }
+
+    #[test]
+    fn stashing_the_changes_runs_one_logged_job_and_closes_the_prompt() {
+        let mut app = app_on_main_with(status_with(&[], &["a.rs"], &[], &[]));
+        let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+        let _ = app.update(Message::SwitchStashingChanges);
+        assert_eq!(app.branch_prompt, None);
+        assert!(app.session().state.loading);
+        let record = &app.activity.running().expect("logged").record;
+        assert_eq!((record.title.as_str(), record.detail.as_str()), ("Stash and switch", "feature"));
+        assert_eq!(
+            record.command,
+            "git stash push --include-untracked -m \"Switching to feature\" && git checkout feature && git stash pop"
+        );
+    }
+
+    #[test]
+    fn cancelling_the_switch_prompt_changes_nothing() {
+        let mut app = app_on_main_with(status_with(&[], &["a.rs"], &[], &[]));
+        let _ = app.update(Message::CheckoutBranch("feature".to_string()));
+        let _ = app.update(Message::CancelBranch);
+        assert_eq!(app.branch_prompt, None);
+        assert!(!app.session().state.loading);
     }
 
     #[test]

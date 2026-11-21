@@ -175,7 +175,8 @@ impl GitApp {
             return Some(confirm_drop_stash(&stash.message, tokens, reading));
         }
         if let Some(prompt) = &self.branch_prompt {
-            return Some(branch_prompt(prompt, tokens, reading));
+            let current = refs::current_branch_name(&self.session().state.branches);
+            return Some(branch_prompt(prompt, tokens, reading, &current));
         }
         if let Some(prompt) = &self.history_prompt {
             let branches = &self.session().state.branches;
