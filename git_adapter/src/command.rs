@@ -46,6 +46,8 @@ pub(crate) fn git_program(repo_path: &str, args: &[&str]) -> std::process::Comma
         .arg(repo_path)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0");
+    #[cfg(test)]
+    isolate_from_user_config(&mut command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -53,6 +55,19 @@ pub(crate) fn git_program(repo_path: &str, args: &[&str]) -> std::process::Comma
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// The null device, which git reads as an empty config file.
+#[cfg(test)]
+const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+/// Under test, git reads no global or system config, so a developer's settings (hooks,
+/// `push.default`, signing) cannot change results. Fixtures pin what they need locally.
+#[cfg(test)]
+pub(crate) fn isolate_from_user_config(command: &mut std::process::Command) {
+    command
+        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
+        .env("GIT_CONFIG_NOSYSTEM", "1");
 }
 
 fn git_command(repo_path: &str, args: &[&str]) -> std::process::Command {

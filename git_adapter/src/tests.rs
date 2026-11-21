@@ -639,16 +639,16 @@ fn fetch_brings_new_commits_from_a_local_remote() {
     let first = origin.commit("first", &[("a.txt", "one\n")], 0);
     let branch = origin.head_branch();
     let dest = tempfile::tempdir().expect("clone dir");
-    let cloned = std::process::Command::new("git")
-        .args([
+    let cloned = fixture_git(
+        std::env::temp_dir().as_path(),
+        &[
             "clone",
             origin.workdir().to_str().expect("utf-8 origin"),
             dest.path().to_str().expect("utf-8 clone"),
-        ])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .status()
-        .expect("run git clone");
+        ],
+    )
+    .status()
+    .expect("run git clone");
     assert!(cloned.success(), "git clone failed");
     assert_eq!(remote_tip(dest.path(), &branch), first);
 
@@ -665,19 +665,12 @@ fn fetch_of_a_missing_remote_reports_git_message() {
     let fixture = TestRepo::new();
     fixture.commit("first", &[("a.txt", "one\n")], 0);
     let missing = fixture.workdir().join("missing-remote");
-    let added = std::process::Command::new("git")
-        .args([
-            "-C",
-            fixture.workdir().to_str().expect("utf-8 workdir"),
-            "remote",
-            "add",
-            "origin",
-            missing.to_str().expect("utf-8 missing path"),
-        ])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .status()
-        .expect("git remote add");
+    let added = fixture_git(
+        fixture.workdir(),
+        &["remote", "add", "origin", missing.to_str().expect("utf-8 missing path")],
+    )
+    .status()
+    .expect("git remote add");
     assert!(added.success(), "git remote add failed");
 
     let error = fixture.adapter().fetch().expect_err("missing remote");
@@ -693,8 +686,34 @@ fn fetch_of_a_missing_remote_reports_git_message() {
     }
 }
 
-fn git_in(dir: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
+/// The values a command sets for `name`, if any.
+fn env_of(command: &std::process::Command, name: &str) -> Option<String> {
+    command
+        .get_envs()
+        .find(|(key, _)| *key == name)
+        .and_then(|(_, value)| value.map(|value| value.to_string_lossy().to_string()))
+}
+
+#[test]
+fn git_under_test_reads_no_global_or_system_config() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    for command in [
+        super::command::git_program(dir.to_str().expect("utf-8 path"), &["status"]),
+        fixture_git(dir, &["status"]),
+    ] {
+        assert_eq!(env_of(&command, "GIT_CONFIG_GLOBAL").as_deref(), Some(null_device));
+        assert_eq!(env_of(&command, "GIT_CONFIG_NOSYSTEM").as_deref(), Some("1"));
+    }
+    let global = run_git_stdout(dir.to_str().expect("utf-8 path"), &["config", "--global", "--list"]);
+    assert_eq!(global.unwrap_or_default(), "", "git sees no global config");
+}
+
+/// A git command for fixture set-up in `dir`, with a fixed identity.
+fn fixture_git(dir: &std::path::Path, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -703,9 +722,13 @@ fn git_in(dir: &std::path::Path, args: &[&str]) {
         .env("GIT_AUTHOR_EMAIL", "author@example.com")
         .env("GIT_COMMITTER_NAME", "Test Author")
         .env("GIT_COMMITTER_EMAIL", "author@example.com")
-        .stdin(std::process::Stdio::null())
-        .status()
-        .expect("run git");
+        .stdin(std::process::Stdio::null());
+    super::command::isolate_from_user_config(&mut command);
+    command
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let status = fixture_git(dir, args).status().expect("run git");
     assert!(status.success(), "git {args:?} failed");
 }
 
@@ -719,15 +742,7 @@ fn push_sends_a_new_commit_to_the_upstream() {
         origin.workdir(),
         &["config", "receive.denyCurrentBranch", "ignore"],
     );
-    let dest = tempfile::tempdir().expect("clone dir");
-    git_in(
-        std::env::temp_dir().as_path(),
-        &[
-            "clone",
-            origin.workdir().to_str().expect("utf-8 origin"),
-            dest.path().to_str().expect("utf-8 clone"),
-        ],
-    );
+    let dest = cloned_from(&origin);
     std::fs::write(dest.path().join("a.txt"), "two\n").expect("edit clone");
     git_in(dest.path(), &["-c", "commit.gpgsign=false", "add", "a.txt"]);
     git_in(
@@ -793,7 +808,21 @@ fn cloned_from(origin: &TestRepo) -> tempfile::TempDir {
             dest.path().to_str().expect("utf-8 clone"),
         ],
     );
+    pin_local_config(dest.path());
     dest
+}
+
+/// Pin line endings, identity and signing in a clone, as `TestRepo::new` does, so the adapter's
+/// own commands there need nothing from a global config.
+fn pin_local_config(dir: &std::path::Path) {
+    for (key, value) in [
+        ("core.autocrlf", "false"),
+        ("user.name", "Test Author"),
+        ("user.email", "author@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_in(dir, &["config", key, value]);
+    }
 }
 
 fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
@@ -2216,13 +2245,7 @@ fn unpushed_is_empty_on_an_unborn_branch_that_has_a_remote() {
 
 /// The full message of HEAD, as git stores it.
 fn head_message(dir: &std::path::Path) -> String {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["log", "-1", "--format=%B"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("run git log");
+    let output = fixture_git(dir, &["log", "-1", "--format=%B"]).output().expect("run git log");
     assert!(output.status.success(), "git log failed");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
@@ -2300,14 +2323,7 @@ fn undo_is_refused_during_a_conflicted_merge_and_with_unmerged_entries() {
     diverged_on_a_txt(dir);
     let head = head_at(dir);
     // Conflicts, so git exits non-zero and leaves the merge in progress.
-    let merged = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["merge", "topic"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("run git merge");
+    let merged = fixture_git(dir, &["merge", "topic"]).output().expect("run git merge");
     assert!(!merged.status.success(), "the merge conflicts");
     let merge_head = fixture.repo.git_dir().join("MERGE_HEAD");
     assert!(merge_head.exists());
