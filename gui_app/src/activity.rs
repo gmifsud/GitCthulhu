@@ -330,6 +330,7 @@ pub(crate) fn history_action(action: &crate::jobs::HistoryAction) -> Action {
         HistoryAction::CherryPick { id } => {
             Action::new("Cherry-pick", short(id), format!("git cherry-pick {}", short(id)))
         }
+        HistoryAction::Revert { id } => Action::new("Revert", short(id), format!("git revert {}", short(id))),
         HistoryAction::Reset { id, mode } => {
             let flag = match mode {
                 ResetMode::Soft => "--soft",

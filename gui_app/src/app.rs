@@ -616,11 +616,13 @@ pub(crate) enum Message {
     SwitchStashingChanges,
     BranchFinished(SessionKey, Result<(), DomainError>),
     AskCherryPick,
+    AskRevert,
     AskReset,
     AskMerge,
     AskRebase,
     CancelHistory,
     ConfirmCherryPick,
+    ConfirmRevert,
     ConfirmReset(ResetMode),
     ConfirmMerge,
     ConfirmRebase,
@@ -1010,6 +1012,8 @@ pub(crate) enum WorktreePrompt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HistoryPrompt {
     CherryPick { id: String },
+    /// Revert a commit: a new commit undoes it.
+    Revert { id: String },
     Reset { id: String },
     /// `name` is empty until the user picks a branch; `no_ff` records a merge commit always.
     Merge { name: String, no_ff: bool },
@@ -1055,6 +1059,7 @@ enum BranchAsk {
 #[derive(Clone, Copy)]
 enum HistoryAsk {
     CherryPick,
+    Revert,
     Reset,
     Merge,
     Rebase,
@@ -3518,6 +3523,7 @@ impl GitApp {
                 }
             }
             Message::AskCherryPick => self.ask_history(HistoryAsk::CherryPick),
+            Message::AskRevert => self.ask_revert(),
             Message::AskReset => self.ask_history(HistoryAsk::Reset),
             Message::AskMerge => self.ask_history(HistoryAsk::Merge),
             Message::AskRebase => self.ask_history(HistoryAsk::Rebase),
@@ -3526,6 +3532,7 @@ impl GitApp {
                 Task::none()
             }
             Message::ConfirmCherryPick => self.confirm_cherry_pick(),
+            Message::ConfirmRevert => self.confirm_revert(),
             Message::ConfirmReset(mode) => self.confirm_reset(mode),
             Message::ConfirmMerge => self.confirm_merge(),
             Message::ConfirmRebase => self.confirm_rebase(),
@@ -5571,17 +5578,17 @@ impl GitApp {
         }
         let visible = session.shown_selection();
         let prompt = match ask {
-            HistoryAsk::CherryPick | HistoryAsk::Reset => {
+            HistoryAsk::CherryPick | HistoryAsk::Revert | HistoryAsk::Reset => {
                 let Selection::Commit { id } = visible else {
                     return Task::none();
                 };
                 if !session.commit_loaded(&id) {
                     return Task::none();
                 }
-                if matches!(ask, HistoryAsk::CherryPick) {
-                    HistoryPrompt::CherryPick { id }
-                } else {
-                    HistoryPrompt::Reset { id }
+                match ask {
+                    HistoryAsk::CherryPick => HistoryPrompt::CherryPick { id },
+                    HistoryAsk::Revert => HistoryPrompt::Revert { id },
+                    _ => HistoryPrompt::Reset { id },
                 }
             }
             HistoryAsk::Merge | HistoryAsk::Rebase => {
@@ -5620,6 +5627,29 @@ impl GitApp {
             return self.commit_is_gone();
         }
         self.run_history(HistoryAction::CherryPick { id })
+    }
+
+    /// Ask to revert the selected commit. While a merge, rebase, cherry-pick or revert is in
+    /// progress git would refuse, so the reason is shown instead of a dialog.
+    fn ask_revert(&mut self) -> Task<Message> {
+        if self.active_session().is_none_or(|session| session.state.loading) {
+            return Task::none();
+        }
+        if let Some(operation) = self.current_operation() {
+            self.error = Some(crate::actions::finish_operation_reason(operation).to_string());
+            return Task::none();
+        }
+        self.ask_history(HistoryAsk::Revert)
+    }
+
+    fn confirm_revert(&mut self) -> Task<Message> {
+        let Some(HistoryPrompt::Revert { id }) = self.history_prompt.clone() else {
+            return Task::none();
+        };
+        if !self.commit_is_loaded(&id) {
+            return self.commit_is_gone();
+        }
+        self.run_history(HistoryAction::Revert { id })
     }
 
     fn confirm_reset(&mut self, mode: ResetMode) -> Task<Message> {
@@ -6076,6 +6106,10 @@ impl GitApp {
             Kind::CherryPick { id } => {
                 select(self, Selection::Commit { id });
                 self.update(Message::AskCherryPick)
+            }
+            Kind::Revert { id } => {
+                select(self, Selection::Commit { id });
+                self.update(Message::AskRevert)
             }
             Kind::MergeCommit { id } => {
                 if self.active_session().is_none_or(|session| session.state.loading) {
@@ -8677,6 +8711,42 @@ mod tests {
             app.error.as_deref(),
             Some("That commit is no longer there.")
         );
+    }
+
+    #[test]
+    fn revert_waits_for_confirm_then_runs_and_a_missing_commit_is_refused() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.commits = vec![commit("abc1234")];
+        app.session_mut().selection = Some(Selection::Commit { id: "abc1234".to_string() });
+        let _ = app.update(Message::AskRevert);
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::Revert { id: "abc1234".to_string() }));
+        let _ = app.update(Message::ConfirmRevert);
+        assert!(app.session_mut().state.loading, "the revert is running");
+        assert!(app.history_prompt.is_none());
+
+        let mut gone = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        gone.session_mut().state.commits = vec![commit("abc1234")];
+        gone.session_mut().selection = Some(Selection::Commit { id: "abc1234".to_string() });
+        let _ = gone.update(Message::AskRevert);
+        gone.session_mut().state.commits.clear();
+        let _ = gone.update(Message::ConfirmRevert);
+        assert!(!gone.session_mut().state.loading);
+        assert_eq!(gone.error.as_deref(), Some("That commit is no longer there."));
+    }
+
+    #[test]
+    fn revert_is_refused_with_the_reason_while_an_operation_is_in_progress() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.commits = vec![commit("abc1234")];
+        app.session_mut().selection = Some(Selection::Commit { id: "abc1234".to_string() });
+        let mut rebasing = staged_nothing_status();
+        rebasing.operation = Some(core_domain::RepoOperation::Rebase);
+        app.session_mut().state.apply_event(ViewEvent::StatusUpdated(rebasing));
+
+        let _ = app.update(Message::AskRevert);
+
+        assert!(app.history_prompt.is_none());
+        assert_eq!(app.error.as_deref(), Some("Finish or abort the rebase first."));
     }
 
     #[test]

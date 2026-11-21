@@ -79,6 +79,12 @@ pub trait GitRepository {
     fn delete_branch(&self, name: &str) -> Result<(), DomainError>;
     /// `git cherry-pick -- <commit>`. `commit` is a hex object id.
     fn cherry_pick(&self, commit_id: &str) -> Result<(), DomainError>;
+    /// `git revert --no-edit -- <commit>`: a new commit undoes `commit` on the current branch.
+    /// `commit` is a hex object id. A conflict leaves the revert in progress
+    /// ([`RepoStatus::operation`]) and returns git's message.
+    fn revert(&self, _commit_id: &str) -> Result<(), DomainError> {
+        Err(DomainError::Unknown("this repository cannot revert a commit".to_string()))
+    }
     /// `git reset --soft`, `--mixed`, or `--hard` to a hex object id.
     fn reset(&self, commit_id: &str, mode: ResetMode) -> Result<(), DomainError>;
     /// `git merge [--no-ff] -- <name>`. With `no_ff` a merge commit is recorded even when a

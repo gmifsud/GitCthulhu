@@ -707,6 +707,13 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["cherry-pick", "--", commit_id])
     }
 
+    fn revert(&self, commit_id: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_hex_commit(commit_id)?;
+        // No editor: git's prepared `Revert "…"` message is kept.
+        run_git(&self.repo_path, &["revert", "--no-edit", "--", commit_id])
+    }
+
     fn reset(&self, commit_id: &str, mode: ResetMode) -> Result<(), DomainError> {
         self.open_repo()?;
         require_hex_commit(commit_id)?;

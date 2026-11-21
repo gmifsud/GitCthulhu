@@ -943,6 +943,8 @@ pub(crate) enum BranchAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HistoryAction {
     CherryPick { id: String },
+    /// A new commit that undoes `id` on the current branch.
+    Revert { id: String },
     Reset { id: String, mode: ResetMode },
     Merge { name: String, no_ff: bool },
     Rebase { name: String },
@@ -976,6 +978,7 @@ pub(crate) fn history_in_background(
     in_background(
         move || match action {
             HistoryAction::CherryPick { id } => repo.cherry_pick(&id),
+            HistoryAction::Revert { id } => repo.revert(&id),
             HistoryAction::Reset { id, mode } => repo.reset(&id, mode),
             HistoryAction::Merge { name, no_ff } => repo.merge_branch(&name, no_ff),
             HistoryAction::Abort(operation) => repo.abort_operation(operation),

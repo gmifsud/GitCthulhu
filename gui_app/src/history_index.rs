@@ -48,7 +48,8 @@ pub(crate) struct IndexRow {
     pub(crate) subject: String,
     pub(crate) author: String,
     pub(crate) timestamp: i64,
-    pub(crate) merge: bool,
+    /// How many parents the commit has: a merge has more than one.
+    pub(crate) parents: usize,
     /// On no remote yet: drawn with an up arrow before the short hash.
     pub(crate) unpushed: bool,
     pub(crate) graph: GraphRow,
@@ -180,7 +181,7 @@ mod tests {
             subject: String::new(),
             author: String::new(),
             timestamp: 0,
-            merge: false,
+            parents: 1,
             unpushed: false,
             graph: GraphRow { lane: 0, incoming: vec![], passing: vec![], outgoing: vec![] },
             inks: RowInks::default(),

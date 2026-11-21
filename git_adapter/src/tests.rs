@@ -2592,3 +2592,55 @@ fn the_includes_check_needs_git_2_30_and_a_reflog() {
     assert_eq!(force_guard(Some((2, 47)), false), LeaseOnly);
     assert_eq!(force_guard(None, true), LeaseOnly, "an unreadable version is not trusted");
 }
+
+/// `a.txt` goes one → two → three, one commit each; returns the id of the "two" commit.
+fn history_of_three_edits(fixture: &TestRepo) -> String {
+    commit_file(fixture.workdir(), "a.txt", "one\n", "one");
+    commit_file(fixture.workdir(), "b.txt", "b\n", "add b");
+    let middle = head_at(fixture.workdir()).to_string();
+    commit_file(fixture.workdir(), "a.txt", "two\n", "two");
+    middle
+}
+
+#[test]
+fn revert_records_the_inverse_commit() {
+    let fixture = TestRepo::new();
+    let middle = history_of_three_edits(&fixture);
+    let before = head_at(fixture.workdir());
+    let adapter = fixture.adapter();
+
+    adapter.revert(&middle).expect("revert");
+
+    assert!(!fixture.workdir().join("b.txt").exists(), "the reverted commit's file is gone again");
+    assert_eq!(fixture.read_file("a.txt").as_deref(), Some("two\n"), "later work is kept");
+    assert_ne!(head_at(fixture.workdir()), before, "a new commit was recorded");
+    let log = adapter.log(None).expect("log");
+    assert!(log[0].message.starts_with("Revert \""), "subject: {:?}", log[0].message);
+    assert_eq!(adapter.status().expect("status").operation, None);
+}
+
+#[test]
+fn revert_refuses_anything_but_a_hex_commit_id() {
+    let fixture = TestRepo::new();
+    history_of_three_edits(&fixture);
+    let adapter = fixture.adapter();
+
+    assert!(adapter.revert("HEAD").is_err());
+    assert!(adapter.revert("--abort").is_err());
+}
+
+#[test]
+fn a_conflicting_revert_leaves_the_revert_in_progress() {
+    let fixture = TestRepo::new();
+    commit_file(fixture.workdir(), "a.txt", "one\n", "one");
+    commit_file(fixture.workdir(), "a.txt", "two\n", "two");
+    let middle = head_at(fixture.workdir()).to_string();
+    commit_file(fixture.workdir(), "a.txt", "three\n", "three");
+    let adapter = fixture.adapter();
+
+    assert!(adapter.revert(&middle).is_err(), "git reports the conflict");
+
+    let status = adapter.status().expect("status");
+    assert_eq!(status.operation, Some(core_domain::RepoOperation::Revert));
+    assert_eq!(status.conflicted_files, vec!["a.txt".to_string()]);
+}

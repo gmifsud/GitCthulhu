@@ -33,6 +33,7 @@ pub struct FakeGitRepository {
     pub rename_branch_result: Result<(), DomainError>,
     pub delete_branch_result: Result<(), DomainError>,
     pub cherry_pick_result: Result<(), DomainError>,
+    pub revert_result: Result<(), DomainError>,
     pub reset_result: Result<(), DomainError>,
     pub merge_result: Result<(), DomainError>,
     pub abort_result: Result<(), DomainError>,
@@ -101,6 +102,7 @@ impl FakeGitRepository {
             rename_branch_result: Ok(()),
             delete_branch_result: Ok(()),
             cherry_pick_result: Ok(()),
+            revert_result: Ok(()),
             reset_result: Ok(()),
             merge_result: Ok(()),
             abort_result: Ok(()),
@@ -218,6 +220,10 @@ impl GitRepository for FakeGitRepository {
 
     fn cherry_pick(&self, _commit_id: &str) -> Result<(), DomainError> {
         self.cherry_pick_result.clone()
+    }
+
+    fn revert(&self, _commit_id: &str) -> Result<(), DomainError> {
+        self.revert_result.clone()
     }
 
     fn reset(&self, _commit_id: &str, _mode: core_domain::ResetMode) -> Result<(), DomainError> {

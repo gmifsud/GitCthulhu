@@ -11,7 +11,8 @@ use crate::session::same_path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContextTarget {
     /// A commit row in the graph, with its subject line for copying.
-    Commit { id: String, subject: String },
+    /// `parents` is how many parents the commit has: a merge has more than one.
+    Commit { id: String, subject: String, parents: usize },
     LocalBranch { name: String, tip: String },
     /// A remote-tracking branch such as `origin/feature/x`.
     RemoteBranch { name: String, tip: String },
@@ -87,6 +88,8 @@ pub(crate) enum ContextActionKind {
     RenameBranch { name: String },
     DeleteBranch { name: String },
     CherryPick { id: String },
+    /// Record a new commit that undoes this one.
+    Revert { id: String },
     ResetTo { id: String },
     /// Undo this commit, the HEAD one, keeping its changes staged.
     UndoCommit { id: String },
@@ -104,6 +107,16 @@ pub(crate) enum ContextActionKind {
 /// The local name a remote branch checks out as: `origin/feature/x` → `feature/x`.
 pub(crate) fn local_name_for_remote(remote: &str) -> &str {
     remote.split_once('/').map_or(remote, |(_, rest)| rest)
+}
+
+/// Reverting a merge needs `-m` to pick the side to keep, which the menu cannot ask: the reason
+/// is in the label, and the terminal does it.
+fn revert_action(id: &str, parents: usize, idle: bool) -> ContextAction {
+    if parents > 1 {
+        action("Revert… (merge commit: use git revert -m in the terminal)", false, ContextActionKind::Revert { id: id.to_string() })
+    } else {
+        action("Revert…", idle, ContextActionKind::Revert { id: id.to_string() })
+    }
 }
 
 fn action(label: impl Into<String>, enabled: bool, kind: ContextActionKind) -> ContextAction {
@@ -149,7 +162,7 @@ pub(crate) fn context_actions(
 ) -> Vec<ContextAction> {
     let idle = !loading;
     match target {
-        ContextTarget::Commit { id, subject } => {
+        ContextTarget::Commit { id, subject, parents } => {
             let short = short_hash(id);
             let on_head = active_head == Some(id.as_str());
             // A worktree already checked out here opens in a tab; only otherwise is a new one
@@ -183,6 +196,7 @@ pub(crate) fn context_actions(
                 action("Merge into current…", idle && !on_head, ContextActionKind::MergeCommit { id: id.clone() }),
                 action("Cherry-pick onto current…", idle && !on_head, ContextActionKind::CherryPick { id: id.clone() }),
                 action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
+                revert_action(id, *parents, idle),
             ]);
             if on_head {
                 // A merge is not undone here (see `actions::MERGE_HEAD_REASON`).
@@ -572,7 +586,7 @@ mod tests {
 
     #[test]
     fn a_commit_row_copies_its_hash_subject_and_every_branch_on_it() {
-        let target = ContextTarget::Commit { id: "abcdef0123456789".into(), subject: "Fix the parser".into() };
+        let target = ContextTarget::Commit { id: "abcdef0123456789".into(), subject: "Fix the parser".into(), parents: 1 };
         let mut here = branch("feature/x", false, false);
         here.tip = "abcdef0123456789".into();
         let mut remote = branch("origin/feature/x", true, false);
@@ -604,6 +618,7 @@ mod tests {
         let target = ContextTarget::Commit {
             id: "abcdef0123456789".into(),
             subject: "Fix the parser".into(),
+            parents: 1,
         };
         let actions = context_actions(&target, &[], &[], Some("other"), false, false);
         assert!(matches!(
@@ -625,7 +640,7 @@ mod tests {
     #[test]
     fn a_commit_with_a_worktree_offers_to_open_it_in_a_tab() {
         let id = "abcdef0123456789";
-        let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new(), parents: 1 };
         let branches = vec![Branch {
             name: "feature/x".into(),
             is_remote: false,
@@ -647,7 +662,7 @@ mod tests {
     #[test]
     fn only_the_head_row_offers_to_undo_its_commit() {
         let id = "abcdef0123456789";
-        let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new(), parents: 1 };
         let on_head = context_actions(&target, &[], &[], Some(id), false, false);
         let undo = find(&on_head, "Undo commit (keep changes)");
         assert!(undo.enabled);
@@ -661,9 +676,34 @@ mod tests {
     }
 
     #[test]
+    fn revert_of_a_merge_commit_is_disabled_with_a_reason() {
+        let id = "abcdef0123456789";
+        let merge = ContextTarget::Commit { id: id.into(), subject: String::new(), parents: 2 };
+        let actions = context_actions(&merge, &[], &[], Some("other"), false, false);
+        let revert = find(&actions, "Revert");
+        assert_eq!(revert.label, "Revert… (merge commit: use git revert -m in the terminal)");
+        assert!(!revert.enabled);
+    }
+
+    #[test]
+    fn revert_is_offered_on_any_other_commit_and_waits_while_loading() {
+        let id = "abcdef0123456789";
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new(), parents: 1 };
+        for head in [Some("other"), Some(id)] {
+            let revert = context_actions(&target, &[], &[], head, false, false);
+            let revert = find(&revert, "Revert");
+            assert_eq!(revert.label, "Revert…");
+            assert!(revert.enabled);
+            assert_eq!(revert.kind, ContextActionKind::Revert { id: id.into() });
+        }
+        let busy = context_actions(&target, &[], &[], Some("other"), false, true);
+        assert!(!find(&busy, "Revert").enabled);
+    }
+
+    #[test]
     fn detach_disabled_when_already_on_commit() {
         let id = "abcdef0123456789";
-        let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new(), parents: 1 };
         let actions = context_actions(&target, &[], &[], Some(id), false, false);
         assert!(!find(&actions, "Detach HEAD here").enabled);
         assert!(!find(&actions, "Cherry-pick").enabled);

@@ -90,6 +90,17 @@ pub(super) fn history_prompt<'a>(
             tokens,
             reading,
         ),
+        HistoryPrompt::Revert { id } => dialog(
+            "Revert this commit?",
+            crate::selection::short_hash(id),
+            "A new commit undoes its changes on the current branch. History is not rewritten.",
+            true,
+            "Revert",
+            Message::ConfirmRevert,
+            Message::CancelHistory,
+            tokens,
+            reading,
+        ),
         HistoryPrompt::Reset { id } => reset_dialog(id, tokens, reading),
         HistoryPrompt::Merge { name, no_ff } => merge_dialog(name, *no_ff, branches, current, preview, tokens, reading),
         HistoryPrompt::Rebase { name } => dialog(

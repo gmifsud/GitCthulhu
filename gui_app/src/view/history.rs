@@ -201,14 +201,14 @@ pub(super) fn history_table<'a>(
             &age,
             short_hash(&row.commit_id),
             row.unpushed,
-            row.merge,
+            row.parents > 1,
             Length::Fixed(row.height),
             columns,
             tokens,
             reading,
         );
         let id = row.commit_id.clone();
-        let right_target = ContextTarget::Commit { id: row.commit_id.clone(), subject: subject_of(&row.subject).to_string() };
+        let right_target = ContextTarget::Commit { id: row.commit_id.clone(), subject: subject_of(&row.subject).to_string(), parents: row.parents };
         commit_rows = commit_rows.push(
             mouse_area(
                 button(label)
@@ -431,7 +431,7 @@ fn build_index(
             subject,
             author: commit.author.clone(),
             timestamp: commit.timestamp,
-            merge: commit.parent_ids.len() > 1,
+            parents: commit.parent_ids.len(),
             unpushed: session.state.unpushed.contains(&commit.id),
             graph,
             inks: RowInks::default(),
@@ -678,7 +678,7 @@ fn refs_cell<'a>(
     .spacing(PILL_GAP)
     .align_y(Alignment::Center);
     if others > 0 {
-        let target = ContextTarget::Commit { id: row.commit_id.clone(), subject: row.subject.clone() };
+        let target = ContextTarget::Commit { id: row.commit_id.clone(), subject: row.subject.clone(), parents: row.parents };
         line = line.push(mouse_area(more_chip(others, tokens, reading)).on_right_press(Message::OpenContextMenu { target }));
     }
     line = line.push(canvas(LeaderLine { colour: leader }).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)));
