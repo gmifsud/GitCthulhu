@@ -10,3 +10,11 @@ coverage/
 # Rust build artifacts
 target/
 
+
+.agents/
+
+.claude/
+
+.codex/
+
+.gemini/
