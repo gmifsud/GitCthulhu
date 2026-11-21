@@ -7,15 +7,14 @@ use std::collections::HashSet;
 use crate::app::{GitApp, Message};
 use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow, ChangeSection};
 use crate::icons::Icon;
-use crate::jobs::WorktreeEdit;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::widget::button::Status;
-use iced::widget::{button, column, container, horizontal_space, mouse_area, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, horizontal_space, mouse_area, row, scrollable, text, text_editor, text_input, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
-use super::chrome::{field_style, glyph, hairline, icon_button, labelled_button, one_line, Reading};
+use super::chrome::{editor_style, field_style, glyph, hairline, icon_button, labelled_button, one_line, one_line_height, Reading};
 use super::commands::can_commit;
 
 /// Rows drawn per section. Each row is several widgets, so a huge untracked set would stall
@@ -101,23 +100,34 @@ fn wip_toolbar<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> E
     .into()
 }
 
-/// Commit message, Suggest, and Commit. Enter commits when something is staged.
+/// Lines of the commit body that show before it scrolls.
+const BODY_LINES: f32 = 4.0;
+const BODY_PADDING: f32 = 6.0;
+
+/// Summary, body, and a row with Suggest and Commit. Enter in the summary moves on to the
+/// body; Ctrl+Enter commits from either field.
 fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let session = app.session();
     let ready = can_commit(app) && !session.state.loading;
-    let commit = Message::EditWorktree(WorktreeEdit::Commit(session.commit_message.clone()));
-    let mut input = text_input("Commit message", &session.commit_message)
+    let commit = Message::EditWorktree(session.commit_edit());
+    let summary = text_input("Summary", &session.commit_message)
         .on_input(Message::CommitMessageChanged)
+        .on_submit(Message::FocusCommitBody)
         .font(reading.font)
         .size(reading.size)
         .padding(6)
         .width(Length::Fill)
         .style(field_style(tokens));
-    if ready {
-        input = input.on_submit(commit.clone());
-    }
-    row![
-        input,
+    let body = text_editor(&session.commit_body)
+        .placeholder("Description (optional)")
+        .on_action(Message::CommitBodyEdited)
+        .font(reading.font)
+        .size(reading.size)
+        .padding(BODY_PADDING)
+        .height(Length::Fixed(one_line_height(reading.size) * BODY_LINES + BODY_PADDING * 2.0))
+        .style(editor_style(tokens));
+    let actions = row![
+        horizontal_space(),
         icon_button(
             Icon::Sparkle,
             "Suggest commit message",
@@ -132,8 +142,8 @@ fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, 
         labelled_button(Icon::Check, "Commit".to_string(), commit, ready, true, tokens, reading),
     ]
     .spacing(6)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    column![summary, body, actions].spacing(6).into()
 }
 
 fn wip_file_sections<'a>(

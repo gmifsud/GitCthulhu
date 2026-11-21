@@ -7,10 +7,31 @@ use std::collections::HashSet;
 
 use core_domain::{AppSettings, AppState, Branch, FileDisposition, Hunk, Patch, ViewEvent};
 use core_domain::WorktreeTabRetention;
+use iced::widget::text_editor;
 
 use crate::changes::MarkedFile;
-use crate::jobs::{PatchQuery, SharedRepository};
+use crate::jobs::{PatchQuery, SharedRepository, WorktreeEdit};
 use crate::selection::{visible_selection, Selection};
+
+/// The message a commit records: the summary, then one blank line and the body when the body
+/// has any text. Every way of committing builds its message here.
+pub(crate) fn full_commit_message(summary: &str, body: &str) -> String {
+    let summary = summary.trim();
+    if body.trim().is_empty() {
+        summary.to_string()
+    } else {
+        format!("{summary}\n\n{}", body.trim_end())
+    }
+}
+
+/// Split a message into summary and body: the first line, then what follows once blank lines
+/// are skipped.
+pub(crate) fn split_summary_and_body(message: &str) -> (String, String) {
+    let message = message.trim_start();
+    let (summary, rest) = message.split_once('\n').unwrap_or((message, ""));
+    let body = rest.trim_start_matches(['\r', '\n']).trim_end();
+    (summary.trim_end().to_string(), body.to_string())
+}
 
 /// Diff lines drawn per "Show more" step. One widget per line, so this bounds layout cost.
 pub(crate) const DIFF_LINES_PER_PAGE: usize = 400;
@@ -119,7 +140,9 @@ pub(crate) struct WorktreeSession {
     pub(crate) adapter: SharedRepository,
     pub(crate) state: AppState,
     pub(crate) selection: Option<Selection>,
+    /// The commit's summary line. The rest of its message is `commit_body`.
     pub(crate) commit_message: String,
+    pub(crate) commit_body: text_editor::Content,
     pub(crate) marked_files: Vec<MarkedFile>,
     /// Folder prefixes collapsed in Tree mode, keyed with their disposition.
     pub(crate) collapsed_dirs: HashSet<(FileDisposition, String)>,
@@ -201,6 +224,7 @@ impl WorktreeSession {
             state,
             selection: None,
             commit_message: String::new(),
+            commit_body: text_editor::Content::new(),
             marked_files: Vec::new(),
             collapsed_dirs: HashSet::new(),
             collapsed_sections: HashSet::new(),
@@ -491,6 +515,17 @@ impl WorktreeSession {
         }
     }
 
+    /// The commit this tab's summary and body describe.
+    pub(crate) fn commit_edit(&self) -> WorktreeEdit {
+        WorktreeEdit::Commit(full_commit_message(&self.commit_message, &self.commit_body.text()))
+    }
+
+    /// Empty the summary and the body.
+    pub(crate) fn clear_commit_message(&mut self) {
+        self.commit_message.clear();
+        self.commit_body = text_editor::Content::new();
+    }
+
     #[cfg(test)]
     pub(crate) fn test_stub() -> Self {
         use std::sync::Arc;
@@ -511,7 +546,7 @@ pub(crate) fn apply_retention(session: &mut WorktreeSession, mode: WorktreeTabRe
         }
         WorktreeTabRetention::PathOnly => {
             clear_selection(session);
-            session.commit_message.clear();
+            session.clear_commit_message();
             session.marked_files.clear();
         }
     }
@@ -593,6 +628,7 @@ mod tests {
     fn dirty_session() -> WorktreeSession {
         let mut session = WorktreeSession::test_stub();
         session.commit_message = "wip".into();
+        session.commit_body = text_editor::Content::with_text("details");
         session.marked_files = vec![MarkedFile {
             path: "a.rs".into(),
             place: FileDisposition::Unstaged,
@@ -661,6 +697,53 @@ mod tests {
         assert_eq!(session.marked_files.len(), 1);
         assert!(session.selection.is_some());
         assert_eq!(session.focused_diff_path.as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn a_body_follows_the_summary_after_one_blank_line() {
+        assert_eq!(full_commit_message(" Fix parser ", "Long story.\n\n"), "Fix parser\n\nLong story.");
+        assert_eq!(full_commit_message("Fix parser", "  \n"), "Fix parser");
+    }
+
+    #[test]
+    fn a_suggestion_splits_into_summary_and_body() {
+        assert_eq!(split_summary_and_body("Fix parser"), ("Fix parser".to_string(), String::new()));
+        assert_eq!(
+            split_summary_and_body("Fix parser\n\n\nLong story.\nMore.\n"),
+            ("Fix parser".to_string(), "Long story.\nMore.".to_string())
+        );
+        assert_eq!(
+            split_summary_and_body("Fix parser\r\n\r\nBody"),
+            ("Fix parser".to_string(), "Body".to_string())
+        );
+    }
+
+    #[test]
+    fn the_commit_edit_carries_summary_and_body() {
+        let mut session = WorktreeSession::test_stub();
+        session.commit_message = "Fix parser".into();
+        session.commit_body = text_editor::Content::with_text("Long story.\n");
+        assert!(matches!(
+            session.commit_edit(),
+            WorktreeEdit::Commit(message) if message == "Fix parser\n\nLong story."
+        ));
+    }
+
+    #[test]
+    fn partial_and_full_keep_the_body() {
+        for mode in [WorktreeTabRetention::Partial, WorktreeTabRetention::Full] {
+            let mut session = dirty_session();
+            apply_retention(&mut session, mode);
+            assert_eq!(session.commit_body.text().trim_end(), "details");
+        }
+    }
+
+    #[test]
+    fn path_only_clears_summary_and_body() {
+        let mut session = dirty_session();
+        apply_retention(&mut session, WorktreeTabRetention::PathOnly);
+        assert!(session.commit_message.is_empty());
+        assert!(session.commit_body.text().trim().is_empty());
     }
 
     #[test]

@@ -219,6 +219,31 @@ pub(super) fn field_style(
     }
 }
 
+/// The multi-line text editor, drawn like [`field_style`]'s text input.
+pub(super) fn editor_style(
+    tokens: DesignTokens,
+) -> impl Fn(&Theme, iced::widget::text_editor::Status) -> iced::widget::text_editor::Style {
+    move |_theme, status| {
+        let focused = matches!(status, iced::widget::text_editor::Status::Focused);
+        iced::widget::text_editor::Style {
+            background: Background::Color(tokens.bg_app),
+            border: Border {
+                color: if focused {
+                    tokens.accent_primary
+                } else {
+                    tokens.chip_border
+                },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            icon: tokens.text_muted,
+            placeholder: tokens.text_muted,
+            value: tokens.text_primary,
+            selection: tokens.accent_primary,
+        }
+    }
+}
+
 /// Text input drawn inside a chrome shell that already owns the border.
 pub(super) fn embedded_field_style(
     tokens: DesignTokens,

@@ -146,7 +146,7 @@ fn command_message(command: RibbonCommand, selection: &Selection, app: &GitApp) 
         RibbonCommand::Unstage => stage_message(app, selection, false),
         RibbonCommand::Discard => Message::AskDiscard,
         RibbonCommand::Commit => {
-            Message::EditWorktree(WorktreeEdit::Commit(app.session().commit_message.clone()))
+            Message::EditWorktree(app.session().commit_edit())
         }
         RibbonCommand::Stash => Message::StashPush,
         RibbonCommand::Apply => match selection {
@@ -187,5 +187,37 @@ fn stage_message(app: &GitApp, selection: &Selection, stage: bool) -> Message {
             }
         }
         _ => Message::RefreshRepository,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::text_editor;
+    use std::sync::Arc;
+    use test_support::FakeGitRepository;
+
+    fn app_with_a_staged_file() -> GitApp {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec!["a.txt".to_string()],
+            unstaged_files: vec![],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: Some("abc".into()),
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        });
+        app
+    }
+
+    #[test]
+    fn a_body_alone_does_not_make_a_commit() {
+        let mut app = app_with_a_staged_file();
+        app.session_mut().commit_body = text_editor::Content::with_text("only a body");
+        assert!(!can_commit(&app));
+        app.session_mut().commit_message = "a summary".to_string();
+        assert!(can_commit(&app));
     }
 }

@@ -277,6 +277,10 @@ pub(crate) enum Message {
     RefreshSession(SessionKey),
     CheckoutBranch(String),
     CommitMessageChanged(String),
+    /// An edit in the commit body (a multi-line editor under the summary).
+    CommitBodyEdited(text_editor::Action),
+    /// Enter in the summary: carry on typing in the body.
+    FocusCommitBody,
     EditWorktree(WorktreeEdit),
     RepositoryLoaded(SessionKey, Vec<ViewEvent>),
     CheckoutFinished(SessionKey, Result<(), DomainError>),
@@ -2067,6 +2071,13 @@ impl GitApp {
                 }
                 Task::none()
             }
+            Message::CommitBodyEdited(action) => {
+                if let Some(session) = self.active_session_mut() {
+                    session.commit_body.perform(action);
+                }
+                Task::none()
+            }
+            Message::FocusCommitBody => iced::widget::focus_next(),
             Message::EditWorktree(edit) => {
                 let Some(session) = self.active_session() else {
                     return Task::none();
@@ -2098,7 +2109,7 @@ impl GitApp {
                 match result {
                     Ok(()) => {
                         if matches!(edit, WorktreeEdit::Commit(_)) {
-                            session.commit_message.clear();
+                            session.clear_commit_message();
                         }
                         Task::done(Message::RefreshSession(path))
                     }
@@ -2571,7 +2582,9 @@ impl GitApp {
                 match result.subject {
                     Ok(subject) => {
                         if let Some(session) = self.session_mut_for(&path) {
-                            session.commit_message = subject;
+                            let (summary, body) = crate::session::split_summary_and_body(&subject);
+                            session.commit_message = summary;
+                            session.commit_body = text_editor::Content::with_text(&body);
                         }
                     }
                     Err(error) => self.error = Some(error_message(&error)),
@@ -5978,11 +5991,11 @@ impl GitApp {
             ActionId::StageMarked => Message::StageMarked,
             ActionId::UnstageMarked => Message::UnstageMarked,
             ActionId::Stash => Message::StashPush,
-            ActionId::Commit => Message::EditWorktree(WorktreeEdit::Commit(
+            ActionId::Commit => Message::EditWorktree(
                 self.active_session()
-                    .map(|session| session.commit_message.clone())
-                    .unwrap_or_default(),
-            )),
+                    .map(|session| session.commit_edit())
+                    .unwrap_or_else(|| WorktreeEdit::Commit(String::new())),
+            ),
             ActionId::ToggleTerminal => Message::ToggleTerminal,
             ActionId::CycleLayout => Message::CycleLayout,
             ActionId::CycleHunkMode => Message::CycleHunkMode,
@@ -7256,6 +7269,58 @@ mod tests {
         assert!(!app.session_mut().state.loading);
         assert_eq!(app.error, None);
         assert_eq!(app.session_mut().commit_message, "");
+    }
+
+    #[test]
+    fn committing_clears_summary_and_body() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.loading = true;
+        app.session_mut().commit_message = "record the change".to_string();
+        app.session_mut().commit_body = text_editor::Content::with_text("why it matters");
+        let _ = app.update(Message::WorktreeEditFinished(
+            app.active_key(),
+            WorktreeEdit::Commit("record the change".to_string()),
+            Ok(()),
+        ));
+        assert_eq!(app.session_mut().commit_message, "");
+        assert!(app.session_mut().commit_body.text().trim().is_empty());
+    }
+
+    #[test]
+    fn body_edits_reach_the_active_session_body() {
+        use text_editor::{Action, Edit};
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        for ch in "why".chars() {
+            let _ = app.update(Message::CommitBodyEdited(Action::Edit(Edit::Insert(ch))));
+        }
+        assert_eq!(app.session_mut().commit_body.text().trim_end(), "why");
+    }
+
+    #[test]
+    fn ctrl_enter_commits_the_summary_and_body_the_button_would() {
+        use crate::actions::ActionId;
+        let mut app = app_ready_to_commit();
+        app.sessions[0].commit_body = text_editor::Content::with_text("why it matters\n");
+        let Message::EditWorktree(WorktreeEdit::Commit(message)) = app.message_for(ActionId::Commit)
+        else {
+            panic!("Ctrl+Enter commits");
+        };
+        assert_eq!(message, "record the change\n\nwhy it matters");
+    }
+
+    #[test]
+    fn a_multi_line_suggestion_fills_summary_and_body() {
+        let mut app = two_session_app();
+        app.agent_busy = true;
+        let _ = app.update(Message::CommitSuggested(
+            app.key_of(SECOND),
+            crate::CommitSuggestion {
+                subject: Ok("add the thing\n\nbecause it was missing\n".to_string()),
+                exchange: crate::ProviderExchange::kilo("add the thing"),
+            },
+        ));
+        assert_eq!(app.sessions[1].commit_message, "add the thing");
+        assert_eq!(app.sessions[1].commit_body.text().trim_end(), "because it was missing");
     }
 
     #[test]
