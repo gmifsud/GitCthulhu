@@ -761,6 +761,8 @@ impl GitRepository for GitoxideAdapter {
     /// `git commit --amend -m`, once HEAD is the commit the caller saw.
     fn amend(&self, message: &str, expected_head: &str) -> Result<(), DomainError> {
         self.open_repo()?;
+        // Not atomic: a commit landing between this check and `git commit --amend` (a few
+        // milliseconds) is amended instead. `commit --amend` has no expected-old-value option.
         self.require_head(expected_head)?;
         if message.trim().is_empty() {
             return Err(DomainError::Unknown(BLANK_COMMIT_MESSAGE.to_string()));
@@ -768,18 +770,39 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["commit", "--amend", "-m", message])
     }
 
-    /// `git reset --soft HEAD~1`, once HEAD is the commit the caller saw. The index and the
-    /// worktree are untouched, so the undone commit's changes stay staged.
+    /// Move the branch back to the first parent, as `git reset --soft HEAD~1` would, but only
+    /// if HEAD is still `expected_head` at the moment it moves (`git update-ref` with the old
+    /// value). The index and the worktree are untouched, so the undone changes stay staged.
     fn undo_commit(&self, expected_head: &str) -> Result<String, DomainError> {
         self.open_repo()?;
+        // Checked up front too, so the usual refusal is clean and nothing is read first.
         self.require_head(expected_head)?;
-        let parent = command::git_output(&self.repo_path, &["rev-parse", "--verify", "--quiet", "HEAD~1"])?;
+        let parent = command::git_output(
+            &self.repo_path,
+            &["rev-parse", "--verify", "--quiet", &format!("{expected_head}~1")],
+        )?;
         if !parent.status.success() {
             return Err(DomainError::Unknown(FIRST_COMMIT_CANNOT_BE_UNDONE.to_string()));
         }
-        let message = run_git_stdout(&self.repo_path, &["log", "-1", "--format=%B"])?;
-        run_git(&self.repo_path, &["reset", "--soft", "HEAD~1"])?;
+        let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+        let message = self.commit_message(expected_head)?;
+        // Through a symbolic HEAD this moves the branch HEAD points at; git refuses when the
+        // ref is no longer `expected_head`.
+        if let Err(error) = run_git(
+            &self.repo_path,
+            &["update-ref", "-m", "undo commit", "HEAD", &parent, expected_head],
+        ) {
+            self.require_head(expected_head)?;
+            return Err(error);
+        }
         Ok(message)
+    }
+
+    /// `git log -1 --format=%B <id> --`. The `--` keeps a hex id that is also a file name a revision.
+    fn commit_message(&self, commit_id: &str) -> Result<String, DomainError> {
+        self.open_repo()?;
+        require_hex_commit(commit_id)?;
+        run_git_stdout(&self.repo_path, &["log", "-1", "--format=%B", commit_id, "--"])
     }
 
     /// Fetch the default remote with `git fetch`.

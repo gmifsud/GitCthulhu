@@ -2175,6 +2175,40 @@ fn undo_moves_head_back_keeps_the_change_staged_and_returns_the_message() {
 }
 
 #[test]
+fn undo_moves_the_branch_and_leaves_an_added_file_staged() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "first");
+    let first = head_at(dir);
+    let branch = fixture.current_branch();
+    commit_file(dir, "b.txt", "new\n", "add b");
+    let adapter = fixture.adapter();
+
+    adapter.undo_commit(&head_at(dir).to_string()).expect("undo");
+
+    assert_eq!(fixture.current_branch(), branch, "HEAD still names the branch");
+    assert_eq!(head_at(dir), first, "the branch moved back");
+    let status = adapter.status().expect("status");
+    assert_eq!(status.staged_files, vec!["b.txt".to_string()], "the index still holds the undone change");
+    assert!(status.untracked_files.is_empty());
+    assert_eq!(std::fs::read_to_string(dir.join("b.txt")).expect("read b.txt"), "new\n");
+}
+
+#[test]
+fn a_commit_message_round_trips_every_paragraph() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "Fix the parser\n\nIt dropped the last line.\n\nSee #12.");
+    let adapter = fixture.adapter();
+
+    assert_eq!(
+        adapter.commit_message(&head_at(dir).to_string()),
+        Ok("Fix the parser\n\nIt dropped the last line.\n\nSee #12.".to_string())
+    );
+    assert!(matches!(adapter.commit_message("--all"), Err(DomainError::Unknown(_))));
+}
+
+#[test]
 fn undo_of_the_first_commit_is_refused() {
     let fixture = TestRepo::new();
     let dir = fixture.workdir();

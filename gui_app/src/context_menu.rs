@@ -137,12 +137,14 @@ pub(crate) fn gitignore_pattern(path: &str, is_dir: bool) -> String {
     }
 }
 
-/// Build menu rows for `target`. Pure; unit-tested.
+/// Build menu rows for `target`. Pure; unit-tested. `head_is_merge`: the HEAD commit has more
+/// than one parent.
 pub(crate) fn context_actions(
     target: &ContextTarget,
     catalogue: &[Worktree],
     branches: &[Branch],
     active_head: Option<&str>,
+    head_is_merge: bool,
     loading: bool,
 ) -> Vec<ContextAction> {
     let idle = !loading;
@@ -183,7 +185,12 @@ pub(crate) fn context_actions(
                 action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
             ]);
             if on_head {
-                actions.push(action("Undo commit (keep changes)", idle, ContextActionKind::UndoCommit { id: id.clone() }));
+                // A merge is not undone here (see `actions::MERGE_HEAD_REASON`).
+                actions.push(action(
+                    "Undo commit (keep changes)",
+                    idle && !head_is_merge,
+                    ContextActionKind::UndoCommit { id: id.clone() },
+                ));
             }
             actions.extend([
                 action("Copy hash", true, ContextActionKind::CopyText { text: id.clone() }),
@@ -540,7 +547,7 @@ mod tests {
         let mut remote = branch("origin/feature/x", true, false);
         remote.tip = "abcdef0123456789".into();
         let elsewhere = branch("main", false, false);
-        let actions = context_actions(&target, &[], &[remote, elsewhere, here], Some("other"), false);
+        let actions = context_actions(&target, &[], &[remote, elsewhere, here], Some("other"), false, false);
         let copied = |label: &str| match &find(&actions, label).kind {
             ContextActionKind::CopyText { text } => text.clone(),
             other => panic!("{label} does not copy: {other:?}"),
@@ -556,7 +563,7 @@ mod tests {
     #[test]
     fn a_stash_copies_its_message_and_the_name_git_takes() {
         let target = ContextTarget::Stash { index: 2, message: "WIP on main: tidy".into() };
-        let actions = context_actions(&target, &[], &[], None, false);
+        let actions = context_actions(&target, &[], &[], None, false, false);
         assert!(matches!(&find(&actions, "Copy message").kind, ContextActionKind::CopyText { text } if text == "WIP on main: tidy"));
         assert!(matches!(&find(&actions, "Copy name (stash@{2})").kind, ContextActionKind::CopyText { text } if text == "stash@{2}"));
     }
@@ -567,7 +574,7 @@ mod tests {
             id: "abcdef0123456789".into(),
             subject: "Fix the parser".into(),
         };
-        let actions = context_actions(&target, &[], &[], Some("other"), false);
+        let actions = context_actions(&target, &[], &[], Some("other"), false, false);
         assert!(matches!(
             &find(&actions, "New branch from here").kind,
             ContextActionKind::NewBranchFrom { start } if start == "abcdef0123456789"
@@ -597,7 +604,7 @@ mod tests {
             behind: 0,
         }];
         let catalogue = vec![Worktree { path: "D:/wt/x".into(), branch: "feature/x".into(), is_main: false, locked: false }];
-        let actions = context_actions(&target, &catalogue, &branches, Some("other"), false);
+        let actions = context_actions(&target, &catalogue, &branches, Some("other"), false, false);
         assert!(
             matches!(&actions[0].kind, ContextActionKind::OpenWorktreeTab { path } if path == "D:/wt/x"),
             "the existing worktree comes first: {:?}",
@@ -610,21 +617,23 @@ mod tests {
     fn only_the_head_row_offers_to_undo_its_commit() {
         let id = "abcdef0123456789";
         let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
-        let on_head = context_actions(&target, &[], &[], Some(id), false);
+        let on_head = context_actions(&target, &[], &[], Some(id), false, false);
         let undo = find(&on_head, "Undo commit (keep changes)");
         assert!(undo.enabled);
         assert_eq!(undo.kind, ContextActionKind::UndoCommit { id: id.into() });
-        let busy = context_actions(&target, &[], &[], Some(id), true);
+        let busy = context_actions(&target, &[], &[], Some(id), false, true);
         assert!(!find(&busy, "Undo commit").enabled);
-        let elsewhere = context_actions(&target, &[], &[], Some("other"), false);
+        let elsewhere = context_actions(&target, &[], &[], Some("other"), false, false);
         assert!(!elsewhere.iter().any(|action| action.label.starts_with("Undo commit")));
+        let merge = context_actions(&target, &[], &[], Some(id), true, false);
+        assert!(!find(&merge, "Undo commit").enabled, "a merge commit is not undone here");
     }
 
     #[test]
     fn detach_disabled_when_already_on_commit() {
         let id = "abcdef0123456789";
         let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
-        let actions = context_actions(&target, &[], &[], Some(id), false);
+        let actions = context_actions(&target, &[], &[], Some(id), false, false);
         assert!(!find(&actions, "Detach HEAD here").enabled);
         assert!(!find(&actions, "Cherry-pick").enabled);
     }
@@ -636,7 +645,7 @@ mod tests {
             tip: "tip1".into(),
         };
         let catalogue = vec![wt(r"D:\repo-feature", "feature")];
-        let actions = context_actions(&target, &catalogue, &[], Some("main-tip"), false);
+        let actions = context_actions(&target, &catalogue, &[], Some("main-tip"), false, false);
         assert!(!find(&actions, "Open as worktree").enabled);
         assert!(!find(&actions, "Checkout").enabled);
         assert!(find(&actions, "New branch from").enabled);
@@ -649,7 +658,7 @@ mod tests {
             tip: "tip1".into(),
         };
         let branches = [branch("main", false, true)];
-        let actions = context_actions(&target, &[], &branches, Some("tip1"), false);
+        let actions = context_actions(&target, &[], &branches, Some("tip1"), false, false);
         assert!(!find(&actions, "Checkout").enabled);
         assert!(!find(&actions, "Merge").enabled);
         assert!(!find(&actions, "Delete").enabled);
@@ -662,7 +671,7 @@ mod tests {
             name: "origin/feature/x".into(),
             tip: "tip9".into(),
         };
-        let actions = context_actions(&target, &[], &[branch("main", false, true)], Some("tip1"), false);
+        let actions = context_actions(&target, &[], &[branch("main", false, true)], Some("tip1"), false, false);
         let checkout = find(&actions, "Checkout as new local branch 'feature/x'");
         assert!(checkout.enabled);
         assert!(matches!(
@@ -687,7 +696,7 @@ mod tests {
             tip: "tip9".into(),
         };
         let branches = [branch("main", false, true), branch("dev", false, false)];
-        let actions = context_actions(&target, &[], &branches, Some("tip1"), false);
+        let actions = context_actions(&target, &[], &branches, Some("tip1"), false, false);
         assert!(find(&actions, "Checkout 'dev'").enabled);
         assert!(!find(&actions, "Open as worktree").enabled, "the local branch already exists");
     }
@@ -704,9 +713,9 @@ mod tests {
             branch: "feature".into(),
             is_main: false,
         };
-        assert!(!find(&context_actions(&main, &[], &[], None, false), "Remove worktree").enabled);
-        assert!(find(&context_actions(&linked, &[], &[], None, false), "Remove worktree").enabled);
-        assert!(find(&context_actions(&linked, &[], &[], None, false), "Open in tab").enabled);
+        assert!(!find(&context_actions(&main, &[], &[], None, false, false), "Remove worktree").enabled);
+        assert!(find(&context_actions(&linked, &[], &[], None, false, false), "Remove worktree").enabled);
+        assert!(find(&context_actions(&linked, &[], &[], None, false, false), "Open in tab").enabled);
     }
 
     #[test]
@@ -721,7 +730,7 @@ mod tests {
             name: "feature".into(),
             tip: "tip1".into(),
         };
-        let actions = context_actions(&target, &[], &[], Some("other"), true);
+        let actions = context_actions(&target, &[], &[], Some("other"), false, true);
         assert!(actions
             .iter()
             .all(|a| !a.enabled || matches!(a.kind, ContextActionKind::CopyText { .. })));
@@ -734,7 +743,7 @@ mod tests {
             place: FileDisposition::Unstaged,
             is_dir: true,
         };
-        let actions = context_actions(&target, &[], &[], None, false);
+        let actions = context_actions(&target, &[], &[], None, false, false);
         assert_eq!(actions.len(), 7);
         assert_eq!(actions[6].label, "Open folder", "open stays last");
         assert_eq!(actions[0].label, "Stage folder");
@@ -754,14 +763,14 @@ mod tests {
                 .filter(|action| matches!(action.kind, ContextActionKind::Untrack { .. }))
                 .collect::<Vec<_>>()
         };
-        let tracked = untrack(context_actions(&row(FileDisposition::Unstaged), &[], &[], None, false));
+        let tracked = untrack(context_actions(&row(FileDisposition::Unstaged), &[], &[], None, false, false));
         assert_eq!(tracked.len(), 2);
         assert!(tracked.iter().all(|action| action.enabled));
         assert!(matches!(
             &tracked[1].kind,
             ContextActionKind::Untrack { paths, ignore } if paths == &vec!["bin".to_string()] && ignore == &vec!["bin/".to_string()]
         ));
-        let unversioned = untrack(context_actions(&row(FileDisposition::Untracked), &[], &[], None, false));
+        let unversioned = untrack(context_actions(&row(FileDisposition::Untracked), &[], &[], None, false, false));
         assert!(unversioned.iter().all(|action| !action.enabled));
     }
 
@@ -772,7 +781,7 @@ mod tests {
             place: FileDisposition::Staged,
             is_dir: false,
         };
-        let actions = context_actions(&target, &[], &[], None, false);
+        let actions = context_actions(&target, &[], &[], None, false, false);
         assert_eq!(actions[0].label, "Unstage file");
         assert!(matches!(
             &actions[0].kind,

@@ -540,6 +540,19 @@ impl WorktreeSession {
         self.state.current_status.as_ref()?.head_commit_id.as_deref()
     }
 
+    /// The HEAD commit has more than one parent. False while it is not loaded.
+    pub(crate) fn head_is_merge(&self) -> bool {
+        let Some(head) = self.seen_head() else {
+            return false;
+        };
+        // HEAD is among the newest commits, so this stops near the start of the list.
+        self.state
+            .commits
+            .iter()
+            .find(|commit| commit.id == head)
+            .is_some_and(|commit| commit.parent_ids.len() > 1)
+    }
+
     /// `head` is on a remote already, so rewriting it means the next push must force.
     pub(crate) fn head_is_on_a_remote(&self, head: &str) -> bool {
         // "The repository has a remote" is read from the remote-tracking branches until the

@@ -594,6 +594,17 @@ pub(crate) fn edit_in_background(
     )
 }
 
+/// The full message of `commit_id`, to fill the draft when Amend is ticked.
+pub(crate) fn commit_message_in_background(
+    repo: SharedRepository,
+    commit_id: String,
+) -> impl Future<Output = Result<String, DomainError>> {
+    in_background(
+        move || repo.commit_message(&commit_id),
+        || Err(DomainError::Unknown("reading the commit message was interrupted".to_string())),
+    )
+}
+
 /// Undo the HEAD commit, keeping its changes staged, if HEAD is still `expected_head`.
 /// Gives back the undone commit's full message.
 pub(crate) fn undo_commit_in_background(

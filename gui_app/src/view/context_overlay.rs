@@ -29,6 +29,7 @@ pub(super) fn context_menu_overlay<'a>(
         &app.worktree_catalogue,
         &session.state.branches,
         head.as_deref(),
+        session.head_is_merge(),
         session.state.loading,
     );
     let mut list = column![].spacing(2).padding(6);

@@ -20,7 +20,7 @@ use crate::jobs::{
     probe_worktree_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
     compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
-    stop_shell, suggest_commit_in_background, undo_commit_in_background, worktrees_in_background,
+    stop_shell, suggest_commit_in_background, undo_commit_in_background, commit_message_in_background, worktrees_in_background,
     BranchAction,
     HistoryAction, SharedRepository, ShellEvent, StashAction, WorktreeEdit,
 };
@@ -595,6 +595,8 @@ pub(crate) enum Message {
     HistoryFinished(SessionKey, Result<(), DomainError>),
     /// The Amend box beside Commit was ticked or unticked.
     ToggleAmend,
+    /// The full message of the HEAD commit (the id) that ticking Amend asked for.
+    AmendMessageLoaded(SessionKey, String, Result<String, DomainError>),
     /// Amend a HEAD that is already on a remote, after the user said yes.
     ConfirmAmend,
     /// Undo the HEAD commit this tab shows, keeping its changes staged.
@@ -883,6 +885,18 @@ impl core_domain::ActivityStore for NoActivityStore {
     fn clear_activity(&self, _repository: &str) -> Result<(), DomainError> {
         Ok(())
     }
+}
+
+/// What ticking Amend fills at once: the HEAD commit's message as the history lists it (with
+/// the git adapter, its summary line), or nothing when that commit is not loaded.
+fn listed_amend_draft(session: &WorktreeSession, head: &str) -> (String, String) {
+    session
+        .state
+        .commits
+        .iter()
+        .find(|commit| commit.id == head)
+        .map(|commit| crate::session::split_summary_and_body(&commit.message))
+        .unwrap_or_default()
 }
 
 /// The lane and outcome of a finish message, so its activity entry can be closed.
@@ -3362,8 +3376,9 @@ impl GitApp {
             Message::ConfirmReset(mode) => self.confirm_reset(mode),
             Message::ConfirmMerge => self.confirm_merge(),
             Message::ConfirmRebase => self.confirm_rebase(),
-            Message::ToggleAmend => {
-                self.toggle_amend();
+            Message::ToggleAmend => self.toggle_amend(),
+            Message::AmendMessageLoaded(key, head, result) => {
+                self.fill_amend_draft(&key, &head, result);
                 Task::none()
             }
             Message::ConfirmAmend => self.confirm_amend(),
@@ -5412,29 +5427,55 @@ impl GitApp {
     }
 
     /// Tick or untick Amend. Ticking fills an empty draft from the HEAD commit, so its
-    /// message is edited rather than retyped. Before the first commit there is nothing to amend.
-    fn toggle_amend(&mut self) {
+    /// message is edited rather than retyped: at once from the history (the summary line), then
+    /// with the full message once it is read. Before the first commit there is nothing to amend.
+    fn toggle_amend(&mut self) -> Task<Message> {
         let Some(session) = self.active_session_mut() else {
-            return;
+            return Task::none();
         };
         if session.amending {
             session.amending = false;
-            return;
+            return Task::none();
         }
         let Some(head) = session.seen_head().map(str::to_string) else {
-            return;
+            return Task::none();
         };
         session.amending = true;
         let draft_is_empty =
             session.commit_message.trim().is_empty() && session.commit_body.text().trim().is_empty();
         if !draft_is_empty {
+            return Task::none();
+        }
+        let (summary, body) = listed_amend_draft(session, &head);
+        session.commit_message = summary;
+        session.commit_body = text_editor::Content::with_text(&body);
+        let repo = session.adapter.clone();
+        let key = session.key();
+        Task::perform(commit_message_in_background(repo, head.clone()), move |result| {
+            Message::AmendMessageLoaded(key.clone(), head.clone(), result)
+        })
+    }
+
+    /// The full HEAD message arrived. It replaces the quick fill only while that fill is
+    /// untouched, Amend is still ticked, and HEAD is still `head`. A failed read keeps the
+    /// quick fill and says nothing: the summary is there to edit.
+    fn fill_amend_draft(&mut self, key: &SessionKey, head: &str, result: Result<String, DomainError>) {
+        let Ok(message) = result else {
+            return;
+        };
+        let Some(session) = self.session_mut_for(key) else {
+            return;
+        };
+        let typed = (
+            session.commit_message.clone(),
+            session.commit_body.text().trim_end().to_string(),
+        ) != listed_amend_draft(session, head);
+        if !session.amending || session.seen_head() != Some(head) || typed {
             return;
         }
-        if let Some(commit) = session.state.commits.iter().find(|commit| commit.id == head) {
-            let (summary, body) = crate::session::split_summary_and_body(&commit.message);
-            session.commit_message = summary;
-            session.commit_body = text_editor::Content::with_text(&body);
-        }
+        let (summary, body) = crate::session::split_summary_and_body(&message);
+        session.commit_message = summary;
+        session.commit_body = text_editor::Content::with_text(&body);
     }
 
     /// The user said yes to amending a pushed HEAD. The amend is checked against the HEAD
@@ -5457,6 +5498,10 @@ impl GitApp {
             return Task::none();
         };
         if session.state.loading || seen.is_empty() {
+            return Task::none();
+        }
+        if session.head_is_merge() {
+            self.error = Some(crate::actions::MERGE_HEAD_REASON.to_string());
             return Task::none();
         }
         if session.head_is_on_a_remote(&seen) {
@@ -6133,6 +6178,7 @@ impl GitApp {
             inspecting_other: self.inspected_path().is_some(),
             palette_open: self.palette.is_some(),
             amending: session.amending,
+            head_is_merge: session.head_is_merge(),
             has_changes: status.is_some_and(|status| {
                 !status.staged_files.is_empty() || !status.unstaged_files.is_empty()
             }),
@@ -9589,6 +9635,76 @@ mod tests {
         let _ = app.update(Message::ToggleAmend);
         assert!(app.session().amending);
         assert_eq!(app.session().commit_message, "Mine");
+    }
+
+    #[test]
+    fn ticking_amend_fills_the_body_from_the_full_message() {
+        // The history lists only the summary; the full message is read when Amend is ticked.
+        let mut app = app_at_head("Fix", false);
+        let _ = app.update(Message::ToggleAmend);
+        assert_eq!(app.session().commit_message, "Fix", "the summary shows at once");
+        let _ = app.update(Message::AmendMessageLoaded(
+            app.active_key(),
+            HEAD.into(),
+            Ok("Fix\n\nWhy it broke.\n\nSee #12.".into()),
+        ));
+        assert_eq!(app.session().commit_message, "Fix");
+        assert_eq!(app.session().commit_body.text().trim_end(), "Why it broke.\n\nSee #12.");
+    }
+
+    #[test]
+    fn the_full_message_never_replaces_typing_and_a_failed_read_says_nothing() {
+        let full = || Ok("Fix\n\nWhy".to_string());
+        let mut typed = app_at_head("Fix", false);
+        let _ = typed.update(Message::ToggleAmend);
+        typed.session_mut().commit_message = "Fix the parser".into();
+        let _ = typed.update(Message::AmendMessageLoaded(typed.active_key(), HEAD.into(), full()));
+        assert_eq!(typed.session().commit_message, "Fix the parser");
+        assert!(typed.session().commit_body.text().trim().is_empty());
+
+        let mut unticked = app_at_head("Fix", false);
+        let _ = unticked.update(Message::ToggleAmend);
+        let _ = unticked.update(Message::ToggleAmend);
+        let _ = unticked.update(Message::AmendMessageLoaded(unticked.active_key(), HEAD.into(), full()));
+        assert!(unticked.session().commit_body.text().trim().is_empty());
+
+        let mut moved = app_at_head("Fix", false);
+        let _ = moved.update(Message::ToggleAmend);
+        let _ = moved.update(Message::AmendMessageLoaded(moved.active_key(), "def".into(), full()));
+        assert!(moved.session().commit_body.text().trim().is_empty(), "another HEAD's message");
+
+        let mut failed = app_at_head("Fix", false);
+        failed.error = None;
+        let _ = failed.update(Message::ToggleAmend);
+        let _ = failed.update(Message::AmendMessageLoaded(
+            failed.active_key(),
+            HEAD.into(),
+            Err(DomainError::Unknown("no such commit".into())),
+        ));
+        assert_eq!(failed.session().commit_message, "Fix", "the summary fill stays");
+        assert_eq!(failed.error, None);
+    }
+
+    #[test]
+    fn a_merge_commit_is_not_undone() {
+        use crate::actions::ActionId;
+        let mut app = app_at_head("Merge branch 'topic'", false);
+        app.session_mut().state.apply_event(ViewEvent::LogUpdated(vec![Commit {
+            id: HEAD.into(),
+            parent_ids: vec!["parent".into(), "topic".into()],
+            author: "a".into(),
+            message: "Merge branch 'topic'".into(),
+            timestamp: 0,
+        }]));
+        let _ = app.update(Message::RunAction(ActionId::UndoLastCommit));
+        assert_eq!(app.error.as_deref(), Some("HEAD is a merge commit: undo it from the terminal"));
+        app.error = None;
+        let _ = app.update(Message::ContextMenuAction(
+            crate::context_menu::ContextActionKind::UndoCommit { id: HEAD.into() },
+        ));
+        assert_eq!(app.error.as_deref(), Some("HEAD is a merge commit: undo it from the terminal"));
+        assert!(!app.session().state.loading);
+        assert_eq!(app.history_prompt, None);
     }
 
     #[test]

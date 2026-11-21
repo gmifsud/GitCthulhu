@@ -256,6 +256,10 @@ pub(crate) fn works_while_typing(id: ActionId) -> bool {
     )
 }
 
+/// Why a merge commit is not undone here: a soft reset to its first parent would stage
+/// everything the merge brought in as one change.
+pub(crate) const MERGE_HEAD_REASON: &str = "HEAD is a merge commit: undo it from the terminal";
+
 /// What the window knows that decides whether an action can run now.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ActionContext {
@@ -278,6 +282,8 @@ pub(crate) struct ActionContext {
     pub palette_open: bool,
     /// The Amend box is ticked: committing replaces HEAD, so nothing need be staged.
     pub amending: bool,
+    /// The HEAD commit has more than one parent (false while it is not loaded).
+    pub head_is_merge: bool,
 }
 
 /// `Ok` when `id` can run, else the reason in words. The reasons for Fetch, Pull and Push
@@ -324,6 +330,7 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
             Err("No commits yet")
         }
         ActionId::AmendLastCommit if cx.amending => Err("Amend is already ticked"),
+        ActionId::UndoLastCommit if cx.head_is_merge => Err(MERGE_HEAD_REASON),
         _ => Ok(()),
     }
 }
@@ -455,6 +462,21 @@ mod tests {
         let busy = ActionContext { busy: true, ..born };
         assert_eq!(availability(ActionId::UndoLastCommit, &busy), Err(BUSY_REASON));
         assert_eq!(availability(ActionId::AmendLastCommit, &busy), Err(BUSY_REASON));
+    }
+
+    #[test]
+    fn a_merge_commit_is_not_undone_but_can_be_amended() {
+        let merge = ActionContext {
+            has_session: true,
+            head_born: true,
+            head_is_merge: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            availability(ActionId::UndoLastCommit, &merge),
+            Err("HEAD is a merge commit: undo it from the terminal")
+        );
+        assert_eq!(availability(ActionId::AmendLastCommit, &merge), Ok(()));
     }
 
     #[test]

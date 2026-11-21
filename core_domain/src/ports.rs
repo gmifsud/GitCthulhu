@@ -104,6 +104,12 @@ pub trait GitRepository {
         let _ = expected_head;
         Err(DomainError::Unknown("this repository cannot undo a commit".to_string()))
     }
+    /// The full message of one commit (summary, blank line, body), without the trailing
+    /// newline. `commit_id` is a hex object id.
+    fn commit_message(&self, commit_id: &str) -> Result<String, DomainError> {
+        let _ = commit_id;
+        Err(DomainError::Unknown("this repository cannot read a commit message".to_string()))
+    }
     /// `git fetch` of the default remote, using the repository's own credential helper and SSH config.
     fn fetch(&self) -> Result<(), DomainError>;
     /// `git push` of the current branch to its upstream, with no refspec.
