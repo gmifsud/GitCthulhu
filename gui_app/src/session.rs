@@ -14,10 +14,13 @@ use crate::jobs::{PatchQuery, SharedRepository, WorktreeEdit};
 use crate::selection::{visible_selection, Selection};
 
 /// The message a commit records: the summary, then one blank line and the body when the body
-/// has any text. Every way of committing builds its message here.
+/// has any text. A blank summary gives an empty message, whatever the body says: a body alone
+/// is never a commit. Every way of committing builds its message here.
 pub(crate) fn full_commit_message(summary: &str, body: &str) -> String {
     let summary = summary.trim();
-    if body.trim().is_empty() {
+    if summary.is_empty() {
+        String::new()
+    } else if body.trim().is_empty() {
         summary.to_string()
     } else {
         format!("{summary}\n\n{}", body.trim_end())
@@ -703,6 +706,7 @@ mod tests {
     fn a_body_follows_the_summary_after_one_blank_line() {
         assert_eq!(full_commit_message(" Fix parser ", "Long story.\n\n"), "Fix parser\n\nLong story.");
         assert_eq!(full_commit_message("Fix parser", "  \n"), "Fix parser");
+        assert_eq!(full_commit_message("  ", "why"), "");
     }
 
     #[test]

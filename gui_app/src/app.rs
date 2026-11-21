@@ -5962,6 +5962,7 @@ impl GitApp {
             head_born: status.is_some_and(|status| status.head_commit_id.is_some()),
             has_upstream: status.is_some_and(|status| status.tracking.is_some()),
             has_staged: status.is_some_and(|status| !status.staged_files.is_empty()),
+            has_summary: !session.commit_message.trim().is_empty(),
             has_marked: !session.marked_files.is_empty(),
             inspecting_other: self.inspected_path().is_some(),
             palette_open: self.palette.is_some(),
@@ -7306,6 +7307,18 @@ mod tests {
             panic!("Ctrl+Enter commits");
         };
         assert_eq!(message, "record the change\n\nwhy it matters");
+    }
+
+    #[test]
+    fn ctrl_enter_with_a_body_but_no_summary_does_not_commit() {
+        use crate::actions::ActionId;
+        let mut app = app_ready_to_commit();
+        app.error = None;
+        app.sessions[0].commit_message = "  ".to_string();
+        app.sessions[0].commit_body = text_editor::Content::with_text("why");
+        let _ = app.update(Message::RunAction(ActionId::Commit));
+        assert!(!app.sessions[0].state.loading, "no commit started");
+        assert_eq!(app.error.as_deref(), Some("Write a commit summary first"));
     }
 
     #[test]

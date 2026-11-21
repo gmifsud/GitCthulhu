@@ -263,6 +263,8 @@ pub(crate) struct ActionContext {
     pub head_born: bool,
     pub has_upstream: bool,
     pub has_staged: bool,
+    /// The commit summary has some text; a body alone never makes a commit.
+    pub has_summary: bool,
     pub has_marked: bool,
     /// Staged or unstaged tracked changes.
     pub has_changes: bool,
@@ -309,6 +311,7 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
             Err("Showing another worktree: open its tab to commit")
         }
         ActionId::Commit if !cx.has_staged => Err("Nothing is staged"),
+        ActionId::Commit if !cx.has_summary => Err("Write a commit summary first"),
         _ => Ok(()),
     }
 }
@@ -398,6 +401,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(availability(ActionId::Commit, &idle), Err("Nothing is staged"));
+        let staged = ActionContext {
+            has_staged: true,
+            ..idle
+        };
+        assert_eq!(
+            availability(ActionId::Commit, &staged),
+            Err("Write a commit summary first")
+        );
+        let ready = ActionContext {
+            has_summary: true,
+            ..staged
+        };
+        assert_eq!(availability(ActionId::Commit, &ready), Ok(()));
         assert_eq!(
             availability(ActionId::Pull, &idle),
             Err("No upstream: this branch does not track a remote branch")
