@@ -37,6 +37,16 @@ pub struct Stash {
     pub commit_id: String,
 }
 
+/// A stash commit that no longer has a `stash@{n}` entry: dropped, or cleared. Git keeps the
+/// commit until it garbage-collects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LostStash {
+    pub commit_id: String,
+    pub message: String,
+    /// Committer time, seconds since the epoch.
+    pub timestamp: i64,
+}
+
 /// Represents a Git branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Branch {

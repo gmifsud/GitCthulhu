@@ -1,5 +1,5 @@
 use super::{MergePreview, 
-    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, ForceGuard, Hunk, LineCounts, Patch,
+    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, ForceGuard, Hunk, LineCounts, LostStash, Patch,
     RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
@@ -178,6 +178,15 @@ pub trait GitRepository {
     fn stash_pop(&self, index: usize) -> Result<(), DomainError>;
     /// `git stash drop stash@{index}`. The saved change is discarded.
     fn stash_drop(&self, index: usize) -> Result<(), DomainError>;
+    /// Stash commits that are no longer listed, newest first: unreachable commits shaped like
+    /// a stash (two or more parents, a `WIP on` or `On` subject). Can take seconds.
+    fn lost_stashes(&self) -> Result<Vec<LostStash>, DomainError> {
+        Err(DomainError::Unknown("this repository cannot find lost stashes".to_string()))
+    }
+    /// `git stash apply <commit_id>`. Nothing is dropped and no entry is added.
+    fn apply_stash_commit(&self, _commit_id: &str) -> Result<(), DomainError> {
+        Err(DomainError::Unknown("this repository cannot apply a stash commit".to_string()))
+    }
     /// `git merge --abort`, `git rebase --abort`… Restores the state before the operation.
     fn abort_operation(&self, operation: RepoOperation) -> Result<(), DomainError>;
     /// Finish the operation once every conflict is resolved and staged: the merge commit, or

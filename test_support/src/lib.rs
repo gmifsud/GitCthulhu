@@ -3,7 +3,7 @@
 //! Add as `[dev-dependencies]` only — never in `[dependencies]`.
 
 use core_domain::{
-    Branch, Commit, DomainError, FileDisposition, ForceGuard, GitRepository, Hunk, LineCounts, Patch,
+    Branch, Commit, DomainError, FileDisposition, ForceGuard, GitRepository, Hunk, LineCounts, LostStash, Patch,
     RepoStatus, Stash, Tag, Worktree,
 };
 
@@ -69,6 +69,8 @@ pub struct FakeGitRepository {
     pub stash_apply_result: Result<(), DomainError>,
     pub stash_pop_result: Result<(), DomainError>,
     pub stash_drop_result: Result<(), DomainError>,
+    pub lost_stashes_result: Result<Vec<LostStash>, DomainError>,
+    pub apply_stash_commit_result: Result<(), DomainError>,
 }
 
 impl FakeGitRepository {
@@ -143,6 +145,8 @@ impl FakeGitRepository {
             stash_apply_result: Ok(()),
             stash_pop_result: Ok(()),
             stash_drop_result: Ok(()),
+            lost_stashes_result: Ok(vec![]),
+            apply_stash_commit_result: Ok(()),
         }
     }
 }
@@ -343,6 +347,14 @@ impl GitRepository for FakeGitRepository {
 
     fn stash_drop(&self, _index: usize) -> Result<(), DomainError> {
         self.stash_drop_result.clone()
+    }
+
+    fn lost_stashes(&self) -> Result<Vec<LostStash>, DomainError> {
+        self.lost_stashes_result.clone()
+    }
+
+    fn apply_stash_commit(&self, _commit_id: &str) -> Result<(), DomainError> {
+        self.apply_stash_commit_result.clone()
     }
 
     fn abort_operation(&self, _operation: core_domain::RepoOperation) -> Result<(), DomainError> {

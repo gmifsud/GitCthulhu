@@ -1030,6 +1030,30 @@ pub(crate) fn branch_in_background(
     )
 }
 
+/// Search for stash commits that no longer have an entry. `git fsck` reads every object, so
+/// it takes a read slot like the other repository reads.
+pub(crate) fn lost_stashes_in_background(
+    repo: SharedRepository,
+) -> impl Future<Output = Result<Vec<core_domain::LostStash>, DomainError>> {
+    in_background(
+        move || {
+            let _slot = read_slot();
+            repo.lost_stashes()
+        },
+        || Err(DomainError::Unknown("the search for lost stashes was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn apply_stash_commit_in_background(
+    repo: SharedRepository,
+    commit_id: String,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.apply_stash_commit(&commit_id),
+        || Err(DomainError::Unknown("applying the stash was interrupted".to_string())),
+    )
+}
+
 pub(crate) fn stash_in_background(
     repo: SharedRepository,
     action: StashAction,

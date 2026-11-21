@@ -1397,6 +1397,58 @@ fn a_merge_commit_patch_is_its_first_parent_diff() {
 }
 
 #[test]
+fn a_dropped_stash_is_found_and_restored_without_dropping_anything() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "one\n")]);
+    fixture.write_file("a.txt", "one\ntwo\n");
+    fixture.write_file("extra.txt", "new\n");
+    let adapter = fixture.adapter();
+    assert!(adapter.lost_stashes().expect("nothing lost yet").is_empty());
+
+    adapter.stash_push("keep me", true).expect("stash");
+    adapter.stash_drop(0).expect("drop");
+    assert!(!fixture.workdir().join("extra.txt").exists());
+
+    let lost = adapter.lost_stashes().expect("find lost stashes");
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].message.contains("keep me"), "{}", lost[0].message);
+    assert_eq!(lost[0].commit_id.len(), 40);
+    assert!(lost[0].timestamp > 0);
+
+    adapter.apply_stash_commit(&lost[0].commit_id).expect("apply");
+    let restored = std::fs::read_to_string(fixture.workdir().join("a.txt")).expect("read");
+    assert_eq!(restored.replace("\r\n", "\n"), "one\ntwo\n");
+    assert!(fixture.workdir().join("extra.txt").exists());
+    assert!(adapter.stashes().expect("list").is_empty());
+    assert!(adapter.apply_stash_commit("--oops").is_err());
+}
+
+#[test]
+fn ordinary_dangling_commits_are_not_stashes() {
+    let fixture = TestRepo::new();
+    commit_file(fixture.workdir(), "a.txt", "one\n", "first");
+    commit_file(fixture.workdir(), "a.txt", "two\n", "second");
+    git_in(
+        fixture.workdir(),
+        &["-c", "commit.gpgsign=false", "commit", "--amend", "-m", "second, reworded"],
+    );
+    let adapter = fixture.adapter();
+    assert!(adapter.lost_stashes().expect("search").is_empty());
+}
+
+#[test]
+fn a_stash_that_is_still_listed_is_not_lost() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "one\n")]);
+    fixture.write_file("a.txt", "one\ntwo\n");
+    let adapter = fixture.adapter();
+    adapter.stash_push("still here", false).expect("stash");
+    assert!(adapter.lost_stashes().expect("search").is_empty());
+}
+
+#[test]
 fn stash_push_apply_pop_and_drop_round_trip() {
     let fixture = TestRepo::new();
     fixture.commit("first", &[("a.txt", "one\n")], 0);

@@ -17,6 +17,7 @@ mod history;
 mod history_scrollbar;
 mod inspect;
 mod opening;
+mod lost_stashes;
 mod operation;
 mod palette;
 mod patch;
@@ -122,6 +123,8 @@ impl GitApp {
             // `opaque` keeps clicks and hovers from reaching the screen underneath.
             opaque(dialog)
         } else if let Some(overlay) = shortcuts::shortcuts_overlay(self, tokens, reading) {
+            opaque(overlay)
+        } else if let Some(overlay) = lost_stashes::lost_stashes_overlay(self, tokens, reading) {
             opaque(overlay)
         } else if let Some(overlay) = palette_overlay(self, tokens, reading) {
             overlay

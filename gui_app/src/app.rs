@@ -19,7 +19,7 @@ use crate::jobs::{
     load_repository_in_background, open_repository_in_background, open_worktree_in_background,
     probe_worktree_in_background, pull_in_background,
     publish_in_background, push_in_background, remove_worktree_in_background, save_settings_in_background,
-    compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
+    apply_stash_commit_in_background, compare_in_background, lost_stashes_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
     stop_shell, suggest_commit_in_background, undo_commit_in_background, commit_message_in_background, worktrees_in_background,
     BranchAction,
     HistoryAction, SharedRepository, ShellEvent, StashAction, WorktreeEdit,
@@ -190,6 +190,14 @@ pub(crate) struct GitApp {
     pub(crate) files_as_tree: bool,
     /// The keyboard shortcuts sheet is showing.
     pub(crate) shortcuts_open: bool,
+    /// The lost-stash dialog, from the search starting to its result.
+    pub(crate) lost_stashes: Option<LostStashesView>,
+    /// The tab the lost-stash dialog was opened on: its search result and its Apply go there.
+    lost_stashes_session: Option<SessionKey>,
+    /// Stash commits applied from the open dialog, so their rows say so.
+    pub(crate) lost_stashes_applied: Vec<String>,
+    /// An Apply is running: the next one waits for it.
+    pub(crate) lost_stash_applying: bool,
     /// Diff drawn side by side (true) or as one unified column.
     pub(crate) diff_split: bool,
     /// Keyboard modifiers held now.
@@ -412,6 +420,15 @@ pub(crate) enum Message {
     SuggestCommit,
     /// The session path is captured when the suggestion is spawned.
     CommitSuggested(SessionKey, crate::CommitSuggestion),
+    /// Open the lost-stash dialog and start the search on the active tab.
+    FindLostStashes,
+    /// The search finished for this tab.
+    LostStashesFound(SessionKey, Result<Vec<core_domain::LostStash>, DomainError>),
+    /// Apply the stash commit with this id; the stash stays findable.
+    ApplyLostStash(String),
+    /// An apply finished for this tab: the commit it applied, and how it went.
+    LostStashApplied(SessionKey, String, Result<(), DomainError>),
+    CloseLostStashes,
     ToggleTerminal,
     TerminalEdited(text_editor::Action),
     ClearTerminal,
@@ -946,6 +963,13 @@ fn finished_outcome(message: &Message) -> Option<(crate::activity::Lane, core_do
         };
         return Some((Lane::Worktree(path.path.clone()), outcome));
     }
+    if let Message::LostStashApplied(path, _, result) = message {
+        let outcome = match result {
+            Ok(()) => core_domain::ActivityOutcome::Succeeded,
+            Err(error) => core_domain::ActivityOutcome::Failed(error_message(error)),
+        };
+        return Some((Lane::Worktree(path.path.clone()), outcome));
+    }
     if let Message::ForcePushFinished(path, result) = message {
         let outcome = match result {
             Ok(_) => core_domain::ActivityOutcome::Succeeded,
@@ -1006,6 +1030,16 @@ pub(crate) enum WorktreePrompt {
         branch: String,
         force: bool,
     },
+}
+
+/// What the lost-stash dialog shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LostStashesView {
+    /// `git fsck` is still running.
+    Searching,
+    /// Newest first; empty when nothing was lost.
+    Found(Vec<core_domain::LostStash>),
+    Failed(String),
 }
 
 /// A cherry-pick, reset, merge, rebase, or rewrite of a pushed HEAD waiting for confirmation.
@@ -1133,6 +1167,10 @@ impl GitApp {
             branch_popup_filter: String::new(),
             files_as_tree: true,
             shortcuts_open: false,
+            lost_stashes: None,
+            lost_stashes_session: None,
+            lost_stashes_applied: Vec::new(),
+            lost_stash_applying: false,
             diff_split: true,
             modifiers: iced::keyboard::Modifiers::default(),
             window_width: 0.0,
@@ -2031,6 +2069,23 @@ impl GitApp {
             },
             Message::ToggleShortcuts => {
                 self.shortcuts_open = !self.shortcuts_open;
+                Task::none()
+            }
+            Message::FindLostStashes => self.find_lost_stashes(),
+            Message::LostStashesFound(key, result) => {
+                self.show_lost_stashes(&key, result);
+                Task::none()
+            }
+            Message::ApplyLostStash(commit_id) => self.apply_lost_stash(commit_id),
+            Message::LostStashApplied(key, commit_id, result) => {
+                self.lost_stash_applying = false;
+                if result.is_ok() && self.lost_stashes_session.as_ref() == Some(&key) {
+                    self.lost_stashes_applied.push(commit_id);
+                }
+                self.finish_reload(&key, result)
+            }
+            Message::CloseLostStashes => {
+                self.close_lost_stashes();
                 Task::none()
             }
             Message::Escape => self.handle_escape(),
@@ -4948,6 +5003,7 @@ impl GitApp {
             || self.compare.is_some()
             || self.settings_open
             || self.shortcuts_open
+            || self.lost_stashes.is_some()
     }
 
     fn walk_list(&mut self, key: ListKeyName, shift: bool) -> Task<Message> {
@@ -6172,6 +6228,75 @@ impl GitApp {
         open_in_file_manager(&open_path);
     }
 
+    /// Open the dialog on the active tab and search in the background.
+    fn find_lost_stashes(&mut self) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        let repo = session.adapter.clone();
+        let key = session.key();
+        self.error = None;
+        self.lost_stashes = Some(LostStashesView::Searching);
+        self.lost_stashes_session = Some(key.clone());
+        self.lost_stashes_applied.clear();
+        Task::perform(lost_stashes_in_background(repo), move |result| {
+            Message::LostStashesFound(key.clone(), result)
+        })
+    }
+
+    /// A search result opens its dialog only on the tab that asked, and only while that
+    /// search is still the one on screen: a closed dialog, or one reopened on another tab,
+    /// drops it. A tab that is no longer active closes the dialog rather than cover another tab.
+    fn show_lost_stashes(&mut self, key: &SessionKey, result: Result<Vec<core_domain::LostStash>, DomainError>) {
+        if self.lost_stashes_session.as_ref() != Some(key)
+            || !matches!(self.lost_stashes, Some(LostStashesView::Searching))
+        {
+            return;
+        }
+        if self.active_session().map(WorktreeSession::key).as_ref() != Some(key) {
+            self.close_lost_stashes();
+            return;
+        }
+        self.lost_stashes = Some(match result {
+            Ok(found) => LostStashesView::Found(found),
+            Err(error) => LostStashesView::Failed(error_message(&error)),
+        });
+    }
+
+    fn apply_lost_stash(&mut self, commit_id: String) -> Task<Message> {
+        let Some(key) = self.lost_stashes_session.clone() else {
+            return Task::none();
+        };
+        if self.lost_stash_applying {
+            return Task::none();
+        }
+        let Some(session) = self.session_mut_for(&key) else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        session.state.loading = true;
+        let repo = session.adapter.clone();
+        let path = key.path.clone();
+        self.lost_stash_applying = true;
+        self.error = None;
+        let short: String = commit_id.chars().take(8).collect();
+        self.begin_activity(
+            &path,
+            crate::activity::Action::new("Stash apply", short.clone(), format!("git stash apply {short}")),
+        );
+        Task::perform(apply_stash_commit_in_background(repo, commit_id.clone()), move |result| {
+            Message::LostStashApplied(key.clone(), commit_id.clone(), result)
+        })
+    }
+
+    fn close_lost_stashes(&mut self) {
+        self.lost_stashes = None;
+        self.lost_stashes_session = None;
+        self.lost_stashes_applied.clear();
+    }
+
     fn run_stash(&mut self, action: StashAction) -> Task<Message> {
         let Some(session) = self.active_session() else {
             return Task::none();
@@ -6318,6 +6443,10 @@ impl GitApp {
     fn handle_escape(&mut self) -> Task<Message> {
         if self.shortcuts_open {
             self.shortcuts_open = false;
+            return Task::none();
+        }
+        if self.lost_stashes.is_some() {
+            self.close_lost_stashes();
             return Task::none();
         }
         if self.palette.take().is_some() {
@@ -6712,6 +6841,7 @@ impl GitApp {
             ),
             ActionId::AmendLastCommit => Message::ToggleAmend,
             ActionId::UndoLastCommit => Message::AskUndoCommit,
+            ActionId::FindLostStashes => Message::FindLostStashes,
             ActionId::ToggleTerminal => Message::ToggleTerminal,
             ActionId::CycleLayout => Message::CycleLayout,
             ActionId::CycleHunkMode => Message::CycleHunkMode,
@@ -10349,6 +10479,105 @@ mod tests {
         assert!(app.shortcuts_open);
         let _ = app.update(Message::Escape);
         assert!(!app.shortcuts_open);
+    }
+
+    fn lost(commit_id: &str, message: &str) -> core_domain::LostStash {
+        core_domain::LostStash { commit_id: commit_id.to_string(), message: message.to_string(), timestamp: 1_700_000_000 }
+    }
+
+    #[test]
+    fn finding_lost_stashes_opens_the_dialog_searching_and_the_result_fills_it() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::FindLostStashes);
+        assert_eq!(app.lost_stashes, Some(LostStashesView::Searching));
+        assert!(app.modal_open(), "the dialog owns the arrow keys");
+
+        let found = vec![lost("a".repeat(40).as_str(), "On main: keep me")];
+        let _ = app.update(Message::LostStashesFound(app.active_key(), Ok(found.clone())));
+        assert_eq!(app.lost_stashes, Some(LostStashesView::Found(found)));
+
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.lost_stashes, None);
+        assert!(!app.modal_open());
+    }
+
+    #[test]
+    fn a_failed_search_says_why_inside_the_dialog() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::FindLostStashes);
+        let _ = app.update(Message::LostStashesFound(app.active_key(), Err(DomainError::Unknown("fsck failed".into()))));
+        assert_eq!(app.lost_stashes, Some(LostStashesView::Failed("fsck failed".into())));
+    }
+
+    #[test]
+    fn a_search_result_for_another_tab_or_a_closed_dialog_is_dropped() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.sessions.push(WorktreeSession::new(
+            r"D:\second".to_string(),
+            std::sync::Arc::new(FakeGitRepository::ok()),
+            AppSettings::default(),
+        ));
+        let first = app.active_key();
+        let second = app.sessions[1].key();
+        let found = vec![lost("b".repeat(40).as_str(), "WIP on main: x")];
+
+        // The dialog was opened on the first tab; the second tab's result is not its result.
+        let _ = app.update(Message::FindLostStashes);
+        let _ = app.update(Message::LostStashesFound(second.clone(), Ok(found.clone())));
+        assert_eq!(app.lost_stashes, Some(LostStashesView::Searching));
+
+        // The user moved to the second tab before the first tab's result came back: the dialog
+        // goes rather than cover the wrong tab.
+        app.activate(1);
+        let _ = app.update(Message::LostStashesFound(first.clone(), Ok(found.clone())));
+        assert_eq!(app.lost_stashes, None);
+
+        // A result that arrives after the dialog was closed does not reopen it.
+        let _ = app.update(Message::LostStashesFound(second, Ok(found)));
+        assert_eq!(app.lost_stashes, None);
+    }
+
+    #[test]
+    fn applying_a_lost_stash_keeps_the_dialog_marks_the_row_and_refreshes() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let id = "c".repeat(40);
+        let _ = app.update(Message::FindLostStashes);
+        let key = app.active_key();
+        let _ = app.update(Message::LostStashesFound(key.clone(), Ok(vec![lost(&id, "On main: keep me")])));
+
+        let _ = app.update(Message::ApplyLostStash(id.clone()));
+        assert!(app.lost_stash_applying);
+        assert!(app.session().state.loading, "the tab is busy while git applies");
+        // A second Apply waits for the first.
+        let _ = app.update(Message::ApplyLostStash(id.clone()));
+
+        let _ = app.update(Message::LostStashApplied(key, id.clone(), Ok(())));
+        assert!(!app.lost_stash_applying);
+        assert!(!app.session().state.loading);
+        assert_eq!(app.lost_stashes_applied, vec![id]);
+        assert!(matches!(app.lost_stashes, Some(LostStashesView::Found(_))), "stays open for the next stash");
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn a_failed_apply_shows_through_the_error_strip_and_marks_nothing() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let id = "d".repeat(40);
+        let _ = app.update(Message::FindLostStashes);
+        let key = app.active_key();
+        let _ = app.update(Message::LostStashesFound(key.clone(), Ok(vec![lost(&id, "On main: x")])));
+        let _ = app.update(Message::ApplyLostStash(id.clone()));
+
+        let _ = app.update(Message::LostStashApplied(key, id, Err(DomainError::Unknown("conflict".into()))));
+        assert!(app.lost_stashes_applied.is_empty());
+        assert!(app.error.as_deref().is_some_and(|error| error.contains("conflict")), "{:?}", app.error);
+        assert!(matches!(app.lost_stashes, Some(LostStashesView::Found(_))));
+    }
+
+    #[test]
+    fn the_palette_action_opens_the_lost_stash_dialog() {
+        let app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        assert!(matches!(app.message_for(crate::actions::ActionId::FindLostStashes), Message::FindLostStashes));
     }
 
     const HEAD: &str = "abc";

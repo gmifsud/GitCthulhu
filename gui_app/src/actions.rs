@@ -30,6 +30,8 @@ pub(crate) enum ActionId {
     Commit,
     AmendLastCommit,
     UndoLastCommit,
+    /// Search for stashes that were dropped and offer to apply them again.
+    FindLostStashes,
     ToggleTerminal,
     CycleLayout,
     CycleHunkMode,
@@ -187,6 +189,7 @@ pub(crate) const ACTIONS: &[ActionSpec] = &[
     ),
     spec(ActionId::AmendLastCommit, "Amend last commit", "Changes", None),
     spec(ActionId::UndoLastCommit, "Undo last commit", "Changes", None),
+    spec(ActionId::FindLostStashes, "Find lost stashes", "Changes", None),
     spec(
         ActionId::QuickOpen,
         "Go to branch, file, commit…",
@@ -367,6 +370,7 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
             | ActionId::Commit
             | ActionId::AmendLastCommit
             | ActionId::UndoLastCommit
+            | ActionId::FindLostStashes
     );
     if touches_git {
         if cx.busy {
@@ -407,6 +411,20 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finding_lost_stashes_needs_a_repository_and_waits_for_git() {
+        let none = ActionContext::default();
+        assert_eq!(availability(ActionId::FindLostStashes, &none), Err("No repository open"));
+        let open = ActionContext { has_session: true, ..ActionContext::default() };
+        assert_eq!(availability(ActionId::FindLostStashes, &open), Ok(()));
+        let busy = ActionContext { busy: true, ..open };
+        assert_eq!(availability(ActionId::FindLostStashes, &busy), Err(BUSY_REASON));
+        let loading = ActionContext { loading: true, ..open };
+        assert_eq!(availability(ActionId::FindLostStashes, &loading), Err(LOADING_REASON));
+        let spec = ACTIONS.iter().find(|spec| spec.id == ActionId::FindLostStashes).expect("listed");
+        assert!(spec.chord.is_none(), "no default key");
+    }
 
     #[test]
     fn every_action_is_listed_once_and_no_two_share_a_chord() {

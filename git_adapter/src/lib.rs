@@ -14,7 +14,7 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, ForceGuard, GitRepository, Hunk, LineCounts, LogCursor, MergePreview,
+    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, ForceGuard, GitRepository, Hunk, LineCounts, LogCursor, LostStash, MergePreview,
     Patch, RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
@@ -1241,6 +1241,37 @@ impl GitRepository for GitoxideAdapter {
         self.open_repo()?;
         let stash_ref = stash_ref(index);
         run_git(&self.repo_path, &["stash", "drop", &stash_ref])
+    }
+
+    fn lost_stashes(&self) -> Result<Vec<LostStash>, DomainError> {
+        self.open_repo()?;
+        let listed: std::collections::HashSet<String> = run_git_stdout(
+            &self.repo_path,
+            &["stash", "list", "--format=%H"],
+        )?
+        .lines()
+        .map(|line| line.trim().to_string())
+        .collect();
+        let fsck = run_git_stdout(&self.repo_path, &stash::FSCK_ARGS)?;
+        let mut lost = Vec::new();
+        for id in stash::unreachable_commit_ids(&fsck) {
+            if listed.contains(id) {
+                continue;
+            }
+            let log = run_git_stdout(
+                &self.repo_path,
+                &["log", "-1", "--no-show-signature", stash::CANDIDATE_FORMAT, id],
+            )?;
+            lost.extend(stash::parse_candidate(id, &log));
+        }
+        lost.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.commit_id.cmp(&b.commit_id)));
+        Ok(lost)
+    }
+
+    fn apply_stash_commit(&self, commit_id: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_hex_commit(commit_id)?;
+        run_git(&self.repo_path, &["stash", "apply", commit_id])
     }
 }
 
