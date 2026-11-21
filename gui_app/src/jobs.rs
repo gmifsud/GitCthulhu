@@ -541,9 +541,9 @@ pub(crate) fn checkout_in_background(
     )
 }
 
-/// Stash everything (untracked files too), switch, then put the stash back on the new branch.
-/// A failed switch pops the stash again, so the tree is as the user left it; the error says
-/// whether the changes are back or still in the stash.
+/// Stash everything (untracked files too), then switch with a clean tree. The changes stay in
+/// the stash "Switching to <name>". If the switch fails the stash is popped straight back, so
+/// the tree is as the user left it; the error says whether the changes are back or still stashed.
 pub(crate) fn stash_and_checkout_in_background(
     repo: SharedRepository,
     name: String,
@@ -556,17 +556,27 @@ pub(crate) fn stash_and_checkout_in_background(
 
 fn stash_and_checkout(repo: &dyn GitRepository, name: &str) -> Result<(), DomainError> {
     let message = format!("Switching to {name}");
+    let before = repo.stashes()?;
     repo.stash_push(&message, true)?;
-    // The stash just pushed is the newest one.
+    let after = repo.stashes()?;
+    // `git stash push` succeeds without making a stash when nothing needs saving; popping then
+    // would restore an older, unrelated stash.
+    let made = after.len() > before.len()
+        || after.first().map(|stash| &stash.commit_id) != before.first().map(|stash| &stash.commit_id);
+    if !made {
+        return repo.checkout_branch(name);
+    }
     match repo.checkout_branch(name) {
-        Ok(()) => repo.stash_pop(0),
+        Ok(()) => Ok(()),
         Err(error) => {
             let reason = error_message(&error);
+            // The stash just made is the newest one.
             Err(DomainError::Unknown(match repo.stash_pop(0) {
-                Ok(()) => format!("{reason}
-Your changes are back."),
-                Err(_) => format!("{reason}
-Your changes are saved in the stash '{message}'."),
+                Ok(()) => format!("{reason}\nYour changes are back."),
+                Err(pop) => format!(
+                    "{reason}\nYour changes are saved in the stash '{message}'.\n{}",
+                    error_message(&pop)
+                ),
             }))
         }
     }
@@ -1447,33 +1457,77 @@ mod tests {
 
     #[test]
     fn stash_and_switch_pops_the_stash_back_when_the_checkout_fails() {
-        let refused = stash_and_switch(FakeGitRepository {
+        let refused = stash_and_switch(stashing_repo(FakeGitRepository {
             checkout_result: Err(DomainError::Unknown("error: pathspec 'feature' did not match".to_string())),
             ..FakeGitRepository::ok()
-        });
+        }));
         assert_eq!(
             refused,
             Err(DomainError::Unknown(
-                "error: pathspec 'feature' did not match
-Your changes are back.".to_string()
+                "error: pathspec 'feature' did not match\nYour changes are back.".to_string()
+            ))
+        );
+    }
+
+    fn a_stash(commit_id: &str) -> core_domain::Stash {
+        core_domain::Stash { index: 0, message: "x".to_string(), commit_id: commit_id.to_string() }
+    }
+
+    /// A repository where pushing a stash adds one.
+    fn stashing_repo(base: FakeGitRepository) -> FakeGitRepository {
+        FakeGitRepository { stashes_after_push: Some(vec![a_stash("new")]), ..base }
+    }
+
+    fn pops(repo: &FakeGitRepository) -> usize {
+        repo.stash_pop_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn stash_and_switch_names_the_stash_and_the_reason_when_it_cannot_be_popped_back() {
+        let stuck = stash_and_switch(stashing_repo(FakeGitRepository {
+            checkout_result: Err(DomainError::Unknown("boom".to_string())),
+            stash_pop_result: Err(DomainError::Unknown("pop failed".to_string())),
+            ..FakeGitRepository::ok()
+        }));
+        assert_eq!(
+            stuck,
+            Err(DomainError::Unknown(
+                "boom\nYour changes are saved in the stash 'Switching to feature'.\npop failed".to_string()
             ))
         );
     }
 
     #[test]
-    fn stash_and_switch_names_the_stash_when_it_cannot_be_popped_back() {
-        let stuck = stash_and_switch(FakeGitRepository {
+    fn stash_and_switch_leaves_the_changes_stashed_on_success() {
+        let repo = Arc::new(stashing_repo(FakeGitRepository {
+            stash_pop_result: Err(DomainError::Unknown("must not be called".to_string())),
+            ..FakeGitRepository::ok()
+        }));
+        let done = iced::futures::executor::block_on(stash_and_checkout_in_background(repo.clone(), "feature".to_string()));
+        assert_eq!(done, Ok(()));
+        assert_eq!(pops(&repo), 0);
+    }
+
+    #[test]
+    fn stash_and_switch_never_pops_a_stash_it_did_not_make() {
+        // An older stash exists and the push made no new one: "No local changes to save".
+        let repo = Arc::new(FakeGitRepository {
+            stashes_result: Ok(vec![a_stash("older")]),
             checkout_result: Err(DomainError::Unknown("boom".to_string())),
-            stash_pop_result: Err(DomainError::Unknown("pop failed".to_string())),
             ..FakeGitRepository::ok()
         });
-        assert_eq!(
-            stuck,
-            Err(DomainError::Unknown(
-                "boom
-Your changes are saved in the stash 'Switching to feature'.".to_string()
-            ))
-        );
+        let done = iced::futures::executor::block_on(stash_and_checkout_in_background(repo.clone(), "feature".to_string()));
+        assert_eq!(done, Err(DomainError::Unknown("boom".to_string())), "a plain checkout, nothing popped");
+        assert_eq!(pops(&repo), 0);
+    }
+
+    #[test]
+    fn stash_and_switch_refuses_when_the_stash_list_cannot_be_read() {
+        let refused = stash_and_switch(FakeGitRepository {
+            stashes_result: Err(DomainError::Unknown("no list".to_string())),
+            ..FakeGitRepository::ok()
+        });
+        assert_eq!(refused, Err(DomainError::Unknown("no list".to_string())));
     }
 
     #[test]
@@ -1483,7 +1537,6 @@ Your changes are saved in the stash 'Switching to feature'.".to_string()
             ..FakeGitRepository::ok()
         });
         assert_eq!(refused, Err(DomainError::Unknown("no stash".to_string())));
-        assert_eq!(stash_and_switch(FakeGitRepository::ok()), Ok(()));
     }
 
     #[test]

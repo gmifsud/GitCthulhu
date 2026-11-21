@@ -17,6 +17,11 @@ pub struct FakeGitRepository {
     pub log_result: Result<Vec<Commit>, DomainError>,
     pub branches_result: Result<Vec<Branch>, DomainError>,
     pub stashes_result: Result<Vec<Stash>, DomainError>,
+    /// What `stashes` returns once `stash_push` has run; `None` leaves the list unchanged.
+    pub stashes_after_push: Option<Vec<Stash>>,
+    pub stash_pushed: std::sync::atomic::AtomicBool,
+    /// How many times `stash_pop` was called.
+    pub stash_pop_calls: std::sync::atomic::AtomicUsize,
     pub tags_result: Result<Vec<Tag>, DomainError>,
     pub unpushed_result: Result<Vec<String>, DomainError>,
     pub line_counts_result: Result<LineCounts, DomainError>,
@@ -82,6 +87,9 @@ impl FakeGitRepository {
             log_result: Ok(vec![]),
             branches_result: Ok(vec![]),
             stashes_result: Ok(vec![]),
+            stashes_after_push: None,
+            stash_pushed: Default::default(),
+            stash_pop_calls: Default::default(),
             tags_result: Ok(vec![]),
             unpushed_result: Ok(vec![]),
             line_counts_result: Ok(LineCounts::default()),
@@ -151,7 +159,11 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn stashes(&self) -> Result<Vec<Stash>, DomainError> {
-        self.stashes_result.clone()
+        use std::sync::atomic::Ordering;
+        match &self.stashes_after_push {
+            Some(after) if self.stash_pushed.load(Ordering::SeqCst) => Ok(after.clone()),
+            _ => self.stashes_result.clone(),
+        }
     }
 
     fn tags(&self) -> Result<Vec<Tag>, DomainError> {
@@ -302,6 +314,7 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn stash_push(&self, _message: &str, _include_untracked: bool) -> Result<(), DomainError> {
+        self.stash_pushed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.stash_push_result.clone()
     }
 
@@ -318,6 +331,7 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn stash_pop(&self, _index: usize) -> Result<(), DomainError> {
+        self.stash_pop_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.stash_pop_result.clone()
     }
 
