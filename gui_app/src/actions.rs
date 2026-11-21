@@ -270,6 +270,30 @@ pub(crate) fn works_while_typing(id: ActionId) -> bool {
     )
 }
 
+/// Why a git action waits: a prompt or dialog is open, and it is what the user is acting on.
+pub(crate) const MODAL_OPEN_REASON: &str = "Close the open dialog first";
+
+/// Actions that run git or reload the repository. Busy, loading and an open dialog block
+/// these only; UI actions (palette, terminal, layout, settings) stay available.
+pub(crate) fn touches_git(id: ActionId) -> bool {
+    matches!(
+        id,
+        ActionId::Fetch
+            | ActionId::Pull
+            | ActionId::Push
+            | ActionId::Publish
+            | ActionId::ForcePush
+            | ActionId::Refresh
+            | ActionId::StageMarked
+            | ActionId::UnstageMarked
+            | ActionId::Stash
+            | ActionId::Commit
+            | ActionId::AmendLastCommit
+            | ActionId::UndoLastCommit
+            | ActionId::FindLostStashes
+    )
+}
+
 /// Why a merge commit is not undone here: a soft reset to its first parent would stage
 /// everything the merge brought in as one change.
 pub(crate) const MERGE_HEAD_REASON: &str = "HEAD is a merge commit: undo it from the terminal";
@@ -305,6 +329,9 @@ pub(crate) struct ActionContext {
     pub inspecting_other: bool,
     /// The palette is open: Ctrl+Enter belongs to it.
     pub palette_open: bool,
+    /// A prompt, dialog, menu or sheet is open (`GitApp::modal_open`; the palette is not one).
+    /// Git actions wait until it closes.
+    pub modal_open: bool,
     /// The Amend box is ticked: committing replaces HEAD, so nothing need be staged.
     pub amending: bool,
     /// The HEAD commit has more than one parent (false while it is not loaded).
@@ -330,6 +357,7 @@ impl Default for ActionContext {
             has_changes: false,
             inspecting_other: false,
             palette_open: false,
+            modal_open: false,
             amending: false,
             head_is_merge: false,
             operation: None,
@@ -356,23 +384,10 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
     if !cx.has_session {
         return Err("No repository open");
     }
-    let touches_git = matches!(
-        id,
-        ActionId::Fetch
-            | ActionId::Pull
-            | ActionId::Push
-            | ActionId::Publish
-            | ActionId::ForcePush
-            | ActionId::Refresh
-            | ActionId::StageMarked
-            | ActionId::UnstageMarked
-            | ActionId::Stash
-            | ActionId::Commit
-            | ActionId::AmendLastCommit
-            | ActionId::UndoLastCommit
-            | ActionId::FindLostStashes
-    );
-    if touches_git {
+    if touches_git(id) {
+        if cx.modal_open {
+            return Err(MODAL_OPEN_REASON);
+        }
         if cx.busy {
             return Err(BUSY_REASON);
         }
@@ -411,6 +426,26 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_actions_wait_for_an_open_dialog_and_ui_actions_do_not() {
+        let ready = ActionContext {
+            has_session: true,
+            head_born: true,
+            has_staged: true,
+            has_summary: true,
+            ..ActionContext::default()
+        };
+        assert_eq!(availability(ActionId::Commit, &ready), Ok(()));
+        let behind_a_dialog = ActionContext { modal_open: true, ..ready };
+        for spec in ACTIONS {
+            if touches_git(spec.id) {
+                assert_eq!(availability(spec.id, &behind_a_dialog), Err(MODAL_OPEN_REASON), "{:?}", spec.id);
+            } else {
+                assert_eq!(availability(spec.id, &behind_a_dialog), availability(spec.id, &ready), "{:?}", spec.id);
+            }
+        }
+    }
 
     #[test]
     fn finding_lost_stashes_needs_a_repository_and_waits_for_git() {

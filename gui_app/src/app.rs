@@ -2057,6 +2057,9 @@ impl GitApp {
             Message::RunAction(crate::actions::ActionId::Commit) if self.palette.is_some() => {
                 Task::none()
             }
+            // A dialog is what the user is acting on: a git chord behind it does nothing, and
+            // says nothing either.
+            Message::RunAction(id) if self.modal_open() && crate::actions::touches_git(id) => Task::none(),
             Message::RunAction(id) => match crate::actions::availability(id, &self.action_context()) {
                 Ok(()) => {
                     let message = self.message_for(id);
@@ -6806,6 +6809,7 @@ impl GitApp {
             has_marked: !session.marked_files.is_empty(),
             inspecting_other: self.inspected_path().is_some(),
             palette_open: self.palette.is_some(),
+            modal_open: self.modal_open(),
             amending: session.amending.is_some(),
             head_is_merge: session.head_is_merge(),
             operation: status.and_then(|status| status.operation),
@@ -8402,6 +8406,28 @@ mod tests {
         let _ = app.update(Message::RunAction(ActionId::Commit));
         assert!(!app.sessions[0].state.loading, "no commit started");
         assert_eq!(app.error.as_deref(), Some("Write a commit summary first"));
+    }
+
+    #[test]
+    fn ctrl_enter_behind_an_open_dialog_does_nothing() {
+        use crate::actions::ActionId;
+        let force_push = HistoryPrompt::ForcePush { upstream: "origin/main".into(), ahead: 1, behind: 2 };
+        let mut app = app_ready_to_commit();
+        app.error = None;
+        app.history_prompt = Some(force_push.clone());
+        let _ = app.update(Message::RunAction(ActionId::Commit));
+        assert!(!app.sessions[0].state.loading, "no commit started behind the dialog");
+        assert_eq!(app.history_prompt, Some(force_push), "the dialog is still open");
+        assert_eq!(app.error, None, "the user is in a dialog: no banner");
+
+        let discard = vec![MarkedFile { path: "x.rs".into(), place: FileDisposition::Unstaged }];
+        let mut app = app_ready_to_commit();
+        app.error = None;
+        app.confirm_discard = Some(discard.clone());
+        let _ = app.update(Message::RunAction(ActionId::Commit));
+        assert!(!app.sessions[0].state.loading, "no commit started behind the discard confirm");
+        assert_eq!(app.confirm_discard, Some(discard));
+        assert_eq!(app.error, None);
     }
 
     #[test]
