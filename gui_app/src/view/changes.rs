@@ -147,6 +147,20 @@ fn filter_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> El
 const BODY_LINES: f32 = 4.0;
 const BODY_PADDING: f32 = 6.0;
 
+/// The body editor's keys: iced's defaults, except Enter with Ctrl or Cmd held. That chord
+/// commits (a global shortcut), and iced 0.13 would also break the line at the caret, so a
+/// commit made from mid-body would carry a stray line break.
+fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    use iced::keyboard::{key::Named, Key};
+    let commit_chord = matches!(press.key.as_ref(), Key::Named(Named::Enter))
+        && (press.modifiers.control() || press.modifiers.command());
+    if commit_chord {
+        None
+    } else {
+        text_editor::Binding::from_key_press(press)
+    }
+}
+
 /// Summary, body, and a row with Suggest and Commit. Enter in the summary moves on to the
 /// body; Ctrl+Enter commits from either field.
 fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
@@ -164,6 +178,7 @@ fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, 
     let body = text_editor(&session.commit_body)
         .placeholder("Description (optional)")
         .on_action(Message::CommitBodyEdited)
+        .key_binding(body_key_binding)
         .font(reading.font)
         .size(reading.size)
         .padding(BODY_PADDING)
@@ -491,6 +506,25 @@ fn row_style(tokens: DesignTokens, status: Status, selected: bool) -> iced::widg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> text_editor::KeyPress {
+        text_editor::KeyPress { key, modifiers, text: None, status: text_editor::Status::Focused }
+    }
+
+    #[test]
+    fn ctrl_enter_in_the_body_commits_without_breaking_the_line() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+        let enter = || Key::Named(Named::Enter);
+        assert!(body_key_binding(press(enter(), Modifiers::CTRL)).is_none(), "Ctrl+Enter is the commit chord");
+        assert!(body_key_binding(press(enter(), Modifiers::COMMAND)).is_none(), "Cmd+Enter on macOS");
+        assert!(matches!(body_key_binding(press(enter(), Modifiers::empty())), Some(text_editor::Binding::Enter)));
+        assert!(matches!(body_key_binding(press(enter(), Modifiers::SHIFT)), Some(text_editor::Binding::Enter)));
+        assert!(matches!(
+            body_key_binding(press(Key::Named(Named::Backspace), Modifiers::CTRL)),
+            Some(text_editor::Binding::Backspace)
+        ));
+    }
 
     #[test]
     fn counts_read_as_files() {
