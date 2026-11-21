@@ -1888,6 +1888,10 @@ impl GitApp {
                 self.apply_hunk_mode(next);
                 Task::none()
             }
+            // Ctrl+Enter in the palette activates its row; Commit must not fire behind it.
+            Message::RunAction(crate::actions::ActionId::Commit) if self.palette.is_some() => {
+                Task::none()
+            }
             Message::RunAction(id) => match crate::actions::availability(id, &self.action_context()) {
                 Ok(()) => {
                     let message = self.message_for(id);
@@ -1968,7 +1972,7 @@ impl GitApp {
                 };
                 // An unavailable command stays put: its row already says why.
                 if let crate::palette::PaletteTarget::Command(id) = &item.target {
-                    if crate::actions::availability(*id, &self.action_context()).is_err() {
+                    if crate::actions::availability(*id, &self.palette_action_context()).is_err() {
                         return Task::none();
                     }
                 }
@@ -5946,9 +5950,20 @@ impl GitApp {
             has_upstream: status.is_some_and(|status| status.tracking.is_some()),
             has_staged: status.is_some_and(|status| !status.staged_files.is_empty()),
             has_marked: !session.marked_files.is_empty(),
+            inspecting_other: self.inspected_path().is_some(),
+            palette_open: self.palette.is_some(),
             has_changes: status.is_some_and(|status| {
                 !status.staged_files.is_empty() || !status.unstaged_files.is_empty()
             }),
+        }
+    }
+
+    /// The context a palette row is judged by. The palette is open by definition, and
+    /// activating a row closes it before the action runs, so it does not count against it.
+    pub(crate) fn palette_action_context(&self) -> crate::actions::ActionContext {
+        crate::actions::ActionContext {
+            palette_open: false,
+            ..self.action_context()
         }
     }
 
@@ -5991,7 +6006,7 @@ impl GitApp {
             .query
             .trim_start()
             .starts_with(crate::palette::COMMAND_SCOPE)
-            .then(|| self.action_context());
+            .then(|| self.palette_action_context());
         let items = crate::palette::palette_items(&crate::palette::PaletteSource {
             branches: &session.state.branches,
             tags: &session.state.tags,
@@ -9276,6 +9291,43 @@ mod tests {
         assert!(app.shortcuts_open);
         let _ = app.update(Message::Escape);
         assert!(!app.shortcuts_open);
+    }
+
+    fn app_ready_to_commit() -> GitApp {
+        let mut app = catalogued_app();
+        let mut status = staged_nothing_status();
+        status.staged_files = vec!["a.txt".to_string()];
+        app.sessions[0].state.current_status = Some(status);
+        app.sessions[0].state.loading = false;
+        app.sessions[0].commit_message = "record the change".to_string();
+        app
+    }
+
+    #[test]
+    fn ctrl_enter_does_not_commit_while_the_inspector_shows_another_worktree() {
+        use crate::actions::ActionId;
+        let mut app = app_ready_to_commit();
+        let _ = app.update(Message::WorktreeClicked(THIRD.to_string()));
+        assert!(app.inspected_path().is_some());
+        let _ = app.update(Message::RunAction(ActionId::Commit));
+        assert!(!app.sessions[0].state.loading, "no commit started");
+        assert_eq!(app.sessions[0].commit_message, "record the change");
+        assert_eq!(
+            app.error.as_deref(),
+            Some("Showing another worktree: open its tab to commit")
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_in_the_palette_does_not_commit_and_shows_no_error() {
+        use crate::actions::ActionId;
+        let mut app = app_ready_to_commit();
+        app.error = None;
+        let _ = app.update(Message::TogglePalette(String::new()));
+        let _ = app.update(Message::RunAction(ActionId::Commit));
+        assert!(!app.sessions[0].state.loading, "no commit started");
+        assert_eq!(app.sessions[0].commit_message, "record the change");
+        assert!(app.error.is_none(), "silent: Ctrl+Enter is how a palette row is activated");
     }
 
     #[test]

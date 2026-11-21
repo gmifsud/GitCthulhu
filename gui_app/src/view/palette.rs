@@ -32,7 +32,7 @@ pub(super) fn palette_overlay<'a>(
         .query
         .trim_start()
         .starts_with(COMMAND_SCOPE)
-        .then(|| app.action_context());
+        .then(|| app.palette_action_context());
 
     let field = text_input(PLACEHOLDER, &palette.query)
         .id(PALETTE_INPUT_ID)

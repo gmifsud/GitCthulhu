@@ -266,6 +266,10 @@ pub(crate) struct ActionContext {
     pub has_marked: bool,
     /// Staged or unstaged tracked changes.
     pub has_changes: bool,
+    /// The Inspector shows another worktree, so the commit box is not the one on screen.
+    pub inspecting_other: bool,
+    /// The palette is open: Ctrl+Enter belongs to it.
+    pub palette_open: bool,
 }
 
 /// `Ok` when `id` can run, else the reason in words. The reasons for Fetch, Pull and Push
@@ -300,6 +304,10 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
         }
         ActionId::Stash if !cx.head_born => Err("Nothing to stash before the first commit"),
         ActionId::Stash if !cx.has_changes => Err("No tracked changes to stash"),
+        ActionId::Commit if cx.palette_open => Err("Close the palette first"),
+        ActionId::Commit if cx.inspecting_other => {
+            Err("Showing another worktree: open its tab to commit")
+        }
         ActionId::Commit if !cx.has_staged => Err("Nothing is staged"),
         _ => Ok(()),
     }
