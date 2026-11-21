@@ -97,6 +97,22 @@ pub(crate) struct PaletteState {
     pub selected: usize,
 }
 
+/// The list the arrow keys walk: the one the user last picked a row in. A fresh window starts
+/// on the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyList {
+    Graph,
+    Changes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListKeyName {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 pub(crate) struct GitApp {
     /// Top-bar search: narrows the history table. Window-wide, not per tab.
     pub(crate) history_query: String,
@@ -231,6 +247,8 @@ pub(crate) struct GitApp {
     /// rows in view are built.
     pub(crate) history_scroll: f32,
     pub(crate) history_viewport: f32,
+    /// Which list the arrow keys walk. Picking a commit sets `Graph`, picking a file `Changes`.
+    pub(crate) key_list: KeyList,
     /// Repositories left for another one this run, each with its tabs exactly as they were.
     /// Opening one again takes it back instead of starting from scratch.
     parked: Vec<ParkedWorkspace>,
@@ -700,6 +718,8 @@ pub(crate) enum Message {
     PaletteQueryChanged(String),
     /// Arrow keys: move the highlighted palette row by this many rows.
     PaletteMove(i32),
+    /// An arrow key nothing else claimed: walk the graph or the changes list.
+    ListKey { key: ListKeyName, shift: bool },
     /// Enter in the palette field: activate the highlighted row.
     PaletteSubmit,
     /// Click on a palette row: its position among the ranked results.
@@ -1117,6 +1137,7 @@ impl GitApp {
             bottom_tab: BottomTab::Terminal,
             history_scroll: 0.0,
             history_viewport: 0.0,
+            key_list: KeyList::Graph,
             parked: Vec::new(),
             scroll_restore: false,
             activity_failures_only: false,
@@ -2021,12 +2042,14 @@ impl GitApp {
                     palette.selected = step_selection(palette.selected, step, count);
                     return Task::none();
                 }
-                // No palette: Up / Down recall commands when the terminal's line has focus.
+                // No palette: Up / Down recall commands when the terminal's line has focus,
+                // and otherwise walk the list (`ShellHistory { focused: false }`).
                 if self.terminal_open {
                     return when_shell_focused(move |focused| Message::ShellHistory { step, focused });
                 }
-                Task::none()
+                self.update(Message::ListKey { key: vertical_key(step), shift: self.modifiers.shift() })
             }
+            Message::ListKey { key, shift } => self.walk_list(key, shift),
             Message::CtrlCPressed => {
                 if self.shell_busy {
                     when_shell_focused(|focused| Message::ShellCtrlC { focused })
@@ -2586,6 +2609,11 @@ impl GitApp {
                 self.confirm_discard = None;
                 self.confirm_drop = None;
                 self.branch_prompt = None;
+                match &selection {
+                    Selection::Commit { .. } => self.key_list = KeyList::Graph,
+                    Selection::File { .. } => self.key_list = KeyList::Changes,
+                    _ => {}
+                }
                 if let Some(session) = self.active_session_mut() {
                     session.selection = Some(selection);
                     session.focused_diff_path = None;
@@ -2710,6 +2738,9 @@ impl GitApp {
                 } else {
                     Task::none()
                 }
+            }
+            Message::ShellHistory { step, focused: false } => {
+                self.update(Message::ListKey { key: vertical_key(step), shift: self.modifiers.shift() })
             }
             Message::ShellHistory { step, focused } => {
                 if focused && !self.shell_busy {
@@ -4767,6 +4798,111 @@ impl GitApp {
         Task::batch(tasks)
     }
 
+    /// Arrow keys on the list last picked from. Up and Down step a row; in the changes tree,
+    /// Left folds the selected file's folder and Right unfolds it with the folders above it.
+    fn walk_list(&mut self, key: ListKeyName, shift: bool) -> Task<Message> {
+        if self.palette.is_some() {
+            return Task::none();
+        }
+        let step = match key {
+            ListKeyName::Up => -1,
+            ListKeyName::Down => 1,
+            ListKeyName::Left | ListKeyName::Right => 0,
+        };
+        match self.key_list {
+            KeyList::Graph if step != 0 => self.walk_graph(step),
+            KeyList::Changes => self.walk_changes(key, step, shift),
+            KeyList::Graph => Task::none(),
+        }
+    }
+
+    fn walk_graph(&mut self, step: i32) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        let current = match &session.selection {
+            Some(Selection::Commit { id }) => Some(id.as_str()),
+            _ => None,
+        };
+        let target = session
+            .history_index
+            .borrow()
+            .as_ref()
+            .and_then(|index| crate::history_index::step_commit(index, current, step));
+        let Some(id) = target else {
+            return Task::none();
+        };
+        let layout = session.history_layout.borrow();
+        let top = layout.top_of(&id);
+        let content = layout.rows.last().map_or(0.0, |(_, last)| last + crate::commit_graph::ROW_HEIGHT);
+        drop(layout);
+        let selected = self.update(Message::Select(Selection::Commit { id }));
+        let Some(y) = top.and_then(|top| reveal_offset(top, self.history_scroll, self.history_viewport)) else {
+            return selected;
+        };
+        // The same bookkeeping as a wheel scroll, then move the list itself. The index and its
+        // generation are untouched: this is a scroll, not a change.
+        let scrolled = self.handle(Message::HistoryScrolled { offset: y, height: self.history_viewport, content });
+        Task::batch([
+            selected,
+            scrolled,
+            iced::widget::scrollable::scroll_to(
+                iced::widget::scrollable::Id::new(HISTORY_SCROLL_ID),
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+            ),
+        ])
+    }
+
+    fn walk_changes(&mut self, key: ListKeyName, step: i32, shift: bool) -> Task<Message> {
+        let as_tree = self.files_as_tree;
+        let Some(session) = self.active_session_mut() else {
+            return Task::none();
+        };
+        let selected = match &session.selection {
+            Some(Selection::File { path, place }) => Some(MarkedFile { path: path.clone(), place: *place }),
+            _ => None,
+        };
+        if step == 0 {
+            // Folders exist only in the tree.
+            let Some(file) = selected.filter(|_| as_tree) else {
+                return Task::none();
+            };
+            let Some(parent) = crate::changes::parent_prefix(&file.path) else {
+                return Task::none();
+            };
+            if key == ListKeyName::Left {
+                session.collapsed_dirs.insert((file.place, parent));
+            } else {
+                let mut folder = Some(parent);
+                while let Some(prefix) = folder {
+                    folder = crate::changes::parent_prefix(&prefix);
+                    session.collapsed_dirs.remove(&(file.place, prefix));
+                }
+            }
+            return Task::none();
+        }
+        let Some(status) = session.state.current_status.as_ref() else {
+            return Task::none();
+        };
+        let order = crate::changes::visible_files(
+            status,
+            as_tree,
+            &session.collapsed_sections,
+            &session.collapsed_dirs,
+            &session.change_filter,
+        );
+        let Some(target) = crate::changes::step_file(&order, selected.as_ref(), step) else {
+            return Task::none();
+        };
+        // Shift extends from the last plain pick; the first move has only the selection.
+        if shift && session.selection_anchor.is_none() {
+            session.selection_anchor = selected;
+        }
+        let modifiers = if shift { iced::keyboard::Modifiers::SHIFT } else { iced::keyboard::Modifiers::empty() };
+        session.marked_files = select_files(session, target.clone(), modifiers, as_tree);
+        self.update(Message::Select(Selection::File { path: target.path, place: target.place }))
+    }
+
     /// Scroll the history to the active tab's anchor commit and the diff to its offset.
     fn restore_scroll(&mut self) -> Task<Message> {
         let Some(session) = self.active_session() else {
@@ -6030,7 +6166,8 @@ impl GitApp {
 }
 
 /// Global shortcuts. Text inputs still receive keys; iced delivers both.
-/// Escape and the vertical arrows are special; every other chord comes from the catalogue.
+/// Escape and the arrows are special (the catalogue holds no arrow chords); every other chord
+/// comes from the catalogue.
 fn shortcut_message(
     key: iced::keyboard::Key,
     modifiers: iced::keyboard::Modifiers,
@@ -6042,6 +6179,10 @@ fn shortcut_message(
         Key::Named(Named::Escape) => Some(Message::Escape),
         Key::Named(Named::ArrowDown) => Some(Message::PaletteMove(1)),
         Key::Named(Named::ArrowUp) => Some(Message::PaletteMove(-1)),
+        Key::Named(Named::ArrowLeft | Named::ArrowRight) if !modifiers.command() && !modifiers.alt() => {
+            let key = if matches!(key, Key::Named(Named::ArrowLeft)) { ListKeyName::Left } else { ListKeyName::Right };
+            Some(Message::ListKey { key, shift: modifiers.shift() })
+        }
         _ => typing_shortcut(&key, modifiers).or_else(|| {
             crate::actions::action_for(&key, modifiers).map(Message::RunAction)
         }),
@@ -6056,12 +6197,54 @@ fn focus_shell() -> Task<Message> {
     iced::widget::text_input::focus(iced::widget::text_input::Id::new(SHELL_INPUT_ID))
 }
 
-/// Ask which widget has focus, then `to_message(true)` when it is the command line.
-/// Nothing focused sends nothing.
+/// Ask which widget has focus, then `to_message(true)` when it is the command line and
+/// `to_message(false)` otherwise, nothing focused included.
 fn when_shell_focused(to_message: impl Fn(bool) -> Message + Send + 'static) -> Task<Message> {
-    let shell = iced::advanced::widget::Id::from(iced::widget::text_input::Id::new(SHELL_INPUT_ID));
-    iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::find_focused())
-        .map(move |focused| to_message(focused == shell))
+    use iced::advanced::widget::operation::{Focusable, Outcome};
+    use iced::advanced::widget::{Id, Operation};
+
+    /// `find_focused`, but answering `None` when nothing is focused instead of staying silent.
+    struct FindFocus(Option<Id>);
+    impl Operation<Option<Id>> for FindFocus {
+        fn focusable(&mut self, state: &mut dyn Focusable, id: Option<&Id>) {
+            if state.is_focused() && id.is_some() {
+                self.0 = id.cloned();
+            }
+        }
+        fn container(
+            &mut self,
+            _id: Option<&Id>,
+            _bounds: iced::Rectangle,
+            operate_on_children: &mut dyn FnMut(&mut dyn Operation<Option<Id>>),
+        ) {
+            operate_on_children(self);
+        }
+        fn finish(&self) -> Outcome<Option<Id>> {
+            Outcome::Some(self.0.clone())
+        }
+    }
+
+    let shell = Id::from(iced::widget::text_input::Id::new(SHELL_INPUT_ID));
+    iced::advanced::widget::operate(FindFocus(None))
+        .map(move |focused| to_message(focused.as_ref() == Some(&shell)))
+}
+
+fn vertical_key(step: i32) -> ListKeyName {
+    if step < 0 { ListKeyName::Up } else { ListKeyName::Down }
+}
+
+/// Where to scroll the history so the row at `top` (px in the scrolled content) is drawn: its
+/// own top when it is above the view, or far enough that it ends the view when it is below.
+/// `None` when it already shows. With no pane height known only the upward case scrolls.
+fn reveal_offset(top: f32, scroll: f32, viewport: f32) -> Option<f32> {
+    let row = crate::commit_graph::ROW_HEIGHT;
+    if top < scroll {
+        Some(top)
+    } else if viewport > 0.0 && top + row > scroll + viewport {
+        Some(top + row - viewport)
+    } else {
+        None
+    }
 }
 
 /// True when `folder` is `root` or below it. Separators and (on Windows) case are ignored.
@@ -10930,5 +11113,129 @@ mod tests {
         ));
         assert!(app.session().state.loading);
         assert_eq!(app.session().pending_checkout.as_deref(), Some("feature/x"));
+    }
+
+    fn selected_path(app: &GitApp) -> Option<String> {
+        match &app.session().selection {
+            Some(Selection::File { path, .. }) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn marked_paths_of(app: &GitApp) -> Vec<String> {
+        app.session().marked_files.iter().map(|mark| mark.path.clone()).collect()
+    }
+
+    fn key(key: ListKeyName, shift: bool) -> Message {
+        Message::ListKey { key, shift }
+    }
+
+    #[test]
+    fn down_selects_the_next_drawn_commit_without_rebuilding_the_index() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        *app.session().history_index.borrow_mut() = Some(crate::history_index::index_of(&["a", "b", "c"]));
+        let _ = app.update(Message::Select(Selection::Commit { id: "a".into() }));
+        assert_eq!(app.key_list, KeyList::Graph);
+        let generation = app.session().history_generation;
+        let _ = app.update(key(ListKeyName::Down, false));
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "b".into() }));
+        let _ = app.update(key(ListKeyName::Down, false));
+        let _ = app.update(key(ListKeyName::Down, false));
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "c".into() }), "stops at the end");
+        let _ = app.update(key(ListKeyName::Up, false));
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "b".into() }));
+        assert_eq!(app.session().history_generation, generation, "a held arrow never rebuilds the index");
+    }
+
+    #[test]
+    fn the_history_scrolls_only_when_the_row_leaves_the_view() {
+        let row = crate::commit_graph::ROW_HEIGHT;
+        assert_eq!(reveal_offset(5.0 * row, 0.0, 10.0 * row), None, "inside the view");
+        assert_eq!(reveal_offset(0.0, row, 10.0 * row), Some(0.0), "above the top: the row becomes the top");
+        assert_eq!(reveal_offset(10.0 * row, 0.0, 10.0 * row), Some(row), "below: the row becomes the last drawn");
+        assert_eq!(reveal_offset(500.0 * row, 0.0, 0.0), None, "no height known: only upward scrolls");
+        assert_eq!(reveal_offset(0.0, 500.0 * row, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn arrows_walk_visible_changes_and_shift_extends_from_the_anchor() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(filter_status());
+        let _ = app.update(Message::FocusFile { path: "a.rs".into(), place: FileDisposition::Unstaged });
+        assert_eq!(app.key_list, KeyList::Changes);
+        let _ = app.update(key(ListKeyName::Down, false));
+        assert_eq!(selected_path(&app).as_deref(), Some("b.md"));
+        assert_eq!(marked_paths_of(&app), ["b.md"]);
+        let _ = app.update(key(ListKeyName::Down, true));
+        assert_eq!(selected_path(&app).as_deref(), Some("c.rs"));
+        assert_eq!(marked_paths_of(&app), ["b.md", "c.rs"], "extends from the anchor");
+        let _ = app.update(key(ListKeyName::Down, false));
+        assert_eq!(selected_path(&app).as_deref(), Some("c.rs"), "stops at the end");
+        let _ = app.update(key(ListKeyName::Up, true));
+        assert_eq!(marked_paths_of(&app), ["c.rs", "b.md"].iter().rev().cloned().collect::<Vec<_>>().as_slice());
+    }
+
+    #[test]
+    fn arrows_never_reach_a_file_the_filter_hides() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(filter_status());
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        let _ = app.update(Message::FocusFile { path: "a.rs".into(), place: FileDisposition::Unstaged });
+        let _ = app.update(key(ListKeyName::Down, true));
+        assert_eq!(selected_path(&app).as_deref(), Some("c.rs"));
+        assert_eq!(marked_paths_of(&app), ["a.rs", "c.rs"], "b.md is hidden, so never marked");
+    }
+
+    #[test]
+    fn left_folds_the_selected_files_folder_and_right_unfolds_its_chain() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            unstaged_files: vec!["src/ui/a.rs".to_string(), "src/ui/b.rs".to_string(), "top.rs".to_string()],
+            ..filter_status_empty()
+        });
+        let _ = app.update(Message::SetFileTree(true));
+        let place = FileDisposition::Unstaged;
+        let _ = app.update(Message::FocusFile { path: "src/ui/a.rs".into(), place });
+        let _ = app.update(key(ListKeyName::Left, false));
+        assert!(app.session().collapsed_dirs.contains(&(place, "src/ui".to_string())));
+        app.session_mut().collapsed_dirs.insert((place, "src".to_string()));
+        let _ = app.update(key(ListKeyName::Right, false));
+        assert!(app.session().collapsed_dirs.is_empty(), "every prefix of the folder is unfolded");
+
+        // A file at the top has no folder, and List mode has no folders at all.
+        let _ = app.update(Message::FocusFile { path: "top.rs".into(), place });
+        let _ = app.update(key(ListKeyName::Left, false));
+        assert!(app.session().collapsed_dirs.is_empty());
+        let _ = app.update(Message::SetFileTree(false));
+        let _ = app.update(Message::FocusFile { path: "src/ui/a.rs".into(), place });
+        let _ = app.update(key(ListKeyName::Left, false));
+        assert!(app.session().collapsed_dirs.is_empty());
+    }
+
+    #[test]
+    fn arrows_still_drive_an_open_palette() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.commits = vec![commit("aaaaaaa1"), commit("bbbbbbb2")];
+        *app.session().history_index.borrow_mut() = Some(crate::history_index::index_of(&["aaaaaaa1", "bbbbbbb2"]));
+        let _ = app.update(Message::Select(Selection::Commit { id: "aaaaaaa1".into() }));
+        let _ = app.update(Message::TogglePalette(String::new()));
+        let _ = app.update(Message::PaletteMove(1));
+        assert_eq!(app.palette.as_ref().map(|palette| palette.selected), Some(1));
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "aaaaaaa1".into() }));
+        let _ = app.update(key(ListKeyName::Down, false));
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "aaaaaaa1".into() }), "the palette owns the arrows");
+    }
+
+    #[test]
+    fn up_and_down_reach_the_list_unless_the_shell_line_has_focus() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        *app.session().history_index.borrow_mut() = Some(crate::history_index::index_of(&["a", "b"]));
+        let _ = app.update(Message::Select(Selection::Commit { id: "a".into() }));
+        let _ = app.update(Message::ShellHistory { step: 1, focused: true });
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "a".into() }), "recall owns the key");
+        let _ = app.update(Message::ShellHistory { step: 1, focused: false });
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "b".into() }));
+        let _ = app.update(Message::PaletteMove(-1));
+        assert_eq!(app.session().selection, Some(Selection::Commit { id: "a".into() }), "no palette, no terminal");
     }
 }

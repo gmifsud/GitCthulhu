@@ -248,6 +248,26 @@ pub(crate) fn selection_range(order: &[MarkedFile], anchor: &MarkedFile, target:
     }
 }
 
+/// The file `step` places from `current` in `order`, held at the first and last (the arrow keys
+/// never wrap). With no current file, or one the list does not draw (filtered out, or inside a
+/// folded folder), the first. `None` only for an empty list.
+pub(crate) fn step_file(order: &[MarkedFile], current: Option<&MarkedFile>, step: i32) -> Option<MarkedFile> {
+    let last = order.len().checked_sub(1)?;
+    let at = current.and_then(|file| order.iter().position(|shown| shown == file));
+    let target = match at {
+        Some(at) => (at as i64 + i64::from(step)).clamp(0, last as i64) as usize,
+        None => 0,
+    };
+    order.get(target).cloned()
+}
+
+/// The folder a file path sits in, as the folder rows key it (`src/ui` for `src/ui/a.rs`).
+/// `None` for a file at the top.
+pub(crate) fn parent_prefix(path: &str) -> Option<String> {
+    let unified = path.replace('\\', "/");
+    unified.rfind('/').filter(|&at| at > 0).map(|at| unified[..at].to_string())
+}
+
 /// Paths in `marks` that a Stage or Unstage command should touch.
 pub(crate) fn marked_paths(marks: &[MarkedFile], stage: bool) -> Vec<String> {
     marks
@@ -623,5 +643,24 @@ mod tests {
         assert_eq!(kept.as_ref(), ["app/src/a.rs".to_string()]);
         let rows = change_rows(&kept, FileDisposition::Unstaged, true, &HashSet::new());
         assert!(matches!(&rows[0], ChangeRow::Directory { name, files: 1, .. } if name == "app/src"));
+    }
+
+    #[test]
+    fn parent_prefix_names_the_folder_a_path_sits_in() {
+        assert_eq!(parent_prefix("src/ui/a.rs").as_deref(), Some("src/ui"));
+        assert_eq!(parent_prefix("src/ui").as_deref(), Some("src"));
+        assert_eq!(parent_prefix("a.rs"), None);
+        assert_eq!(parent_prefix(r"src\a.rs").as_deref(), Some("src"));
+    }
+
+    #[test]
+    fn step_file_holds_at_both_ends() {
+        let file = |path: &str| MarkedFile { path: path.into(), place: FileDisposition::Unstaged };
+        let order = [file("a"), file("b")];
+        assert_eq!(step_file(&order, Some(&file("a")), 1), Some(file("b")));
+        assert_eq!(step_file(&order, Some(&file("b")), 1), Some(file("b")));
+        assert_eq!(step_file(&order, Some(&file("a")), -1), Some(file("a")));
+        assert_eq!(step_file(&order, Some(&file("hidden")), 1), Some(file("a")));
+        assert_eq!(step_file(&[], None, 1), None);
     }
 }

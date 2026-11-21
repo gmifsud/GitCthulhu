@@ -127,11 +127,54 @@ impl Columns {
     }
 }
 
+/// The commit `step` rows from `current` in draw order, held at the first and last row (the
+/// arrow keys never wrap). With no current commit, or one the list does not draw, the first
+/// row. `None` only for an empty list.
+pub(crate) fn step_commit(index: &HistoryIndex, current: Option<&str>, step: i32) -> Option<String> {
+    let last = index.rows.len().checked_sub(1)?;
+    let at = current.and_then(|id| index.rows.iter().position(|row| row.commit_id == id));
+    let target = match at {
+        Some(at) => (at as i64 + i64::from(step)).clamp(0, last as i64) as usize,
+        None => 0,
+    };
+    Some(index.rows[target].commit_id.clone())
+}
+
+#[cfg(test)]
+pub(crate) fn index_of(ids: &[&str]) -> HistoryIndex {
+    let rows: Vec<IndexRow> = ids
+        .iter()
+        .enumerate()
+        .map(|(at, id)| IndexRow { commit_id: (*id).to_string(), ..tests::row(at as f32 * 24.0, 24.0) })
+        .collect();
+    HistoryIndex {
+        key: IndexKey {
+            generation: 0,
+            width_px: 0,
+            size_tenths: 0,
+            query: String::new(),
+            author: None,
+            branch_filter: None,
+            focus: false,
+            worktrees: 0,
+            head_counts: None,
+        },
+        total: rows.len() as f32 * 24.0,
+        shown: rows.len(),
+        rows,
+        filter: None,
+        filter_unloaded: false,
+        narrowing: false,
+        columns: Columns { refs_width: REFS_WIDTH, author: true, when: true, hash: true },
+        graph_width: 24.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn row(top: f32, height: f32) -> IndexRow {
+    pub(super) fn row(top: f32, height: f32) -> IndexRow {
         IndexRow {
             commit_id: String::new(),
             subject: String::new(),
@@ -184,5 +227,18 @@ mod tests {
         assert_eq!(Columns::for_width(fixed(REFS_WIDTH, &[WHEN_WIDTH])), all(REFS_WIDTH, false, true, false));
         assert_eq!(Columns::for_width(fixed(MIN_REFS_WIDTH, &[WHEN_WIDTH])), all(MIN_REFS_WIDTH, false, true, false));
         assert_eq!(Columns::for_width(200.0), all(MIN_REFS_WIDTH, false, false, false));
+    }
+
+    #[test]
+    fn down_moves_to_the_next_drawn_commit_and_stops_at_the_end() {
+        let index = index_of(&["a", "b", "c"]);
+        assert_eq!(step_commit(&index, Some("a"), 1).as_deref(), Some("b"));
+        assert_eq!(step_commit(&index, Some("b"), 1).as_deref(), Some("c"));
+        assert_eq!(step_commit(&index, Some("c"), 1).as_deref(), Some("c"), "never wraps");
+        assert_eq!(step_commit(&index, Some("a"), -1).as_deref(), Some("a"), "never wraps");
+        assert_eq!(step_commit(&index, Some("c"), -1).as_deref(), Some("b"));
+        assert_eq!(step_commit(&index, None, 1).as_deref(), Some("a"), "nothing selected starts at the top");
+        assert_eq!(step_commit(&index, Some("gone"), -1).as_deref(), Some("a"), "an undrawn commit starts at the top");
+        assert_eq!(step_commit(&index_of(&[]), Some("a"), 1), None);
     }
 }
