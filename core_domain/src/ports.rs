@@ -133,11 +133,14 @@ pub trait GitRepository {
         let _ = remote;
         Err(DomainError::Unknown("this repository cannot publish a branch".to_string()))
     }
-    /// Replace the current branch's upstream with the local branch, guarded by
-    /// `--force-with-lease` (and `--force-if-includes` where git and the reflog allow): git
-    /// refuses, changing nothing, when the remote moved since the last fetch. Returns the
-    /// guard used.
-    fn force_push(&self) -> Result<ForceGuard, DomainError> {
+    /// Replace the current branch's upstream with the local branch:
+    /// `git push --force-with-lease [--force-if-includes] -- <remote> HEAD:<merge>`, naming the
+    /// remote and branch from `branch.<name>.remote` and `.merge`, so no push configuration
+    /// widens it. Refuses, changing nothing, when that upstream is not `expected_upstream`
+    /// (the short name the user confirmed, such as `origin/main`), and git refuses when the
+    /// remote moved since the last fetch. Returns the guard used.
+    fn force_push(&self, expected_upstream: &str) -> Result<ForceGuard, DomainError> {
+        let _ = expected_upstream;
         Err(DomainError::Unknown("this repository cannot force push".to_string()))
     }
     /// `git pull --no-rebase --ff-only`. A diverged branch fails and does not start a merge or rebase.

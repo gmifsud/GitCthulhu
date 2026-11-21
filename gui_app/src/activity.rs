@@ -262,21 +262,33 @@ pub(crate) fn edit_action(edit: &crate::jobs::WorktreeEdit) -> Action {
     }
 }
 
-/// A force push of the current branch over `upstream`. The command names the lease, which is
-/// always used; [`record_force_guard`] completes it once the adapter says which guard ran.
-pub(crate) fn force_push_action(upstream: &str) -> Action {
-    Action::new("Force push", upstream, "git push --force-with-lease")
+/// A force push of the current branch over `upstream`, named as the adapter runs it:
+/// `git push --force-with-lease -- <remote> HEAD:refs/heads/<branch>`. The remote is the
+/// longest loaded remote that `upstream` starts with (before the remotes load, its first
+/// segment). [`record_force_guard`] adds `--force-if-includes` once the adapter says it ran.
+pub(crate) fn force_push_action(upstream: &str, remotes: &[String]) -> Action {
+    let remote = remotes
+        .iter()
+        .map(String::as_str)
+        .filter(|remote| upstream.strip_prefix(remote).is_some_and(|rest| rest.starts_with('/')))
+        .max_by_key(|remote| remote.len())
+        .unwrap_or_else(|| upstream.split('/').next().unwrap_or(upstream));
+    let branch = upstream.get(remote.len() + 1..).unwrap_or_default();
+    let merge = if branch.starts_with("refs/") { branch.to_string() } else { format!("refs/heads/{branch}") };
+    Action::new("Force push", upstream, format!("git push --force-with-lease -- {remote} HEAD:{merge}"))
 }
 
 /// Name the exact command and guard a finished force push used.
 pub(crate) fn record_force_guard(record: &mut ActivityRecord, guard: core_domain::ForceGuard) {
     use core_domain::ForceGuard;
-    let (words, command) = match guard {
-        ForceGuard::LeaseAndIncludes => ("lease and includes check", "git push --force-with-lease --force-if-includes"),
-        ForceGuard::LeaseOnly => ("lease only", "git push --force-with-lease"),
+    let words = match guard {
+        ForceGuard::LeaseAndIncludes => {
+            record.command = record.command.replacen("--force-with-lease", "--force-with-lease --force-if-includes", 1);
+            "lease and includes check"
+        }
+        ForceGuard::LeaseOnly => "lease only",
     };
     record.detail = format!("{} ({words})", record.detail);
-    record.command = command.to_string();
 }
 
 pub(crate) fn undo_commit_action(id: &str) -> Action {

@@ -31,6 +31,8 @@ pub(crate) const MERGE_COMMIT_CANNOT_BE_UNDONE: &str =
     "HEAD is a merge commit: undo it from the terminal";
 /// Why a detached HEAD is not published or force pushed: there is no branch to send.
 pub(crate) const DETACHED_HEAD_CANNOT_BE_PUSHED: &str = "HEAD is not on a branch: check out a branch to push it.";
+/// Why a force push stops when the branch no longer tracks the upstream the user confirmed.
+pub(crate) const UPSTREAM_CHANGED: &str = "The branch's upstream changed while this was open, so nothing was pushed.";
 /// Why undo waits while the index has unmerged entries.
 pub(crate) const RESOLVE_CONFLICTS_FIRST: &str = "Resolve the conflicts first.";
 
@@ -860,23 +862,39 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["push", "--set-upstream", "--", remote, "HEAD"])
     }
 
-    /// `git push --force-with-lease`, plus `--force-if-includes` with git 2.30 or later when
-    /// the branch has a reflog. The lease refuses when the upstream is no longer where the
-    /// last fetch left it; the includes check also refuses when that tip was fetched but never
-    /// on the local branch (a background fetch would otherwise defeat the lease).
-    fn force_push(&self) -> Result<ForceGuard, DomainError> {
+    /// `git push --force-with-lease [--force-if-includes] -- <remote> HEAD:<merge>`, with the
+    /// remote and branch read from the branch's own upstream config. Naming both keeps
+    /// `push.default`, `remote.*.push` and `pushRemote` from widening or moving the push.
+    /// `--force-if-includes` joins with git 2.30 or later when the branch has a reflog. The
+    /// lease refuses when the upstream is no longer where the last fetch left it; the includes
+    /// check also refuses when that tip was fetched but never on the local branch (a
+    /// background fetch would otherwise defeat the lease).
+    fn force_push(&self, expected_upstream: &str) -> Result<ForceGuard, DomainError> {
         self.open_repo()?;
         let version = run_git_stdout(&self.repo_path, &["version"]).ok().and_then(|text| parse_git_version(&text));
         let branch = self.current_branch()?;
+        let config = |key: String| {
+            run_git_stdout(&self.repo_path, &["config", "--get", &key]).ok().filter(|value| !value.is_empty())
+        };
+        let changed = || DomainError::Unknown(UPSTREAM_CHANGED.to_string());
+        let remote = config(format!("branch.{branch}.remote")).ok_or_else(changed)?;
+        let merge = config(format!("branch.{branch}.merge")).ok_or_else(changed)?;
+        let upstream = format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge));
+        if upstream != expected_upstream {
+            return Err(changed());
+        }
+        require_remote_name(&remote)?;
         let has_reflog = command::git_output(&self.repo_path, &["reflog", "exists", &format!("refs/heads/{branch}")])?
             .status
             .success();
         let guard = force_guard(version, has_reflog);
-        let args: &[&str] = match guard {
-            ForceGuard::LeaseAndIncludes => &["push", "--force-with-lease", "--force-if-includes"],
-            ForceGuard::LeaseOnly => &["push", "--force-with-lease"],
-        };
-        run_git(&self.repo_path, args)?;
+        let refspec = format!("HEAD:{merge}");
+        let mut args = vec!["push", "--force-with-lease"];
+        if guard == ForceGuard::LeaseAndIncludes {
+            args.push("--force-if-includes");
+        }
+        args.extend(["--", remote.as_str(), refspec.as_str()]);
+        run_git(&self.repo_path, &args)?;
         Ok(guard)
     }
 

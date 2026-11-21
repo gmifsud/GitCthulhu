@@ -51,6 +51,8 @@ pub struct FakeGitRepository {
     pub remotes_result: Result<Vec<String>, DomainError>,
     pub publish_result: Result<(), DomainError>,
     pub force_push_result: Result<ForceGuard, DomainError>,
+    /// Every `expected_upstream` `force_push` was called with, oldest first.
+    pub force_push_upstreams: std::sync::Mutex<Vec<String>>,
     pub commit_patch_result: Result<Vec<Patch>, DomainError>,
     pub file_patch_result: Result<Patch, DomainError>,
     pub compare_result: Result<Patch, DomainError>,
@@ -112,6 +114,7 @@ impl FakeGitRepository {
             remotes_result: Ok(vec![]),
             publish_result: Ok(()),
             force_push_result: Ok(ForceGuard::LeaseAndIncludes),
+            force_push_upstreams: Default::default(),
             commit_patch_result: Ok(vec![]),
             file_patch_result: Ok(Patch {
                 path: String::new(),
@@ -265,7 +268,11 @@ impl GitRepository for FakeGitRepository {
         self.publish_result.clone()
     }
 
-    fn force_push(&self) -> Result<ForceGuard, DomainError> {
+    fn force_push(&self, expected_upstream: &str) -> Result<ForceGuard, DomainError> {
+        self.force_push_upstreams
+            .lock()
+            .expect("unpoisoned")
+            .push(expected_upstream.to_string());
         self.force_push_result.clone()
     }
 

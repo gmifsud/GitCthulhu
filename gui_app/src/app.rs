@@ -5790,8 +5790,11 @@ impl GitApp {
         let path = key.path.clone();
         self.session_mut().state.loading = true;
         self.error = None;
-        self.begin_activity(&path, crate::activity::force_push_action(&upstream));
-        Task::perform(force_push_in_background(repo), move |result| {
+        let action = crate::activity::force_push_action(&upstream, &self.session().state.remotes);
+        self.begin_activity(&path, action);
+        // The upstream the dialog named, not whatever the tab shows now: the adapter refuses
+        // when the branch no longer tracks it.
+        Task::perform(force_push_in_background(repo, upstream), move |result| {
             Message::ForcePushFinished(key.clone(), result)
         })
     }
@@ -10435,6 +10438,7 @@ mod tests {
         let running = app.activity.running().expect("running");
         assert_eq!(running.record.title, "Force push");
         assert_eq!(running.record.detail, "origin/main");
+        assert_eq!(running.record.command, "git push --force-with-lease -- origin HEAD:refs/heads/main");
 
         // No key force-pushes past the dialog.
         let spec = ACTIONS.iter().find(|spec| spec.id == ActionId::ForcePush).expect("listed");
@@ -10464,7 +10468,7 @@ mod tests {
         let record = &entries[0].record;
         assert_eq!(record.outcome, core_domain::ActivityOutcome::Succeeded);
         assert!(record.detail.contains("lease only"), "{}", record.detail);
-        assert_eq!(record.command, "git push --force-with-lease");
+        assert_eq!(record.command, "git push --force-with-lease -- origin HEAD:refs/heads/main");
 
         let _ = app.update(Message::AskForcePush);
         let _ = app.update(Message::ConfirmForcePush);
@@ -10473,8 +10477,41 @@ mod tests {
             Ok(core_domain::ForceGuard::LeaseAndIncludes),
         ));
         let entries = app.activity.for_repository(&repository);
-        assert_eq!(entries[0].record.command, "git push --force-with-lease --force-if-includes");
+        assert_eq!(
+            entries[0].record.command,
+            "git push --force-with-lease --force-if-includes -- origin HEAD:refs/heads/main"
+        );
         assert!(!entries[0].record.detail.contains("lease only"));
+    }
+
+    #[test]
+    fn force_push_runs_against_the_upstream_the_dialog_named() {
+        let mut app = app_diverged(1, 2);
+        let _ = app.update(Message::AskForcePush);
+        // A refresh while the dialog is open shows another upstream.
+        let mut moved = staged_nothing_status();
+        moved.tracking = Some(core_domain::TrackingStatus { upstream: "fork/topic".into(), ahead: 1, behind: 2 });
+        app.session_mut().state.apply_event(ViewEvent::StatusUpdated(moved));
+        app.session_mut().state.apply_event(ViewEvent::RemotesUpdated(vec!["fork".into(), "origin".into()]));
+        let _ = app.update(Message::ConfirmForcePush);
+        let running = app.activity.running().expect("running");
+        assert_eq!(running.record.detail, "origin/main");
+        assert_eq!(running.record.command, "git push --force-with-lease -- origin HEAD:refs/heads/main");
+    }
+
+    #[test]
+    fn the_force_push_command_reads_the_remote_from_the_loaded_remotes() {
+        use crate::activity::force_push_action;
+        let remotes = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            force_push_action("team/a/feature/x", &remotes(&["team", "team/a"])).command,
+            "git push --force-with-lease -- team/a HEAD:refs/heads/feature/x"
+        );
+        assert_eq!(
+            force_push_action("origin/feature/x", &[]).command,
+            "git push --force-with-lease -- origin HEAD:refs/heads/feature/x",
+            "before the remotes load, the first segment is the remote"
+        );
     }
 
     /// git 2.56's refusal when the remote moved since the last fetch, from

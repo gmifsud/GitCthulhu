@@ -2476,7 +2476,7 @@ fn publish_and_force_push_refuse_a_detached_head() {
     let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
 
     assert_eq!(adapter.publish("origin"), Err(DomainError::Unknown(DETACHED_HEAD_CANNOT_BE_PUSHED.to_string())));
-    assert_eq!(adapter.force_push(), Err(DomainError::Unknown(DETACHED_HEAD_CANNOT_BE_PUSHED.to_string())));
+    assert_eq!(adapter.force_push("origin/main"), Err(DomainError::Unknown(DETACHED_HEAD_CANNOT_BE_PUSHED.to_string())));
 }
 
 #[test]
@@ -2490,7 +2490,7 @@ fn force_push_replaces_a_diverged_remote_branch() {
     let tracking = adapter.status().expect("status").tracking.expect("upstream");
     assert_eq!((tracking.ahead, tracking.behind), (1, 1), "diverged");
 
-    let guard = adapter.force_push().expect("force push");
+    let guard = adapter.force_push(&format!("origin/{branch}")).expect("force push");
 
     assert_eq!(tip_of(origin.workdir(), &format!("refs/heads/{branch}")), head_at(dest.path()).to_string());
     // The clone has a reflog, so the guard depends only on the installed git.
@@ -2514,13 +2514,61 @@ fn force_push_refuses_when_the_remote_moved_since_the_last_fetch() {
     let b = origin.commit("B", &[("a.txt", "three\n")], 120);
     amend_head(dest.path(), "A, amended");
 
-    let error = adapter.force_push().expect_err("the lease refuses");
+    let error = adapter.force_push(&format!("origin/{branch}")).expect_err("the lease refuses");
 
     match error {
         DomainError::Unknown(message) => assert!(message.contains("stale info"), "{message}"),
         other => panic!("expected git's message, got {other:?}"),
     }
     assert_eq!(tip_of(origin.workdir(), &format!("refs/heads/{branch}")), b.to_string(), "B is still there");
+}
+
+#[test]
+fn force_push_sends_only_the_current_branch_whatever_push_default_says() {
+    let (origin, dest) = origin_and_clone();
+    let branch = origin.head_branch();
+    let first = origin.head_commit();
+    git_in(origin.workdir(), &["branch", "other"]);
+    git_in(dest.path(), &["fetch"]);
+    git_in(dest.path(), &["branch", "other", "origin/other"]);
+    commit_file(dest.path(), "a.txt", "two\n", "A");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+    adapter.push().expect("push A");
+    amend_head(dest.path(), "A, amended");
+    // origin's `other` moves on; the clone fetches it, so its own `other` is behind but the
+    // lease on `other` would pass.
+    let moved = origin.commit_to("refs/heads/other", "other moves on", &[("o.txt", "o\n")], first, 60);
+    git_in(dest.path(), &["fetch"]);
+    git_in(dest.path(), &["config", "push.default", "matching"]);
+
+    adapter.force_push(&format!("origin/{branch}")).expect("force push");
+
+    assert_eq!(tip_of(origin.workdir(), "refs/heads/other"), moved.to_string(), "other is untouched");
+    assert_eq!(tip_of(origin.workdir(), &format!("refs/heads/{branch}")), head_at(dest.path()).to_string());
+}
+
+#[test]
+fn force_push_refuses_when_the_upstream_is_not_the_one_the_dialog_named() {
+    let (origin, dest) = origin_and_clone();
+    let branch = origin.head_branch();
+    commit_file(dest.path(), "a.txt", "two\n", "A");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+    adapter.push().expect("push A");
+    let pushed = tip_of(origin.workdir(), &format!("refs/heads/{branch}"));
+    amend_head(dest.path(), "A, amended");
+
+    let refused = adapter.force_push("origin/elsewhere");
+
+    assert_eq!(refused, Err(DomainError::Unknown(UPSTREAM_CHANGED.to_string())));
+    assert_eq!(
+        UPSTREAM_CHANGED,
+        "The branch's upstream changed while this was open, so nothing was pushed."
+    );
+    assert_eq!(tip_of(origin.workdir(), &format!("refs/heads/{branch}")), pushed, "the remote is unchanged");
+
+    // A branch with no upstream at all is refused the same way.
+    git_in(dest.path(), &["checkout", "-b", "topic"]);
+    assert_eq!(adapter.force_push("origin/topic"), Err(DomainError::Unknown(UPSTREAM_CHANGED.to_string())));
 }
 
 #[test]

@@ -579,11 +579,13 @@ pub(crate) fn publish_in_background(
     )
 }
 
+/// Force push over `expected_upstream`, the upstream the user confirmed.
 pub(crate) fn force_push_in_background(
     repo: SharedRepository,
+    expected_upstream: String,
 ) -> impl Future<Output = Result<core_domain::ForceGuard, DomainError>> {
     in_background(
-        move || repo.force_push(),
+        move || repo.force_push(&expected_upstream),
         || Err(DomainError::Unknown("force push was interrupted".to_string())),
     )
 }
@@ -1457,10 +1459,15 @@ mod tests {
             Err(DomainError::Unknown("no such remote".to_string()))
         );
         assert_eq!(
-            iced::futures::executor::block_on(force_push_in_background(Arc::new(lease_only))),
+            iced::futures::executor::block_on(force_push_in_background(Arc::new(lease_only), "origin/main".to_string())),
             Ok(core_domain::ForceGuard::LeaseOnly)
         );
-        assert!(iced::futures::executor::block_on(force_push_in_background(refusing)).is_err());
+        assert!(iced::futures::executor::block_on(force_push_in_background(refusing.clone(), "origin/main".to_string())).is_err());
+        assert_eq!(
+            refusing.force_push_upstreams.lock().expect("unpoisoned").as_slice(),
+            ["origin/main".to_string()],
+            "the upstream the dialog named reaches the port"
+        );
     }
 
     #[test]
