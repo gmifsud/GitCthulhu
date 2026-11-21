@@ -155,19 +155,19 @@ fn branch_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> El
         .into()
 }
 
-/// Fetch, Pull ↓n, Push ↑n and Stash (n files), fed by the same tracking state as the
-/// branch line. A disabled button explains itself on hover.
+/// Fetch, Pull ↓n, Push ↑n (or Publish to …, or Force push ↑n) and Stash (n files), fed by
+/// the same tracking state as the branch line. A disabled button explains itself on hover.
 fn sync_group<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let session = app.session();
     let status = session.state.current_status.as_ref();
     let running = running_in(app).or(session.state.loading.then_some("Refresh"));
-    let [fetch, pull, push] = crate::tracking::sync_buttons(status, running);
+    let [fetch, pull, push] = crate::tracking::sync_buttons(status, &session.state.remotes, running);
     let stash = crate::tracking::stash_button(status, running);
     row![
-        sync_button(crate::icons::Icon::Fetch, fetch, Message::Fetch, tokens, reading),
-        sync_button(crate::icons::Icon::Pull, pull, Message::Pull, tokens, reading),
-        sync_button(crate::icons::Icon::Push, push, Message::Push, tokens, reading),
-        sync_button(crate::icons::Icon::Stash, stash, Message::StashPush, tokens, reading),
+        sync_button(crate::icons::Icon::Fetch, fetch, tokens, reading),
+        sync_button(crate::icons::Icon::Pull, pull, tokens, reading),
+        sync_button(crate::icons::Icon::Push, push, tokens, reading),
+        sync_button(crate::icons::Icon::Stash, stash, tokens, reading),
     ]
     .spacing(COMMAND_SPACING)
     .align_y(Alignment::Center)
@@ -185,13 +185,26 @@ fn running_in(app: &GitApp) -> Option<&str> {
     }
 }
 
+/// What a sync button sends. Force push only ever opens its confirm.
+fn sync_message(action: crate::tracking::SyncAction) -> Message {
+    use crate::tracking::SyncAction;
+    match action {
+        SyncAction::Fetch => Message::Fetch,
+        SyncAction::Pull => Message::Pull,
+        SyncAction::Push => Message::Push,
+        SyncAction::Publish(remote) => Message::Publish(remote),
+        SyncAction::ForcePush => Message::AskForcePush,
+        SyncAction::Stash => Message::StashPush,
+    }
+}
+
 fn sync_button<'a>(
     icon: crate::icons::Icon,
     button: crate::tracking::SyncButton,
-    message: Message,
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
+    let message = sync_message(button.action);
     let drawn = super::chrome::labelled_button(icon, button.label, message, button.enabled, false, tokens, reading);
     match button.reason {
         Some(reason) if !button.enabled => iced::widget::tooltip(

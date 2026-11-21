@@ -583,11 +583,9 @@ impl WorktreeSession {
     }
 
     /// `head` is on a remote already, so rewriting it means the next push must force.
+    /// Without a remote nothing is pushed; with one, `unpushed` lists what no remote has.
     pub(crate) fn head_is_on_a_remote(&self, head: &str) -> bool {
-        // "The repository has a remote" is read from the remote-tracking branches until the
-        // remotes themselves are loaded (ruling R9).
-        let has_a_remote = self.state.branches.iter().any(|branch| branch.is_remote);
-        has_a_remote && !self.state.unpushed.contains(head)
+        !self.state.remotes.is_empty() && !self.state.unpushed.contains(head)
     }
 
     /// Empty the summary and the body.
@@ -642,6 +640,28 @@ mod tests {
     use crate::changes::{ChangeChip, ChangeFilter, MarkedFile};
     use crate::selection::Selection;
     use core_domain::{FileDisposition, WorktreeTabRetention};
+
+    #[test]
+    fn a_head_is_on_a_remote_only_when_the_repository_has_one() {
+        use core_domain::ViewEvent;
+        let mut session = WorktreeSession::test_stub();
+        // A remote-tracking branch left behind by a removed remote is not a remote.
+        session.state.apply_event(ViewEvent::BranchesUpdated(vec![core_domain::Branch {
+            name: "gone/main".into(),
+            is_remote: true,
+            is_head: false,
+            tip: "abc".into(),
+            ahead: 0,
+            behind: 0,
+        }]));
+        assert!(!session.head_is_on_a_remote("abc"));
+        // A remote that was never fetched still makes a pushed HEAD's rewrite need a force push.
+        session.state.apply_event(ViewEvent::BranchesUpdated(vec![]));
+        session.state.apply_event(ViewEvent::RemotesUpdated(vec!["origin".into()]));
+        assert!(session.head_is_on_a_remote("abc"));
+        session.state.apply_event(ViewEvent::UnpushedUpdated(vec!["abc".into()]));
+        assert!(!session.head_is_on_a_remote("abc"));
+    }
 
     #[test]
     fn explorer_collapsed_defaults_open_except_optional() {

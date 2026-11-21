@@ -93,6 +93,16 @@ pub struct TrackingStatus {
     pub behind: usize,
 }
 
+/// What kept a force push from overwriting work it had not seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceGuard {
+    /// `--force-with-lease --force-if-includes`: the remote must still be where the last fetch
+    /// left it, and that tip must have been on the local branch at some point.
+    LeaseAndIncludes,
+    /// `--force-with-lease` alone: git is older than 2.30, or the branch has no reflog.
+    LeaseOnly,
+}
+
 /// Where a changed path sits, which decides the diff and the discard command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileDisposition {

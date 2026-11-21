@@ -114,6 +114,14 @@ impl ActivityLog {
         Some((entry.repository.clone(), entry.record.clone()))
     }
 
+    /// Change the running entry in `lane`, for an action that says what it ran only when it
+    /// ends. Nothing happens when the lane has no running entry.
+    pub(crate) fn restate_running(&mut self, lane: &Lane, change: impl FnOnce(&mut ActivityRecord)) {
+        if let Some(entry) = self.entries.iter_mut().rev().find(|entry| entry.running.as_ref().is_some_and(|(l, _)| l == lane)) {
+            change(&mut entry.record);
+        }
+    }
+
     /// Put a repository's saved log in front of anything recorded for it this run.
     /// Reading the same repository twice changes nothing.
     pub(crate) fn restore(&mut self, repository: &str, records: Vec<ActivityRecord>) {
@@ -252,6 +260,23 @@ pub(crate) fn edit_action(edit: &crate::jobs::WorktreeEdit) -> Action {
             "git commit --amend",
         ),
     }
+}
+
+/// A force push of the current branch over `upstream`. The command names the lease, which is
+/// always used; [`record_force_guard`] completes it once the adapter says which guard ran.
+pub(crate) fn force_push_action(upstream: &str) -> Action {
+    Action::new("Force push", upstream, "git push --force-with-lease")
+}
+
+/// Name the exact command and guard a finished force push used.
+pub(crate) fn record_force_guard(record: &mut ActivityRecord, guard: core_domain::ForceGuard) {
+    use core_domain::ForceGuard;
+    let (words, command) = match guard {
+        ForceGuard::LeaseAndIncludes => ("lease and includes check", "git push --force-with-lease --force-if-includes"),
+        ForceGuard::LeaseOnly => ("lease only", "git push --force-with-lease"),
+    };
+    record.detail = format!("{} ({words})", record.detail);
+    record.command = command.to_string();
 }
 
 pub(crate) fn undo_commit_action(id: &str) -> Action {

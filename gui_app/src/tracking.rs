@@ -33,58 +33,127 @@ pub(crate) const BUSY_REASON: &str = "Another git action is running";
 pub(crate) const LOADING_REASON: &str = "Waiting for the repository to load";
 pub(crate) const NO_UPSTREAM_REASON: &str =
     "No upstream: this branch does not track a remote branch";
+pub(crate) const NO_COMMITS_REASON: &str = "No commits yet";
+pub(crate) const NO_REMOTE_REASON: &str = "No remote: add one with git remote add";
+pub(crate) const SEVERAL_REMOTES_REASON: &str =
+    "Several remotes and none is origin: publish from the terminal";
+/// Plain push on a diverged branch: git would refuse it.
+pub(crate) const DIVERGED_REASON: &str =
+    "The branch and its upstream have diverged: use Force push";
+pub(crate) const HAS_UPSTREAM_REASON: &str = "This branch already has an upstream";
+pub(crate) const NOT_DIVERGED_REASON: &str =
+    "Nothing to overwrite: the branch has not diverged from its upstream";
 
-/// One button of the header's sync group: its label, whether it can be pressed, and why not.
+/// What pressing a sync button does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncAction {
+    Fetch,
+    Pull,
+    Push,
+    /// Push the current branch to this remote and track it.
+    Publish(String),
+    /// Ask first, then force push with a lease.
+    ForcePush,
+    Stash,
+}
+
+/// One button of the header's sync group: its label, whether it can be pressed, why not,
+/// and what it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SyncButton {
     pub(crate) label: String,
     pub(crate) enabled: bool,
     /// Shown as a tooltip when the button is disabled.
     pub(crate) reason: Option<&'static str>,
+    pub(crate) action: SyncAction,
+}
+
+/// Which of the three pushes the branch is ready for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushKind {
+    Push,
+    Publish,
+    ForcePush,
+}
+
+/// The remote a branch without an upstream is published to: `origin`, otherwise the only one.
+pub(crate) fn publish_remote(remotes: &[String]) -> Option<&str> {
+    match remotes {
+        [only] => Some(only.as_str()),
+        _ => remotes.iter().map(String::as_str).find(|name| *name == "origin"),
+    }
+}
+
+/// The one decision behind the Push button and the palette's Push, Publish and Force push:
+/// which push fits the branch, or why none does. Busy and loading are the caller's.
+pub(crate) fn push_kind(status: Option<&RepoStatus>, remotes: &[String]) -> Result<PushKind, &'static str> {
+    let status = status.ok_or(LOADING_REASON)?;
+    match &status.tracking {
+        Some(tracking) if tracking.ahead > 0 && tracking.behind > 0 => Ok(PushKind::ForcePush),
+        Some(_) => Ok(PushKind::Push),
+        None if status.head_commit_id.is_none() => Err(NO_COMMITS_REASON),
+        None if remotes.is_empty() => Err(NO_REMOTE_REASON),
+        None if publish_remote(remotes).is_some() => Ok(PushKind::Publish),
+        None => Err(SEVERAL_REMOTES_REASON),
+    }
 }
 
 /// Fetch, Pull and Push labels from the one tracking state the branch line also reads.
 ///
 /// Counts are arrows plus numbers, never colour alone. A missing status reads as loading
-/// ("…"), never as 0; a branch without an upstream says so instead of showing 0.
-/// `running` is the title of the git action in progress, which every button waits for.
-pub(crate) fn sync_buttons(status: Option<&RepoStatus>, running: Option<&str>) -> [SyncButton; 3] {
+/// ("…"), never as 0; a branch without an upstream says so instead of showing 0. Push turns
+/// into "Publish to <remote>" without an upstream and "Force push ↑n" once the branch has
+/// diverged. `running` is the title of the git action in progress, which every button waits for.
+pub(crate) fn sync_buttons(status: Option<&RepoStatus>, remotes: &[String], running: Option<&str>) -> [SyncButton; 3] {
     let busy = running.is_some();
     let progress = |title: &str, doing: &str, idle: String| match running {
         Some(now) if now == title => format!("{doing}…"),
         _ => idle,
     };
-    let (pull, push, upstream_reason) = match status {
-        None => ("Pull ↓…".to_string(), "Push ↑…".to_string(), Some(LOADING_REASON)),
-        Some(RepoStatus { tracking: None, .. }) => (
-            "Pull".to_string(),
-            "Push".to_string(),
-            Some(NO_UPSTREAM_REASON),
-        ),
+    let (pull, upstream_reason) = match status {
+        None => ("Pull ↓…".to_string(), Some(LOADING_REASON)),
+        Some(RepoStatus { tracking: None, .. }) => ("Pull".to_string(), Some(NO_UPSTREAM_REASON)),
         // A count only when there is something to move: "Pull ↓0" read as noise. The branch
         // line says "Up to date with …" when both are zero.
         Some(RepoStatus { tracking: Some(tracking), .. }) => (
             if tracking.behind > 0 { format!("Pull ↓{}", tracking.behind) } else { "Pull".to_string() },
-            if tracking.ahead > 0 { format!("Push ↑{}", tracking.ahead) } else { "Push".to_string() },
             None,
         ),
+    };
+    let ahead = status.and_then(|status| status.tracking.as_ref()).map_or(0, |tracking| tracking.ahead);
+    let plan = push_kind(status, remotes);
+    let (push_label, push_action) = match (plan, publish_remote(remotes)) {
+        (Ok(PushKind::Publish), Some(remote)) => (format!("Publish to {remote}"), SyncAction::Publish(remote.to_string())),
+        (Ok(PushKind::ForcePush), _) => (format!("Force push ↑{ahead}"), SyncAction::ForcePush),
+        _ if status.is_none() => ("Push ↑…".to_string(), SyncAction::Push),
+        _ if ahead > 0 => (format!("Push ↑{ahead}"), SyncAction::Push),
+        _ => ("Push".to_string(), SyncAction::Push),
+    };
+    let push_label = match running {
+        Some("Push") => "Pushing…".to_string(),
+        Some("Publish") => "Publishing…".to_string(),
+        Some("Force push") => "Force pushing…".to_string(),
+        _ => push_label,
     };
     let busy_reason = busy.then_some(BUSY_REASON);
     [
         SyncButton {
             label: progress("Fetch", "Fetching", "Fetch".to_string()),
             enabled: !busy && status.is_some(),
-            reason: busy_reason.or(status.is_none().then_some("Waiting for the repository to load")),
+            reason: busy_reason.or(status.is_none().then_some(LOADING_REASON)),
+            action: SyncAction::Fetch,
         },
         SyncButton {
             label: progress("Pull", "Pulling", pull),
             enabled: !busy && upstream_reason.is_none(),
             reason: busy_reason.or(upstream_reason),
+            action: SyncAction::Pull,
         },
         SyncButton {
-            label: progress("Push", "Pushing", push),
-            enabled: !busy && upstream_reason.is_none(),
-            reason: busy_reason.or(upstream_reason),
+            label: push_label,
+            enabled: !busy && plan.is_ok(),
+            reason: busy_reason.or(plan.err()),
+            action: push_action,
         },
     ]
 }
@@ -112,6 +181,7 @@ pub(crate) fn stash_button(status: Option<&RepoStatus>, running: Option<&str>) -
         } else {
             None
         },
+        action: SyncAction::Stash,
     }
 }
 
@@ -163,36 +233,113 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sync_labels_show_counts_with_arrows_and_tell_loading_from_zero() {
-        let [_, pull, push] = sync_buttons(Some(&status(Some(tracked(2, 5)))), None);
-        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull ↓5", "Push ↑2"));
-        assert!(pull.enabled && push.enabled);
+    fn origin() -> Vec<String> {
+        vec!["origin".to_string()]
+    }
 
-        let [_, pull, push] = sync_buttons(Some(&status(Some(tracked(0, 0)))), None);
-        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull", "Push"));
+    fn born(tracking: Option<TrackingStatus>) -> RepoStatus {
+        RepoStatus {
+            head_commit_id: Some("abc".to_string()),
+            ..status(tracking)
+        }
+    }
 
-        let [fetch, pull, _] = sync_buttons(None, None);
-        assert_eq!(pull.label, "Pull ↓…");
-        assert!(!fetch.enabled && !pull.enabled);
+    fn names(remotes: &[&str]) -> Vec<String> {
+        remotes.iter().map(|name| name.to_string()).collect()
     }
 
     #[test]
-    fn no_upstream_disables_pull_and_push_and_says_why() {
-        let [fetch, pull, push] = sync_buttons(Some(&status(None)), None);
+    fn sync_labels_show_counts_with_arrows_and_tell_loading_from_zero() {
+        let [_, pull, push] = sync_buttons(Some(&born(Some(tracked(2, 0)))), &origin(), None);
+        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull", "Push ↑2"));
+        assert!(pull.enabled && push.enabled);
+        let [_, pull, _] = sync_buttons(Some(&born(Some(tracked(0, 5)))), &origin(), None);
+        assert_eq!(pull.label, "Pull ↓5");
+
+        let [_, pull, push] = sync_buttons(Some(&born(Some(tracked(0, 0)))), &origin(), None);
+        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull", "Push"));
+
+        let [fetch, pull, push] = sync_buttons(None, &origin(), None);
+        assert_eq!((pull.label.as_str(), push.label.as_str()), ("Pull ↓…", "Push ↑…"));
+        assert!(!fetch.enabled && !pull.enabled && !push.enabled);
+    }
+
+    #[test]
+    fn no_upstream_disables_pull_and_says_why() {
+        let [fetch, pull, _] = sync_buttons(Some(&born(None)), &origin(), None);
         assert!(fetch.enabled);
         assert_eq!(pull.label, "Pull");
-        assert!(!pull.enabled && !push.enabled);
+        assert!(!pull.enabled);
         assert!(pull.reason.expect("reason").starts_with("No upstream"));
     }
 
     #[test]
+    fn push_reads_publish_without_an_upstream_and_force_push_when_diverged() {
+        struct Case {
+            tracking: Option<TrackingStatus>,
+            remotes: &'static [&'static str],
+            label: &'static str,
+            action: SyncAction,
+            reason: Option<&'static str>,
+        }
+        let cases = [
+            Case { tracking: None, remotes: &["origin"], label: "Publish to origin", action: SyncAction::Publish("origin".into()), reason: None },
+            Case { tracking: None, remotes: &["fork", "origin"], label: "Publish to origin", action: SyncAction::Publish("origin".into()), reason: None },
+            Case { tracking: None, remotes: &["fork"], label: "Publish to fork", action: SyncAction::Publish("fork".into()), reason: None },
+            Case {
+                tracking: None,
+                remotes: &["fork", "upstream"],
+                label: "Push",
+                action: SyncAction::Push,
+                reason: Some("Several remotes and none is origin: publish from the terminal"),
+            },
+            Case { tracking: None, remotes: &[], label: "Push", action: SyncAction::Push, reason: Some("No remote: add one with git remote add") },
+            Case { tracking: Some(tracked(1, 2)), remotes: &["origin"], label: "Force push ↑1", action: SyncAction::ForcePush, reason: None },
+            Case { tracking: Some(tracked(3, 0)), remotes: &["origin"], label: "Push ↑3", action: SyncAction::Push, reason: None },
+            Case { tracking: Some(tracked(0, 4)), remotes: &["origin"], label: "Push", action: SyncAction::Push, reason: None },
+        ];
+        for case in cases {
+            let [_, _, push] = sync_buttons(Some(&born(case.tracking.clone())), &names(case.remotes), None);
+            assert_eq!(push.label, case.label, "{:?} {:?}", case.tracking, case.remotes);
+            assert_eq!(push.action, case.action, "{}", case.label);
+            assert_eq!(push.enabled, case.reason.is_none(), "{}", case.label);
+            assert_eq!(push.reason, case.reason, "{}", case.label);
+        }
+    }
+
+    #[test]
+    fn publish_is_unavailable_before_the_first_commit() {
+        let unborn = status(None);
+        let [_, _, push] = sync_buttons(Some(&unborn), &origin(), None);
+        assert!(!push.enabled);
+        assert_eq!(push.reason, Some("No commits yet"));
+        assert_eq!(push_kind(Some(&unborn), &origin()), Err("No commits yet"));
+    }
+
+    #[test]
+    fn publish_and_force_push_say_what_is_running() {
+        let [_, _, push] = sync_buttons(Some(&born(None)), &origin(), Some("Publish"));
+        assert_eq!(push.label, "Publishing…");
+        let [_, _, push] = sync_buttons(Some(&born(Some(tracked(1, 1)))), &origin(), Some("Force push"));
+        assert_eq!(push.label, "Force pushing…");
+        assert!(!push.enabled);
+        assert_eq!(push.reason, Some(BUSY_REASON));
+    }
+
+    #[test]
     fn a_running_action_names_itself_and_blocks_the_others() {
-        let [fetch, pull, push] = sync_buttons(Some(&status(Some(tracked(1, 1)))), Some("Pull"));
+        let [fetch, pull, push] = sync_buttons(Some(&born(Some(tracked(1, 1)))), &origin(), Some("Pull"));
         assert_eq!(pull.label, "Pulling…");
         assert_eq!(fetch.label, "Fetch");
         assert!(!fetch.enabled && !pull.enabled && !push.enabled);
         assert_eq!(push.reason, Some("Another git action is running"));
+    }
+
+    #[test]
+    fn each_button_carries_its_action() {
+        let [fetch, pull, push] = sync_buttons(Some(&born(Some(tracked(0, 0)))), &origin(), None);
+        assert_eq!((fetch.action, pull.action, push.action), (SyncAction::Fetch, SyncAction::Pull, SyncAction::Push));
+        assert_eq!(stash_button(Some(&born(None)), None).action, SyncAction::Stash);
     }
 
     #[test]

@@ -2402,3 +2402,145 @@ fn line_counts_of_a_repository_with_no_changes_are_empty() {
 
     assert_eq!(fixture.adapter().line_counts(&[]).expect("line counts"), core_domain::LineCounts::default());
 }
+
+// ── Remotes, publish and force push ───────────────────────────────────────
+
+/// The commit `reference` points at in the repository at `dir`.
+fn tip_of(dir: &std::path::Path, reference: &str) -> String {
+    run_git_stdout(dir.to_str().expect("utf-8 path"), &["rev-parse", reference]).expect("rev-parse")
+}
+
+/// A clone of a fresh `origin` with one commit, which may push onto origin's checked-out branch.
+fn origin_and_clone() -> (TestRepo, tempfile::TempDir) {
+    let origin = TestRepo::new();
+    origin.commit("first", &[("a.txt", "one\n")], 0);
+    // A non-bare checkout refuses a push onto the branch it has checked out.
+    git_in(origin.workdir(), &["config", "receive.denyCurrentBranch", "ignore"]);
+    let dest = cloned_from(&origin);
+    (origin, dest)
+}
+
+fn amend_head(dir: &std::path::Path, message: &str) {
+    git_in(dir, &["-c", "commit.gpgsign=false", "commit", "--amend", "-m", message]);
+}
+
+#[test]
+fn remotes_lists_each_remote_by_name() {
+    let fixture = TestRepo::new();
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    assert_eq!(fixture.adapter().remotes().expect("no remotes"), Vec::<String>::new());
+
+    let elsewhere = tempfile::tempdir().expect("bare remote");
+    git_in(elsewhere.path(), &["init", "--bare"]);
+    let url = elsewhere.path().to_str().expect("utf-8 remote");
+    git_in(fixture.workdir(), &["remote", "add", "origin", url]);
+    git_in(fixture.workdir(), &["remote", "add", "upstream", url]);
+
+    assert_eq!(fixture.adapter().remotes().expect("remotes"), vec!["origin".to_string(), "upstream".to_string()]);
+}
+
+#[test]
+fn publish_pushes_head_and_sets_the_upstream() {
+    let (origin, dest) = origin_and_clone();
+    git_in(dest.path(), &["checkout", "-b", "topic"]);
+    commit_file(dest.path(), "b.txt", "two\n", "on topic");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+    assert_eq!(adapter.status().expect("status").tracking, None);
+
+    adapter.publish("origin").expect("publish");
+
+    let tracking = adapter.status().expect("status").tracking.expect("upstream");
+    assert_eq!(tracking.upstream, "origin/topic");
+    assert_eq!((tracking.ahead, tracking.behind), (0, 0));
+    assert_eq!(tip_of(origin.workdir(), "refs/heads/topic"), head_at(dest.path()).to_string());
+}
+
+#[test]
+fn publish_refuses_an_option_like_remote() {
+    let (_origin, dest) = origin_and_clone();
+    git_in(dest.path(), &["checkout", "-b", "topic"]);
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+
+    for remote in ["", "--mirror", "-u"] {
+        assert!(adapter.publish(remote).is_err(), "{remote:?}");
+    }
+    assert_eq!(adapter.status().expect("status").tracking, None, "nothing was published");
+}
+
+#[test]
+fn publish_and_force_push_refuse_a_detached_head() {
+    let (_origin, dest) = origin_and_clone();
+    commit_file(dest.path(), "a.txt", "two
+", "from the clone");
+    git_in(dest.path(), &["checkout", "--detach"]);
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+
+    assert_eq!(adapter.publish("origin"), Err(DomainError::Unknown(DETACHED_HEAD_CANNOT_BE_PUSHED.to_string())));
+    assert_eq!(adapter.force_push(), Err(DomainError::Unknown(DETACHED_HEAD_CANNOT_BE_PUSHED.to_string())));
+}
+
+#[test]
+fn force_push_replaces_a_diverged_remote_branch() {
+    let (origin, dest) = origin_and_clone();
+    let branch = origin.head_branch();
+    commit_file(dest.path(), "a.txt", "two\n", "from the clone");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+    adapter.push().expect("push");
+    amend_head(dest.path(), "from the clone, amended");
+    let tracking = adapter.status().expect("status").tracking.expect("upstream");
+    assert_eq!((tracking.ahead, tracking.behind), (1, 1), "diverged");
+
+    let guard = adapter.force_push().expect("force push");
+
+    assert_eq!(tip_of(origin.workdir(), &format!("refs/heads/{branch}")), head_at(dest.path()).to_string());
+    // The clone has a reflog, so the guard depends only on the installed git.
+    let installed = parse_git_version(&run_git_stdout(".", &["version"]).expect("git version"));
+    let expected = if installed.is_some_and(|version| version >= (2, 30)) {
+        core_domain::ForceGuard::LeaseAndIncludes
+    } else {
+        core_domain::ForceGuard::LeaseOnly
+    };
+    assert_eq!(guard, expected);
+}
+
+#[test]
+fn force_push_refuses_when_the_remote_moved_since_the_last_fetch() {
+    let (origin, dest) = origin_and_clone();
+    let branch = origin.head_branch();
+    commit_file(dest.path(), "a.txt", "two\n", "A");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+    adapter.push().expect("push A");
+    // Someone else pushes B; the clone never fetches it.
+    let b = origin.commit("B", &[("a.txt", "three\n")], 120);
+    amend_head(dest.path(), "A, amended");
+
+    let error = adapter.force_push().expect_err("the lease refuses");
+
+    match error {
+        DomainError::Unknown(message) => assert!(message.contains("stale info"), "{message}"),
+        other => panic!("expected git's message, got {other:?}"),
+    }
+    assert_eq!(tip_of(origin.workdir(), &format!("refs/heads/{branch}")), b.to_string(), "B is still there");
+}
+
+#[test]
+fn the_git_version_is_read_from_every_known_form() {
+    assert_eq!(parse_git_version("git version 2.47.1.windows.2"), Some((2, 47)));
+    assert_eq!(parse_git_version("git version 2.39.3 (Apple Git-146)"), Some((2, 39)));
+    assert_eq!(parse_git_version("git version 2.30.0\n"), Some((2, 30)));
+    assert_eq!(parse_git_version("git version 3.0"), Some((3, 0)));
+    assert_eq!(parse_git_version("not git"), None);
+    assert_eq!(parse_git_version("git version two"), None);
+    assert_eq!(parse_git_version(""), None);
+}
+
+#[test]
+fn the_includes_check_needs_git_2_30_and_a_reflog() {
+    use core_domain::ForceGuard::{LeaseAndIncludes, LeaseOnly};
+    assert_eq!(force_guard(Some((2, 30)), true), LeaseAndIncludes);
+    assert_eq!(force_guard(Some((3, 0)), true), LeaseAndIncludes);
+    assert_eq!(force_guard(Some((2, 29)), true), LeaseOnly);
+    assert_eq!(force_guard(Some((1, 99)), true), LeaseOnly);
+    assert_eq!(force_guard(Some((2, 47)), false), LeaseOnly);
+    assert_eq!(force_guard(None, true), LeaseOnly, "an unreadable version is not trusted");
+}

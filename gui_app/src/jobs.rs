@@ -85,6 +85,10 @@ pub(crate) fn load_repository_up_to(repo: &dyn GitRepository, limit: usize) -> V
             Ok(counts) => ViewEvent::LineCountsUpdated(counts),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
+        match repo.remotes() {
+            Ok(remotes) => ViewEvent::RemotesUpdated(remotes),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
     ]
 }
 
@@ -562,6 +566,25 @@ pub(crate) fn push_in_background(
     in_background(
         move || repo.push(),
         || Err(DomainError::Unknown("push was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn publish_in_background(
+    repo: SharedRepository,
+    remote: String,
+) -> impl Future<Output = Result<(), DomainError>> {
+    in_background(
+        move || repo.publish(&remote),
+        || Err(DomainError::Unknown("publish was interrupted".to_string())),
+    )
+}
+
+pub(crate) fn force_push_in_background(
+    repo: SharedRepository,
+) -> impl Future<Output = Result<core_domain::ForceGuard, DomainError>> {
+    in_background(
+        move || repo.force_push(),
+        || Err(DomainError::Unknown("force push was interrupted".to_string())),
     )
 }
 
@@ -1139,6 +1162,7 @@ mod tests {
         FakeGitRepository {
             log_result: Ok(vec![commit("aaaaaaa1"), commit("bbbbbbb2")]),
             branches_result: Ok(vec![branch("main", true), branch("feature/x", false)]),
+            remotes_result: Ok(vec!["origin".to_string()]),
             ..FakeGitRepository::ok()
         }
     }
@@ -1291,7 +1315,7 @@ mod tests {
     #[test]
     fn load_repository_reports_status_log_and_branches_in_order() {
         let events = load_repository(&populated_repo());
-        assert_eq!(events.len(), 7);
+        assert_eq!(events.len(), 8);
         assert!(matches!(&events[0], ViewEvent::StatusUpdated(_)));
         assert!(
             matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2 && commits[0].id == "aaaaaaa1")
@@ -1303,6 +1327,7 @@ mod tests {
         assert!(matches!(&events[4], ViewEvent::TagsUpdated(tags) if tags.is_empty()));
         assert!(matches!(&events[5], ViewEvent::UnpushedUpdated(ids) if ids.is_empty()));
         assert!(matches!(&events[6], ViewEvent::LineCountsUpdated(counts) if *counts == LineCounts::default()));
+        assert!(matches!(&events[7], ViewEvent::RemotesUpdated(remotes) if *remotes == ["origin"]));
     }
 
     #[test]
@@ -1330,9 +1355,11 @@ mod tests {
             tags_result: Err(DomainError::RepositoryNotFound),
             unpushed_result: Err(DomainError::RepositoryNotFound),
             line_counts_result: Err(DomainError::RepositoryNotFound),
+            remotes_result: Err(DomainError::RepositoryNotFound),
             ..FakeGitRepository::ok()
         };
         let events = load_repository(&repo);
+        assert_eq!(events.len(), 8);
         assert!(events.iter().all(|event| matches!(
             event,
             ViewEvent::ErrorOccurred(DomainError::RepositoryNotFound)
@@ -1344,7 +1371,7 @@ mod tests {
         let events = iced::futures::executor::block_on(load_repository_in_background(Arc::new(
             populated_repo(),
         ), COMMIT_PAGE_SIZE));
-        assert_eq!(events.len(), 7);
+        assert_eq!(events.len(), 8);
         assert!(matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2));
         assert!(matches!(&events[2], ViewEvent::BranchesUpdated(branches) if branches.len() == 2));
         assert!(matches!(&events[3], ViewEvent::StashesUpdated(stashes) if stashes.is_empty()));
@@ -1407,6 +1434,33 @@ mod tests {
         let failed = iced::futures::executor::block_on(push_in_background(Arc::new(failing)));
         assert_eq!(ok, Ok(()));
         assert_eq!(failed, Err(DomainError::Unknown("no upstream".to_string())));
+    }
+
+    #[test]
+    fn background_publish_and_force_push_return_the_adapter_result() {
+        let refusing = FakeGitRepository {
+            publish_result: Err(DomainError::Unknown("no such remote".to_string())),
+            force_push_result: Err(DomainError::Unknown("! [rejected] main -> main (stale info)".to_string())),
+            ..FakeGitRepository::ok()
+        };
+        let lease_only = FakeGitRepository {
+            force_push_result: Ok(core_domain::ForceGuard::LeaseOnly),
+            ..FakeGitRepository::ok()
+        };
+        let refusing = Arc::new(refusing);
+        assert_eq!(
+            iced::futures::executor::block_on(publish_in_background(Arc::new(FakeGitRepository::ok()), "origin".to_string())),
+            Ok(())
+        );
+        assert_eq!(
+            iced::futures::executor::block_on(publish_in_background(refusing.clone(), "origin".to_string())),
+            Err(DomainError::Unknown("no such remote".to_string()))
+        );
+        assert_eq!(
+            iced::futures::executor::block_on(force_push_in_background(Arc::new(lease_only))),
+            Ok(core_domain::ForceGuard::LeaseOnly)
+        );
+        assert!(iced::futures::executor::block_on(force_push_in_background(refusing)).is_err());
     }
 
     #[test]

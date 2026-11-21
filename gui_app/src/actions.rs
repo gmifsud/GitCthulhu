@@ -4,7 +4,10 @@
 //! Pure: no adapter calls and no window. `availability` says whether an action can run
 //! right now and, when it cannot, why in a sentence the user can read.
 
-use crate::tracking::{BUSY_REASON, LOADING_REASON, NO_UPSTREAM_REASON};
+use crate::tracking::{
+    PushKind, BUSY_REASON, DIVERGED_REASON, HAS_UPSTREAM_REASON, LOADING_REASON, NOT_DIVERGED_REASON,
+    NO_UPSTREAM_REASON,
+};
 use core_domain::RepoOperation;
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
@@ -16,6 +19,10 @@ pub(crate) enum ActionId {
     Fetch,
     Pull,
     Push,
+    /// Push a branch that has no upstream and track it.
+    Publish,
+    /// Ask, then force push with a lease. Never bound to a key that skips the dialog.
+    ForcePush,
     Refresh,
     StageMarked,
     UnstageMarked,
@@ -145,11 +152,14 @@ const fn spec(
 }
 
 /// Every action, in the order the palette and the shortcuts sheet list them.
-/// Undo has no default chord: a key that rewrites history must be chosen on purpose.
+/// Undo and force push have no default chord: a key that rewrites history must be chosen on
+/// purpose.
 pub(crate) const ACTIONS: &[ActionSpec] = &[
     spec(ActionId::Fetch, "Fetch", "Git", bare(ChordKey::F5)),
     spec(ActionId::Pull, "Pull", "Git", None),
     spec(ActionId::Push, "Push", "Git", None),
+    spec(ActionId::Publish, "Publish branch", "Git", None),
+    spec(ActionId::ForcePush, "Force push", "Git", None),
     spec(
         ActionId::Refresh,
         "Refresh repository",
@@ -273,7 +283,7 @@ pub(crate) fn finish_operation_reason(operation: RepoOperation) -> &'static str 
 }
 
 /// What the window knows that decides whether an action can run now.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ActionContext {
     pub has_session: bool,
     /// The repository has not been read yet.
@@ -298,10 +308,47 @@ pub(crate) struct ActionContext {
     pub head_is_merge: bool,
     /// The merge, rebase, cherry-pick or revert in progress, if any.
     pub operation: Option<RepoOperation>,
+    /// Which push the branch is ready for, or why none: `tracking::push_kind`, which the top
+    /// bar's Push button reads too.
+    pub push: Result<PushKind, &'static str>,
 }
 
-/// `Ok` when `id` can run, else the reason in words. The reasons for Fetch, Pull and Push
-/// are the ones the top bar shows on its disabled buttons.
+impl Default for ActionContext {
+    fn default() -> Self {
+        Self {
+            has_session: false,
+            loading: false,
+            busy: false,
+            head_born: false,
+            has_upstream: false,
+            has_staged: false,
+            has_summary: false,
+            has_marked: false,
+            has_changes: false,
+            inspecting_other: false,
+            palette_open: false,
+            amending: false,
+            head_is_merge: false,
+            operation: None,
+            push: Err(NO_UPSTREAM_REASON),
+        }
+    }
+}
+
+/// Push, Publish or Force push against the branch's one push decision. Each is available
+/// only when it is what the Push button would do; otherwise the reason says what is.
+fn push_availability(wanted: PushKind, plan: Result<PushKind, &'static str>) -> Result<(), &'static str> {
+    match (wanted, plan?) {
+        (wanted, ready) if wanted == ready => Ok(()),
+        (_, PushKind::Publish) => Err(NO_UPSTREAM_REASON),
+        (PushKind::Publish, _) => Err(HAS_UPSTREAM_REASON),
+        (PushKind::Push, _) => Err(DIVERGED_REASON),
+        (PushKind::ForcePush, _) => Err(NOT_DIVERGED_REASON),
+    }
+}
+
+/// `Ok` when `id` can run, else the reason in words. The reasons for Fetch, Pull, Push,
+/// Publish and Force push are the ones the top bar shows on its disabled buttons.
 pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'static str> {
     if !cx.has_session {
         return Err("No repository open");
@@ -311,6 +358,8 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
         ActionId::Fetch
             | ActionId::Pull
             | ActionId::Push
+            | ActionId::Publish
+            | ActionId::ForcePush
             | ActionId::Refresh
             | ActionId::StageMarked
             | ActionId::UnstageMarked
@@ -331,7 +380,10 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
         return Err(finish_operation_reason(operation));
     }
     match id {
-        ActionId::Pull | ActionId::Push if !cx.has_upstream => Err(NO_UPSTREAM_REASON),
+        ActionId::Pull if !cx.has_upstream => Err(NO_UPSTREAM_REASON),
+        ActionId::Push => push_availability(PushKind::Push, cx.push),
+        ActionId::Publish => push_availability(PushKind::Publish, cx.push),
+        ActionId::ForcePush => push_availability(PushKind::ForcePush, cx.push),
         ActionId::StageMarked | ActionId::UnstageMarked if !cx.has_marked => {
             Err("No files are marked")
         }
@@ -525,8 +577,76 @@ mod tests {
     }
 
     #[test]
-    fn neither_rewrite_has_a_default_chord() {
-        for id in [ActionId::AmendLastCommit, ActionId::UndoLastCommit] {
+    fn push_publish_and_force_push_agree_with_the_top_bar() {
+        use crate::tracking::{push_kind, sync_buttons, SyncAction};
+        use core_domain::{RepoStatus, TrackingStatus};
+        let status = |tracking: Option<(usize, usize)>, born: bool| RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec![],
+            untracked_files: vec![],
+            tracking: tracking.map(|(ahead, behind)| TrackingStatus { upstream: "origin/main".into(), ahead, behind }),
+            head_commit_id: born.then(|| "abc".to_string()),
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        };
+        let remotes = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        let cases = [
+            (status(None, true), remotes(&["origin"])),
+            (status(None, true), remotes(&["fork"])),
+            (status(None, true), remotes(&["fork", "upstream"])),
+            (status(None, true), remotes(&[])),
+            (status(None, false), remotes(&["origin"])),
+            (status(Some((1, 2)), true), remotes(&["origin"])),
+            (status(Some((2, 0)), true), remotes(&["origin"])),
+            (status(Some((0, 0)), true), remotes(&["origin"])),
+        ];
+        for (status, remotes) in cases {
+            let [_, _, button] = sync_buttons(Some(&status), &remotes, None);
+            let cx = ActionContext {
+                has_session: true,
+                head_born: status.head_commit_id.is_some(),
+                has_upstream: status.tracking.is_some(),
+                push: push_kind(Some(&status), &remotes),
+                ..Default::default()
+            };
+            let pressed = match &button.action {
+                SyncAction::Push => ActionId::Push,
+                SyncAction::Publish(_) => ActionId::Publish,
+                SyncAction::ForcePush => ActionId::ForcePush,
+                other => panic!("the push button never does {other:?}"),
+            };
+            let expected = if button.enabled { Ok(()) } else { Err(button.reason.expect("a disabled button says why")) };
+            assert_eq!(availability(pressed, &cx), expected, "{:?} {remotes:?}", status.tracking);
+            // The other two are unavailable whenever the button does not do them.
+            for other in [ActionId::Push, ActionId::Publish, ActionId::ForcePush] {
+                if other != pressed {
+                    assert!(availability(other, &cx).is_err(), "{other:?} with {:?} {remotes:?}", status.tracking);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn publish_and_force_push_wait_like_every_git_action() {
+        let ready = ActionContext {
+            has_session: true,
+            head_born: true,
+            push: Ok(crate::tracking::PushKind::ForcePush),
+            ..Default::default()
+        };
+        assert_eq!(availability(ActionId::ForcePush, &ready), Ok(()));
+        let busy = ActionContext { busy: true, ..ready };
+        let loading = ActionContext { loading: true, ..ready };
+        for id in [ActionId::Publish, ActionId::ForcePush] {
+            assert_eq!(availability(id, &busy), Err(BUSY_REASON));
+            assert_eq!(availability(id, &loading), Err(LOADING_REASON));
+        }
+    }
+
+    #[test]
+    fn no_rewrite_has_a_default_chord() {
+        for id in [ActionId::AmendLastCommit, ActionId::UndoLastCommit, ActionId::ForcePush, ActionId::Publish] {
             let spec = ACTIONS.iter().find(|spec| spec.id == id).expect("listed");
             assert_eq!(spec.chord, None, "{id:?}");
         }

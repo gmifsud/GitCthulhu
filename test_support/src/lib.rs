@@ -3,7 +3,7 @@
 //! Add as `[dev-dependencies]` only — never in `[dependencies]`.
 
 use core_domain::{
-    Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, LineCounts, Patch,
+    Branch, Commit, DomainError, FileDisposition, ForceGuard, GitRepository, Hunk, LineCounts, Patch,
     RepoStatus, Stash, Tag, Worktree,
 };
 
@@ -48,6 +48,9 @@ pub struct FakeGitRepository {
     pub fetch_result: Result<(), DomainError>,
     pub push_result: Result<(), DomainError>,
     pub pull_result: Result<(), DomainError>,
+    pub remotes_result: Result<Vec<String>, DomainError>,
+    pub publish_result: Result<(), DomainError>,
+    pub force_push_result: Result<ForceGuard, DomainError>,
     pub commit_patch_result: Result<Vec<Patch>, DomainError>,
     pub file_patch_result: Result<Patch, DomainError>,
     pub compare_result: Result<Patch, DomainError>,
@@ -106,6 +109,9 @@ impl FakeGitRepository {
             fetch_result: Ok(()),
             push_result: Ok(()),
             pull_result: Ok(()),
+            remotes_result: Ok(vec![]),
+            publish_result: Ok(()),
+            force_push_result: Ok(ForceGuard::LeaseAndIncludes),
             commit_patch_result: Ok(vec![]),
             file_patch_result: Ok(Patch {
                 path: String::new(),
@@ -249,6 +255,18 @@ impl GitRepository for FakeGitRepository {
 
     fn pull(&self) -> Result<(), DomainError> {
         self.pull_result.clone()
+    }
+
+    fn remotes(&self) -> Result<Vec<String>, DomainError> {
+        self.remotes_result.clone()
+    }
+
+    fn publish(&self, _remote: &str) -> Result<(), DomainError> {
+        self.publish_result.clone()
+    }
+
+    fn force_push(&self) -> Result<ForceGuard, DomainError> {
+        self.force_push_result.clone()
     }
 
     fn commit_patch(&self, _commit_id: &str) -> Result<Vec<Patch>, DomainError> {

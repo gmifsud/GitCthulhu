@@ -14,11 +14,11 @@ use crate::jobs::{
     add_worktree_in_background, append_gitignore_in_background, branch_in_background,
     checkout_in_background, choose_repository_folder,
     discard_hunk_in_background, discard_paths_in_background,
-    edit_in_background, error_message, fetch_in_background, history_in_background,
+    edit_in_background, error_message, fetch_in_background, force_push_in_background, history_in_background,
     init_in_background, list_models_in_background, load_patch_in_background,
     load_repository_in_background, open_repository_in_background, open_worktree_in_background,
     probe_worktree_in_background, pull_in_background,
-    push_in_background, remove_worktree_in_background, save_settings_in_background,
+    publish_in_background, push_in_background, remove_worktree_in_background, save_settings_in_background,
     compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
     stop_shell, suggest_commit_in_background, undo_commit_in_background, commit_message_in_background, worktrees_in_background,
     BranchAction,
@@ -306,7 +306,15 @@ pub(crate) enum Message {
     Fetch,
     FetchFinished(SessionKey, Result<(), DomainError>),
     Push,
+    /// Push a branch that has no upstream to this remote and track it. Ends in `PushFinished`.
+    Publish(String),
     PushFinished(SessionKey, Result<(), DomainError>),
+    /// Open the force push confirm for the active tab's diverged branch.
+    AskForcePush,
+    /// The user said yes to the force push confirm.
+    ConfirmForcePush,
+    /// The guard the force push used, or why git refused it.
+    ForcePushFinished(SessionKey, Result<core_domain::ForceGuard, DomainError>),
     Pull,
     PullFinished(SessionKey, Result<(), DomainError>),
     WorktreeEditFinished(SessionKey, WorktreeEdit, Result<(), DomainError>),
@@ -932,6 +940,13 @@ fn finished_outcome(message: &Message) -> Option<(crate::activity::Lane, core_do
         };
         return Some((Lane::Worktree(path.path.clone()), outcome));
     }
+    if let Message::ForcePushFinished(path, result) = message {
+        let outcome = match result {
+            Ok(_) => core_domain::ActivityOutcome::Succeeded,
+            Err(error) => core_domain::ActivityOutcome::Failed(error_message(error)),
+        };
+        return Some((Lane::Worktree(path.path.clone()), outcome));
+    }
     let (lane, result) = match message {
         Message::CheckoutFinished(path, result)
         | Message::FetchFinished(path, result)
@@ -999,6 +1014,9 @@ pub(crate) enum HistoryPrompt {
     UndoPushed { id: String },
     /// Amend a HEAD commit that is already on a remote. `id` is the HEAD the view saw.
     AmendPushed { id: String },
+    /// Force push the current branch over `upstream`, which has `behind` commits the branch
+    /// does not; the branch has `ahead` of its own.
+    ForcePush { upstream: String, ahead: usize, behind: usize },
 }
 
 /// A stash waiting for its message. `paths` empty stashes every tracked change.
@@ -1753,6 +1771,10 @@ impl GitApp {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         // Every git action ends in one of a few finish messages. Close its activity entry here,
         // once, whatever the handler then does with the result.
+        if let Message::ForcePushFinished(key, Ok(guard)) = &message {
+            let lane = crate::activity::Lane::Worktree(key.path.clone());
+            self.activity.restate_running(&lane, |record| crate::activity::record_force_guard(record, *guard));
+        }
         let saved = match finished_outcome(&message) {
             Some((lane, outcome)) => self.finish_activity(&lane, outcome),
             None => Task::none(),
@@ -2135,7 +2157,35 @@ impl GitApp {
                     Message::PushFinished(key.clone(), result)
                 })
             }
+            Message::Publish(remote) => {
+                let Some(session) = self.active_session() else {
+                    return Task::none();
+                };
+                if session.state.loading {
+                    return Task::none();
+                }
+                let repo = session.adapter.clone();
+                let key = session.key();
+                let path = key.path.clone();
+                self.session_mut().state.loading = true;
+                self.error = None;
+                let branch = crate::view::current_branch(&self.session().state.branches);
+                self.begin_activity(
+                    &path,
+                    crate::activity::Action::new(
+                        "Publish",
+                        format!("{branch} to {remote}"),
+                        format!("git push --set-upstream {remote} HEAD"),
+                    ),
+                );
+                Task::perform(publish_in_background(repo, remote), move |result| {
+                    Message::PushFinished(key.clone(), result)
+                })
+            }
             Message::PushFinished(path, result) => self.finish_reload(&path, result),
+            Message::AskForcePush => self.ask_force_push(),
+            Message::ConfirmForcePush => self.confirm_force_push(),
+            Message::ForcePushFinished(path, result) => self.finish_reload(&path, result.map(|_| ())),
             Message::Pull => {
                 let Some(session) = self.active_session() else {
                     return Task::none();
@@ -5698,6 +5748,54 @@ impl GitApp {
         self.run_worktree_edit(WorktreeEdit::Amend { message, expected_head: id })
     }
 
+    /// Open the force push confirm when the active tab's branch has diverged from its
+    /// upstream. Force push never runs without it.
+    fn ask_force_push(&mut self) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        let Some(tracking) = session.state.current_status.as_ref().and_then(|status| status.tracking.as_ref()) else {
+            return Task::none();
+        };
+        if tracking.ahead == 0 || tracking.behind == 0 {
+            return Task::none();
+        }
+        let prompt = HistoryPrompt::ForcePush {
+            upstream: tracking.upstream.clone(),
+            ahead: tracking.ahead,
+            behind: tracking.behind,
+        };
+        self.close_prompts();
+        self.history_prompt = Some(prompt);
+        Task::none()
+    }
+
+    /// The user said yes to the force push confirm.
+    fn confirm_force_push(&mut self) -> Task<Message> {
+        let Some(HistoryPrompt::ForcePush { upstream, .. }) = self.history_prompt.clone() else {
+            return Task::none();
+        };
+        self.history_prompt = None;
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        let repo = session.adapter.clone();
+        let key = session.key();
+        let path = key.path.clone();
+        self.session_mut().state.loading = true;
+        self.error = None;
+        self.begin_activity(&path, crate::activity::force_push_action(&upstream));
+        Task::perform(force_push_in_background(repo), move |result| {
+            Message::ForcePushFinished(key.clone(), result)
+        })
+    }
+
     /// Undo the HEAD commit the view showed as `seen`: at once when it is on no remote,
     /// after a confirmation when it is. Either way `seen` is the HEAD the adapter expects.
     fn ask_undo_commit(&mut self, seen: String) -> Task<Message> {
@@ -6463,6 +6561,7 @@ impl GitApp {
             has_changes: status.is_some_and(|status| {
                 !status.staged_files.is_empty() || !status.unstaged_files.is_empty()
             }),
+            push: crate::tracking::push_kind(status, &session.state.remotes),
         }
     }
 
@@ -6482,6 +6581,13 @@ impl GitApp {
             ActionId::Fetch => Message::Fetch,
             ActionId::Pull => Message::Pull,
             ActionId::Push => Message::Push,
+            ActionId::Publish => Message::Publish(
+                self.active_session()
+                    .and_then(|session| crate::tracking::publish_remote(&session.state.remotes))
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            ActionId::ForcePush => Message::AskForcePush,
             ActionId::Refresh => Message::RefreshRepository,
             ActionId::StageMarked => Message::StageMarked,
             ActionId::UnstageMarked => Message::UnstageMarked,
@@ -10003,8 +10109,8 @@ mod tests {
 
     const HEAD: &str = "abc";
 
-    /// A loaded tab whose HEAD is `HEAD`, with `message`, and nothing staged. `pushed` puts a
-    /// remote-tracking branch in the repository and leaves HEAD off the unpushed list.
+    /// A loaded tab whose HEAD is `HEAD`, with `message`, and nothing staged, in a repository
+    /// with the remote `origin`. `pushed` leaves HEAD off the unpushed list.
     fn app_at_head(message: &str, pushed: bool) -> GitApp {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         let session = app.session_mut();
@@ -10024,6 +10130,7 @@ mod tests {
             ahead: 0,
             behind: 0,
         }]));
+        session.state.apply_event(ViewEvent::RemotesUpdated(vec!["origin".into()]));
         let unpushed = if pushed { vec![] } else { vec![HEAD.to_string()] };
         session.state.apply_event(ViewEvent::UnpushedUpdated(unpushed));
         session.state.loading = false;
@@ -10291,6 +10398,128 @@ mod tests {
         let _ = app.update(Message::RunAction(ActionId::UndoLastCommit));
         assert_eq!(app.error.as_deref(), Some("No commits yet"));
         assert!(!app.session().state.loading);
+    }
+
+    /// A loaded tab on `main`, `ahead` and `behind` its upstream `origin/main`.
+    fn app_diverged(ahead: usize, behind: usize) -> GitApp {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let mut status = staged_nothing_status();
+        status.tracking = Some(core_domain::TrackingStatus { upstream: "origin/main".into(), ahead, behind });
+        let session = app.session_mut();
+        session.state.apply_event(ViewEvent::StatusUpdated(status));
+        session.state.apply_event(ViewEvent::RemotesUpdated(vec!["origin".into()]));
+        session.state.loading = false;
+        app
+    }
+
+    #[test]
+    fn force_push_always_asks_and_names_what_will_be_overwritten() {
+        use crate::actions::{ActionId, ACTIONS};
+        let mut app = app_diverged(1, 2);
+        let asked = Some(HistoryPrompt::ForcePush { upstream: "origin/main".into(), ahead: 1, behind: 2 });
+
+        let _ = app.update(Message::RunAction(ActionId::ForcePush));
+        assert_eq!(app.history_prompt, asked);
+        assert!(!app.session().state.loading, "nothing runs until the user says yes");
+        assert!(app.activity.running().is_none());
+        let _ = app.update(Message::CancelHistory);
+        assert_eq!(app.history_prompt, None);
+        assert!(!app.session().state.loading);
+
+        // The top bar's "Force push ↑1" sends the same ask.
+        let _ = app.update(Message::AskForcePush);
+        assert_eq!(app.history_prompt, asked);
+        let _ = app.update(Message::ConfirmForcePush);
+        assert_eq!(app.history_prompt, None);
+        assert!(app.session().state.loading);
+        let running = app.activity.running().expect("running");
+        assert_eq!(running.record.title, "Force push");
+        assert_eq!(running.record.detail, "origin/main");
+
+        // No key force-pushes past the dialog.
+        let spec = ACTIONS.iter().find(|spec| spec.id == ActionId::ForcePush).expect("listed");
+        assert_eq!(spec.chord, None);
+        assert!(matches!(app.message_for(ActionId::ForcePush), Message::AskForcePush));
+    }
+
+    #[test]
+    fn force_push_is_not_offered_unless_the_branch_has_diverged() {
+        use crate::actions::ActionId;
+        let mut app = app_diverged(2, 0);
+        let _ = app.update(Message::AskForcePush);
+        assert_eq!(app.history_prompt, None);
+        let _ = app.update(Message::RunAction(ActionId::ForcePush));
+        assert_eq!(app.history_prompt, None);
+        assert!(app.error.is_some(), "the palette says why");
+    }
+
+    #[test]
+    fn a_lease_only_force_push_says_so() {
+        let mut app = app_diverged(1, 2);
+        let repository = app.repository_root().expect("open");
+        let _ = app.update(Message::AskForcePush);
+        let _ = app.update(Message::ConfirmForcePush);
+        let _ = app.update(Message::ForcePushFinished(app.active_key(), Ok(core_domain::ForceGuard::LeaseOnly)));
+        let entries = app.activity.for_repository(&repository);
+        let record = &entries[0].record;
+        assert_eq!(record.outcome, core_domain::ActivityOutcome::Succeeded);
+        assert!(record.detail.contains("lease only"), "{}", record.detail);
+        assert_eq!(record.command, "git push --force-with-lease");
+
+        let _ = app.update(Message::AskForcePush);
+        let _ = app.update(Message::ConfirmForcePush);
+        let _ = app.update(Message::ForcePushFinished(
+            app.active_key(),
+            Ok(core_domain::ForceGuard::LeaseAndIncludes),
+        ));
+        let entries = app.activity.for_repository(&repository);
+        assert_eq!(entries[0].record.command, "git push --force-with-lease --force-if-includes");
+        assert!(!entries[0].record.detail.contains("lease only"));
+    }
+
+    /// git 2.56's refusal when the remote moved since the last fetch, from
+    /// `git_adapter`'s `force_push_refuses_when_the_remote_moved_since_the_last_fetch`
+    /// (gui_app cannot depend on the adapter, so the text is captured here).
+    const STALE_LEASE_REFUSAL: &str = "To C:\\Users\\me\\AppData\\Local\\Temp\\.tmpTpmURp\n ! [rejected]        main -> main (stale info)\nerror: failed to push some refs to 'C:\\Users\\me\\AppData\\Local\\Temp\\.tmpTpmURp'";
+
+    #[test]
+    fn a_refused_lease_reads_as_push_rejected() {
+        let error = DomainError::Unknown(STALE_LEASE_REFUSAL.into());
+        assert_eq!(
+            crate::git_error::present(&error_message(&error)).kind,
+            crate::git_error::ErrorKind::Rejected
+        );
+        let mut app = app_diverged(1, 2);
+        let repository = app.repository_root().expect("open");
+        let _ = app.update(Message::AskForcePush);
+        let _ = app.update(Message::ConfirmForcePush);
+        let _ = app.update(Message::ForcePushFinished(app.active_key(), Err(error)));
+        assert!(!app.session().state.loading);
+        assert_eq!(
+            crate::git_error::present(app.error.as_deref().expect("git's refusal")).kind,
+            crate::git_error::ErrorKind::Rejected
+        );
+        let entries = app.activity.for_repository(&repository);
+        assert!(matches!(&entries[0].record.outcome, core_domain::ActivityOutcome::Failed(message) if message.contains("stale info")));
+    }
+
+    #[test]
+    fn publish_sends_the_branch_to_the_remote_the_button_names() {
+        use crate::actions::ActionId;
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let session = app.session_mut();
+        session.state.apply_event(ViewEvent::StatusUpdated(staged_nothing_status()));
+        session.state.apply_event(ViewEvent::RemotesUpdated(vec!["fork".into(), "origin".into()]));
+        session.state.loading = false;
+        assert!(matches!(app.message_for(ActionId::Publish), Message::Publish(remote) if remote == "origin"));
+
+        let _ = app.update(Message::RunAction(ActionId::Publish));
+        assert!(app.session().state.loading);
+        let running = app.activity.running().expect("running");
+        assert_eq!(running.record.title, "Publish");
+        assert_eq!(running.record.command, "git push --set-upstream origin HEAD");
+        let _ = app.update(Message::PushFinished(app.active_key(), Ok(())));
+        assert!(app.activity.running().is_none());
     }
 
     fn app_ready_to_commit() -> GitApp {

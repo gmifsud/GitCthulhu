@@ -1,5 +1,5 @@
 use super::{MergePreview, 
-    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, LineCounts, Patch,
+    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, ForceGuard, Hunk, LineCounts, Patch,
     RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
@@ -123,6 +123,23 @@ pub trait GitRepository {
     fn fetch(&self) -> Result<(), DomainError>;
     /// `git push` of the current branch to its upstream, with no refspec.
     fn push(&self) -> Result<(), DomainError>;
+    /// The remotes' names, as `git remote` lists them. Empty when there are none.
+    fn remotes(&self) -> Result<Vec<String>, DomainError> {
+        Err(DomainError::Unknown("this repository cannot list remotes".to_string()))
+    }
+    /// `git push --set-upstream -- <remote> HEAD`: send the current branch to `remote` under
+    /// its own name and track it from now on. Refuses an empty or option-like remote.
+    fn publish(&self, remote: &str) -> Result<(), DomainError> {
+        let _ = remote;
+        Err(DomainError::Unknown("this repository cannot publish a branch".to_string()))
+    }
+    /// Replace the current branch's upstream with the local branch, guarded by
+    /// `--force-with-lease` (and `--force-if-includes` where git and the reflog allow): git
+    /// refuses, changing nothing, when the remote moved since the last fetch. Returns the
+    /// guard used.
+    fn force_push(&self) -> Result<ForceGuard, DomainError> {
+        Err(DomainError::Unknown("this repository cannot force push".to_string()))
+    }
     /// `git pull --no-rebase --ff-only`. A diverged branch fails and does not start a merge or rebase.
     fn pull(&self) -> Result<(), DomainError>;
     /// Unified diff of `commit_id` against its first parent. An unknown id is an error.

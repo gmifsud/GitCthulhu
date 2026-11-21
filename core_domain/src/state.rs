@@ -12,6 +12,7 @@ pub enum ViewEvent {
     SettingsUpdated(AppSettings),
     ErrorOccurred(DomainError),
     LineCountsUpdated(LineCounts),
+    RemotesUpdated(Vec<String>),
 }
 
 /// Repository view state. `apply_event` is the only writer.
@@ -26,6 +27,8 @@ pub struct AppState {
     pub unpushed: std::collections::HashSet<String>,
     /// Added and removed lines beside each changed file.
     pub line_counts: LineCounts,
+    /// The remotes' names (see `GitRepository::remotes`).
+    pub remotes: Vec<String>,
     pub loading: bool,
     pub settings: AppSettings,
 }
@@ -41,6 +44,7 @@ impl AppState {
             tags: vec![],
             unpushed: Default::default(),
             line_counts: LineCounts::default(),
+            remotes: vec![],
             loading: false,
             settings: AppSettings::default(),
         }
@@ -83,6 +87,10 @@ impl AppState {
             }
             ViewEvent::LineCountsUpdated(counts) => {
                 self.line_counts = counts;
+                self.loading = false;
+            }
+            ViewEvent::RemotesUpdated(remotes) => {
+                self.remotes = remotes;
                 self.loading = false;
             }
         }

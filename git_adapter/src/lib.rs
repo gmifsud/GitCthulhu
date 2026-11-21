@@ -14,7 +14,7 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LineCounts, LogCursor, MergePreview,
+    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, ForceGuard, GitRepository, Hunk, LineCounts, LogCursor, MergePreview,
     Patch, RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
@@ -29,6 +29,8 @@ pub(crate) const FIRST_COMMIT_CANNOT_BE_UNDONE: &str =
 /// Why a merge commit is not undone: its changes would come back staged as one change.
 pub(crate) const MERGE_COMMIT_CANNOT_BE_UNDONE: &str =
     "HEAD is a merge commit: undo it from the terminal";
+/// Why a detached HEAD is not published or force pushed: there is no branch to send.
+pub(crate) const DETACHED_HEAD_CANNOT_BE_PUSHED: &str = "HEAD is not on a branch: check out a branch to push it.";
 /// Why undo waits while the index has unmerged entries.
 pub(crate) const RESOLVE_CONFLICTS_FIRST: &str = "Resolve the conflicts first.";
 
@@ -843,6 +845,41 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["push"])
     }
 
+    /// `git remote`, one name per line.
+    fn remotes(&self) -> Result<Vec<String>, DomainError> {
+        self.open_repo()?;
+        let listed = run_git_stdout(&self.repo_path, &["remote"])?;
+        Ok(listed.lines().map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect())
+    }
+
+    /// `git push --set-upstream -- <remote> HEAD`. The `--` keeps the remote a remote.
+    fn publish(&self, remote: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        require_remote_name(remote)?;
+        self.current_branch()?;
+        run_git(&self.repo_path, &["push", "--set-upstream", "--", remote, "HEAD"])
+    }
+
+    /// `git push --force-with-lease`, plus `--force-if-includes` with git 2.30 or later when
+    /// the branch has a reflog. The lease refuses when the upstream is no longer where the
+    /// last fetch left it; the includes check also refuses when that tip was fetched but never
+    /// on the local branch (a background fetch would otherwise defeat the lease).
+    fn force_push(&self) -> Result<ForceGuard, DomainError> {
+        self.open_repo()?;
+        let version = run_git_stdout(&self.repo_path, &["version"]).ok().and_then(|text| parse_git_version(&text));
+        let branch = self.current_branch()?;
+        let has_reflog = command::git_output(&self.repo_path, &["reflog", "exists", &format!("refs/heads/{branch}")])?
+            .status
+            .success();
+        let guard = force_guard(version, has_reflog);
+        let args: &[&str] = match guard {
+            ForceGuard::LeaseAndIncludes => &["push", "--force-with-lease", "--force-if-includes"],
+            ForceGuard::LeaseOnly => &["push", "--force-with-lease"],
+        };
+        run_git(&self.repo_path, args)?;
+        Ok(guard)
+    }
+
     /// Pull with `git pull --no-rebase --ff-only`.
     ///
     /// `--no-rebase` wins over `pull.rebase`, so a diverged branch is refused instead of
@@ -1464,6 +1501,12 @@ impl GitoxideAdapter {
         }
     }
 
+    /// The short name of the branch HEAD is on. A detached HEAD has none to push.
+    fn current_branch(&self) -> Result<String, DomainError> {
+        run_git_stdout(&self.repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .map_err(|_| DomainError::Unknown(DETACHED_HEAD_CANNOT_BE_PUSHED.to_string()))
+    }
+
     /// `Ok` when `git rev-parse HEAD` is `expected`; otherwise [`DomainError::HeadMoved`],
     /// with an empty `actual` when HEAD is unborn. A history rewrite checks this first, so an
     /// operation prepared against one HEAD never runs against another.
@@ -1482,5 +1525,33 @@ impl GitoxideAdapter {
                 actual,
             })
         }
+    }
+}
+
+/// Major and minor from `git version`: "git version 2.47.1.windows.2",
+/// "git version 2.39.3 (Apple Git-146)". `None` when the text is not in that form.
+fn parse_git_version(text: &str) -> Option<(u32, u32)> {
+    let number = text.trim().strip_prefix("git version ")?.split_whitespace().next()?;
+    let mut parts = number.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// `--force-if-includes` arrived in git 2.30 and reads the branch's reflog. Without either,
+/// or when the version could not be read, the lease guards alone.
+fn force_guard(version: Option<(u32, u32)>, has_reflog: bool) -> ForceGuard {
+    match version {
+        Some(version) if version >= (2, 30) && has_reflog => ForceGuard::LeaseAndIncludes,
+        _ => ForceGuard::LeaseOnly,
+    }
+}
+
+/// A remote name that git cannot read as an option.
+fn require_remote_name(remote: &str) -> Result<(), DomainError> {
+    if remote.is_empty() || remote.starts_with('-') || remote.contains(['\0', '\n', '\r']) {
+        Err(DomainError::Unknown(format!("invalid remote: {remote:?}")))
+    } else {
+        Ok(())
     }
 }

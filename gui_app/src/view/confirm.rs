@@ -125,7 +125,37 @@ pub(super) fn history_prompt<'a>(
             tokens,
             reading,
         ),
+        HistoryPrompt::ForcePush { upstream, behind, .. } => force_push_dialog(upstream, *behind, tokens, reading),
     }
+}
+
+/// The force push confirm's title and body: what is replaced, and what the lease guards.
+pub(crate) fn force_push_text(upstream: &str, behind: usize) -> (String, String) {
+    let commits = if behind == 1 { "1 commit".to_string() } else { format!("{behind} commits") };
+    (
+        format!("Force push to {upstream}?"),
+        format!(
+            "Your branch replaces it. The {commits} on {upstream} that you have not pulled will no longer be on the branch. Git refuses if {upstream} moved since your last fetch."
+        ),
+    )
+}
+
+fn force_push_dialog<'a>(upstream: &str, behind: usize, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let (title, body) = force_push_text(upstream, behind);
+    let card = column![
+        heading(title, tokens, reading),
+        text(body)
+            .font(reading.font)
+            .size(reading.size)
+            .style(move |_| text::Style { color: Some(tokens.text_secondary) }),
+        row![
+            accent_button("Force push", Message::ConfirmForcePush, true, tokens, reading),
+            command_button("Cancel", Message::CancelHistory, true, tokens, reading),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ];
+    modal(card, tokens)
 }
 
 pub(crate) const UNDO_PUSHED_WARNING: &str =
@@ -488,5 +518,22 @@ mod merge_preview_tests {
         assert_eq!(names.len(), 9);
         assert_eq!(names[8], "… and 2 more");
         assert!(conflicts);
+    }
+}
+
+#[cfg(test)]
+mod force_push_tests {
+    use super::force_push_text;
+
+    #[test]
+    fn the_force_push_confirm_names_what_will_be_overwritten() {
+        assert_eq!(
+            force_push_text("origin/main", 2),
+            (
+                "Force push to origin/main?".to_string(),
+                "Your branch replaces it. The 2 commits on origin/main that you have not pulled will no longer be on the branch. Git refuses if origin/main moved since your last fetch.".to_string(),
+            )
+        );
+        assert!(force_push_text("origin/main", 1).1.contains("The 1 commit on origin/main that you have not pulled"));
     }
 }
