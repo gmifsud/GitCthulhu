@@ -1862,6 +1862,7 @@ impl GitApp {
             Message::ChangeFilterChanged(text) => {
                 if let Some(session) = self.active_session_mut() {
                     session.change_filter.text = text;
+                    session.drop_hidden_marks();
                 }
                 Task::none()
             }
@@ -1870,6 +1871,7 @@ impl GitApp {
                     if !session.change_filter.chips.remove(&chip) {
                         session.change_filter.chips.insert(chip);
                     }
+                    session.drop_hidden_marks();
                 }
                 Task::none()
             }
@@ -7170,6 +7172,54 @@ mod tests {
         assert!(matches!(app.session_mut().selection, Some(Selection::Branch { .. })));
     }
 
+    fn filter_status() -> core_domain::RepoStatus {
+        core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["a.rs".to_string(), "b.md".to_string(), "c.rs".to_string()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        }
+    }
+
+    #[test]
+    fn select_all_marks_only_the_files_the_filter_shows() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(filter_status());
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        let _ = app.update(Message::SelectAllFiles);
+        let paths: Vec<_> = app.session().marked_files.iter().map(|mark| mark.path.as_str()).collect();
+        assert_eq!(paths, ["a.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn narrowing_the_filter_drops_the_marks_and_anchor_it_hides() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(filter_status());
+        for path in ["a.rs", "b.md"] {
+            let _ = app.update(Message::ToggleFileMark { path: path.into(), place: FileDisposition::Unstaged });
+        }
+        app.session_mut().selection_anchor = Some(MarkedFile { path: "b.md".into(), place: FileDisposition::Unstaged });
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        let paths: Vec<_> = app.session().marked_files.iter().map(|mark| mark.path.as_str()).collect();
+        assert_eq!(paths, ["a.rs"]);
+        assert_eq!(app.session().selection_anchor, None);
+
+        // The multi-select menu lists only what is still marked.
+        let _ = app.update(Message::ToggleFileMark { path: "c.rs".into(), place: FileDisposition::Unstaged });
+        let _ = app.update(Message::ChangeContextMenu { path: "a.rs".into(), place: FileDisposition::Unstaged });
+        match app.context_menu.as_ref().map(|menu| &menu.target) {
+            Some(crate::context_menu::ContextTarget::Changes { files }) => {
+                let paths: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
+                assert_eq!(paths, ["a.rs", "c.rs"]);
+            }
+            other => panic!("expected the multi-select menu, got {other:?}"),
+        }
+    }
+
     #[test]
     fn stage_marked_skips_marks_the_filter_hides() {
         let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
@@ -7184,10 +7234,11 @@ mod tests {
             conflicted_files: vec![],
         });
         let _ = app.update(Message::SelectAllFiles);
-        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        // Set directly: the update path already drops hidden marks, this is the backstop.
+        app.session_mut().change_filter.text = "rs".to_string();
         assert_eq!(crate::changes::filtered_marked_paths(app.session(), true), vec!["a.rs".to_string()]);
 
-        let _ = app.update(Message::ChangeFilterChanged(String::new()));
+        app.session_mut().change_filter.text.clear();
         assert_eq!(
             crate::changes::filtered_marked_paths(app.session(), true),
             vec!["a.rs".to_string(), "b.md".to_string()]

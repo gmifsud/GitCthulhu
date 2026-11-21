@@ -410,6 +410,7 @@ impl WorktreeSession {
         self.selection = Some(visible);
     }
 
+    /// Every changed file the filter shows.
     pub(crate) fn all_changed_files(&self) -> Vec<MarkedFile> {
         let Some(status) = &self.state.current_status else {
             return Vec::new();
@@ -420,7 +421,7 @@ impl WorktreeSession {
             (&status.unstaged_files, FileDisposition::Unstaged),
             (&status.untracked_files, FileDisposition::Untracked),
         ] {
-            for path in files {
+            for path in files.iter().filter(|path| self.shows(place, path)) {
                 marks.push(MarkedFile {
                     path: path.clone(),
                     place,
@@ -428,6 +429,27 @@ impl WorktreeSession {
             }
         }
         marks
+    }
+
+    /// Whether the changes filter shows `path` in `place`.
+    fn shows(&self, place: FileDisposition, path: &str) -> bool {
+        let Some(status) = self.state.current_status.as_ref() else {
+            return true;
+        };
+        crate::changes::filter_matches(&self.change_filter, path, place, status.kinds.of(place, path))
+    }
+
+    /// Drops the marks, and the Shift anchor, that the filter now hides, so no action on the
+    /// selection can reach a file the user cannot see.
+    pub(crate) fn drop_hidden_marks(&mut self) {
+        if !self.change_filter.is_active() {
+            return;
+        }
+        let marks = std::mem::take(&mut self.marked_files);
+        self.marked_files = marks.into_iter().filter(|mark| self.shows(mark.place, &mark.path)).collect();
+        if self.selection_anchor.as_ref().is_some_and(|anchor| !self.shows(anchor.place, &anchor.path)) {
+            self.selection_anchor = None;
+        }
     }
 
     pub(crate) fn retain_marks(&mut self) {
