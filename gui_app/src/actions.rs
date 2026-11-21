@@ -5,6 +5,7 @@
 //! right now and, when it cannot, why in a sentence the user can read.
 
 use crate::tracking::{BUSY_REASON, LOADING_REASON, NO_UPSTREAM_REASON};
+use core_domain::RepoOperation;
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
 
@@ -260,6 +261,17 @@ pub(crate) fn works_while_typing(id: ActionId) -> bool {
 /// everything the merge brought in as one change.
 pub(crate) const MERGE_HEAD_REASON: &str = "HEAD is a merge commit: undo it from the terminal";
 
+/// Why undo waits while `operation` is in progress: moving the branch under it would corrupt
+/// what `--continue` does. The adapter refuses with the same words.
+pub(crate) fn finish_operation_reason(operation: RepoOperation) -> &'static str {
+    match operation {
+        RepoOperation::Merge => "Finish or abort the merge first.",
+        RepoOperation::Rebase => "Finish or abort the rebase first.",
+        RepoOperation::CherryPick => "Finish or abort the cherry-pick first.",
+        RepoOperation::Revert => "Finish or abort the revert first.",
+    }
+}
+
 /// What the window knows that decides whether an action can run now.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ActionContext {
@@ -284,6 +296,8 @@ pub(crate) struct ActionContext {
     pub amending: bool,
     /// The HEAD commit has more than one parent (false while it is not loaded).
     pub head_is_merge: bool,
+    /// The merge, rebase, cherry-pick or revert in progress, if any.
+    pub operation: Option<RepoOperation>,
 }
 
 /// `Ok` when `id` can run, else the reason in words. The reasons for Fetch, Pull and Push
@@ -312,6 +326,9 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
         if cx.loading {
             return Err(LOADING_REASON);
         }
+    }
+    if let (ActionId::UndoLastCommit, Some(operation)) = (id, cx.operation) {
+        return Err(finish_operation_reason(operation));
     }
     match id {
         ActionId::Pull | ActionId::Push if !cx.has_upstream => Err(NO_UPSTREAM_REASON),
@@ -477,6 +494,34 @@ mod tests {
             Err("HEAD is a merge commit: undo it from the terminal")
         );
         assert_eq!(availability(ActionId::AmendLastCommit, &merge), Ok(()));
+    }
+
+    #[test]
+    fn undo_waits_for_an_operation_in_progress() {
+        let merging = ActionContext {
+            has_session: true,
+            head_born: true,
+            operation: Some(RepoOperation::Merge),
+            ..Default::default()
+        };
+        assert_eq!(
+            availability(ActionId::UndoLastCommit, &merging),
+            Err("Finish or abort the merge first.")
+        );
+        let rebasing = ActionContext {
+            operation: Some(RepoOperation::Rebase),
+            ..merging
+        };
+        assert_eq!(
+            availability(ActionId::UndoLastCommit, &rebasing),
+            Err("Finish or abort the rebase first.")
+        );
+        for operation in [RepoOperation::Merge, RepoOperation::Rebase, RepoOperation::CherryPick, RepoOperation::Revert] {
+            assert_eq!(
+                finish_operation_reason(operation),
+                format!("Finish or abort the {} first.", operation.noun())
+            );
+        }
     }
 
     #[test]

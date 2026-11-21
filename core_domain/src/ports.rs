@@ -96,10 +96,14 @@ pub trait GitRepository {
         let _ = (message, expected_head);
         Err(DomainError::Unknown("this repository cannot amend a commit".to_string()))
     }
-    /// `git reset --soft HEAD~1`: take the HEAD commit off the branch and keep its changes
-    /// staged. Returns the undone commit's full message. Refused with
-    /// [`DomainError::HeadMoved`], changing nothing, when HEAD is not `expected_head`, and
-    /// refused for a commit with no parent.
+    /// Take the HEAD commit off the branch and keep its changes staged:
+    /// `git update-ref HEAD <parent> <expected_head>`, a compare-and-swap that moves the branch
+    /// only if HEAD is still `expected_head`, and leaves the index and the worktree as they are.
+    /// Returns the undone commit's full message. Changes nothing and refuses:
+    /// - with [`DomainError::HeadMoved`] when HEAD is not `expected_head`;
+    /// - while a merge, rebase, cherry-pick or revert is in progress
+    ///   ("Finish or abort the <noun> first.") or the index has unmerged entries;
+    /// - for a commit with no parent, and for a merge commit.
     fn undo_commit(&self, expected_head: &str) -> Result<String, DomainError> {
         let _ = expected_head;
         Err(DomainError::Unknown("this repository cannot undo a commit".to_string()))

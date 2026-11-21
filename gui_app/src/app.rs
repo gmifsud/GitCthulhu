@@ -2139,15 +2139,20 @@ impl GitApp {
                     Ok(()) => {
                         if matches!(edit, WorktreeEdit::Commit(_) | WorktreeEdit::Amend { .. }) {
                             session.clear_commit_message();
-                            session.amending = false;
+                            session.amending = None;
                         }
                         Task::done(Message::RefreshSession(path))
                     }
                     Err(error) => {
+                        // The draft was written for a HEAD that is gone: untick Amend so the
+                        // next click cannot amend the new HEAD with it. The text stays.
+                        let head_moved = matches!(error, DomainError::HeadMoved { .. });
+                        if head_moved && matches!(edit, WorktreeEdit::Amend { .. }) {
+                            session.amending = None;
+                        }
                         self.error = Some(error_message(&error));
-                        // Show the HEAD that is there now, keeping the error on screen. The
-                        // draft stays for another try.
-                        if matches!(error, DomainError::HeadMoved { .. }) {
+                        // Show the HEAD that is there now, keeping the error on screen.
+                        if head_moved {
                             self.begin_refresh_for(&path, false)
                         } else {
                             Task::none()
@@ -3405,7 +3410,7 @@ impl GitApp {
                         let (summary, body) = crate::session::split_summary_and_body(&message);
                         session.commit_message = summary;
                         session.commit_body = text_editor::Content::with_text(&body);
-                        session.amending = false;
+                        session.amending = None;
                         self.begin_refresh_for(&path, true)
                     }
                     Err(error) => {
@@ -5433,14 +5438,13 @@ impl GitApp {
         let Some(session) = self.active_session_mut() else {
             return Task::none();
         };
-        if session.amending {
-            session.amending = false;
+        if session.amending.take().is_some() {
             return Task::none();
         }
         let Some(head) = session.seen_head().map(str::to_string) else {
             return Task::none();
         };
-        session.amending = true;
+        session.amending = Some(head.clone());
         let draft_is_empty =
             session.commit_message.trim().is_empty() && session.commit_body.text().trim().is_empty();
         if !draft_is_empty {
@@ -5457,7 +5461,7 @@ impl GitApp {
     }
 
     /// The full HEAD message arrived. It replaces the quick fill only while that fill is
-    /// untouched, Amend is still ticked, and HEAD is still `head`. A failed read keeps the
+    /// untouched and Amend is still ticked on `head`. A failed read keeps the
     /// quick fill and says nothing: the summary is there to edit.
     fn fill_amend_draft(&mut self, key: &SessionKey, head: &str, result: Result<String, DomainError>) {
         let Ok(message) = result else {
@@ -5470,7 +5474,7 @@ impl GitApp {
             session.commit_message.clone(),
             session.commit_body.text().trim_end().to_string(),
         ) != listed_amend_draft(session, head);
-        if !session.amending || session.seen_head() != Some(head) || typed {
+        if session.amending.as_deref() != Some(head) || typed {
             return;
         }
         let (summary, body) = crate::session::split_summary_and_body(&message);
@@ -5498,6 +5502,10 @@ impl GitApp {
             return Task::none();
         };
         if session.state.loading || seen.is_empty() {
+            return Task::none();
+        }
+        if let Some(operation) = session.state.current_status.as_ref().and_then(|status| status.operation) {
+            self.error = Some(crate::actions::finish_operation_reason(operation).to_string());
             return Task::none();
         }
         if session.head_is_merge() {
@@ -6177,8 +6185,9 @@ impl GitApp {
             has_marked: !session.marked_files.is_empty(),
             inspecting_other: self.inspected_path().is_some(),
             palette_open: self.palette.is_some(),
-            amending: session.amending,
+            amending: session.amending.is_some(),
             head_is_merge: session.head_is_merge(),
+            operation: status.and_then(|status| status.operation),
             has_changes: status.is_some_and(|status| {
                 !status.staged_files.is_empty() || !status.unstaged_files.is_empty()
             }),
@@ -9619,7 +9628,7 @@ mod tests {
     fn ticking_amend_fills_an_empty_draft_from_the_head_commit() {
         let mut app = app_at_head("Fix\n\nWhy", false);
         let _ = app.update(Message::ToggleAmend);
-        assert!(app.session().amending);
+        assert_eq!(app.session().amending.as_deref(), Some(HEAD));
         assert_eq!(app.session().commit_message, "Fix");
         assert_eq!(app.session().commit_body.text().trim_end(), "Why");
         assert!(matches!(
@@ -9629,11 +9638,11 @@ mod tests {
 
         // A draft already written is the user's: ticking again keeps it.
         let _ = app.update(Message::ToggleAmend);
-        assert!(!app.session().amending);
+        assert_eq!(app.session().amending, None);
         app.session_mut().commit_message = "Mine".into();
         app.session_mut().commit_body = text_editor::Content::new();
         let _ = app.update(Message::ToggleAmend);
-        assert!(app.session().amending);
+        assert_eq!(app.session().amending.as_deref(), Some(HEAD));
         assert_eq!(app.session().commit_message, "Mine");
     }
 
@@ -9737,7 +9746,7 @@ mod tests {
             WorktreeEdit::Amend { message: "Fix".into(), expected_head: HEAD.into() },
             Ok(()),
         ));
-        assert!(!app.session().amending);
+        assert_eq!(app.session().amending, None);
         assert_eq!(app.session().commit_message, "");
         assert!(app.session().commit_body.text().trim().is_empty());
     }
@@ -9799,8 +9808,50 @@ mod tests {
         ));
         assert_eq!(app.error.as_deref(), Some(crate::git_error::HEAD_MOVED));
         assert!(app.session().state.loading, "a reload shows the HEAD that is there now");
-        assert!(app.session().amending, "still amending, so the user can try again");
+        assert_eq!(app.session().amending, None, "unticked: the draft was for a HEAD that is gone");
         assert_eq!(app.session().commit_message, "Fix");
+    }
+
+    #[test]
+    fn an_amend_checks_the_head_its_draft_was_written_for() {
+        use crate::actions::ActionId;
+        let mut app = app_at_head("Fix", false);
+        let _ = app.update(Message::ToggleAmend);
+        // A commit made in the terminal; the refresh shows the new HEAD.
+        let mut moved = staged_nothing_status();
+        moved.head_commit_id = Some("def".into());
+        app.session_mut().state.apply_event(ViewEvent::StatusUpdated(moved));
+        let Message::EditWorktree(edit) = app.message_for(ActionId::Commit) else {
+            panic!("Commit sends an edit");
+        };
+        assert!(
+            matches!(&edit, WorktreeEdit::Amend { expected_head, .. } if expected_head == HEAD),
+            "{edit:?}"
+        );
+        let _ = app.update(Message::EditWorktree(edit.clone()));
+        assert!(app.session().state.loading);
+        let _ = app.update(Message::WorktreeEditFinished(
+            app.active_key(),
+            edit,
+            Err(DomainError::HeadMoved { expected: HEAD.into(), actual: "def".into() }),
+        ));
+        assert_eq!(app.session().amending, None);
+        assert_eq!(app.session().commit_message, "Fix", "the draft stays");
+    }
+
+    #[test]
+    fn undo_waits_while_a_merge_is_in_progress() {
+        use crate::actions::ActionId;
+        let mut app = app_at_head("Fix", false);
+        let mut merging = staged_nothing_status();
+        merging.operation = Some(core_domain::RepoOperation::Merge);
+        app.session_mut().state.apply_event(ViewEvent::StatusUpdated(merging));
+        let _ = app.update(Message::RunAction(ActionId::UndoLastCommit));
+        assert_eq!(app.error.as_deref(), Some("Finish or abort the merge first."));
+        app.error = None;
+        let _ = app.update(Message::AskUndoCommit);
+        assert_eq!(app.error.as_deref(), Some("Finish or abort the merge first."));
+        assert!(!app.session().state.loading);
     }
 
     #[test]
@@ -9828,7 +9879,7 @@ mod tests {
         let _ = app.update(Message::AskUndoCommit);
         let _ = app.update(Message::ToggleAmend);
         assert!(!app.session().state.loading);
-        assert!(!app.session().amending);
+        assert_eq!(app.session().amending, None);
         assert_eq!(app.history_prompt, None);
 
         let _ = app.update(Message::RunAction(ActionId::UndoLastCommit));

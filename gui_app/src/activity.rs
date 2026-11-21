@@ -255,7 +255,7 @@ pub(crate) fn edit_action(edit: &crate::jobs::WorktreeEdit) -> Action {
 }
 
 pub(crate) fn undo_commit_action(id: &str) -> Action {
-    Action::new("Undo commit", short(id), "git reset --soft HEAD~1")
+    Action::new("Undo commit", short(id), format!("git update-ref HEAD {0}~1 {0}", short(id)))
 }
 
 pub(crate) fn stash_action(action: &crate::jobs::StashAction) -> Action {

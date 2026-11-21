@@ -52,15 +52,12 @@ pub(super) fn command_place(command: RibbonCommand) -> CommandPlace {
 pub(super) fn can_commit(app: &GitApp) -> bool {
     let session = app.session();
     !session.commit_message.trim().is_empty()
-        && if session.amending {
-            session.seen_head().is_some()
-        } else {
-            session
+        && (session.amending.is_some()
+            || session
                 .state
                 .current_status
                 .as_ref()
-                .is_some_and(|status| !status.staged_files.is_empty())
-        }
+                .is_some_and(|status| !status.staged_files.is_empty()))
 }
 
 pub(super) fn can_stash(app: &GitApp) -> bool {

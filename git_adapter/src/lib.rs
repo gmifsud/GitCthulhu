@@ -26,6 +26,11 @@ use worktree::{parse_worktree_porcelain, require_worktree_path};
 /// Why the root commit cannot be undone.
 pub(crate) const FIRST_COMMIT_CANNOT_BE_UNDONE: &str =
     "The first commit can't be undone; there is nothing before it.";
+/// Why a merge commit is not undone: its changes would come back staged as one change.
+pub(crate) const MERGE_COMMIT_CANNOT_BE_UNDONE: &str =
+    "HEAD is a merge commit: undo it from the terminal";
+/// Why undo waits while the index has unmerged entries.
+pub(crate) const RESOLVE_CONFLICTS_FIRST: &str = "Resolve the conflicts first.";
 
 pub(crate) fn unknown(error: impl Display) -> DomainError {
     DomainError::Unknown(error.to_string())
@@ -770,19 +775,35 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["commit", "--amend", "-m", message])
     }
 
-    /// Move the branch back to the first parent, as `git reset --soft HEAD~1` would, but only
-    /// if HEAD is still `expected_head` at the moment it moves (`git update-ref` with the old
-    /// value). The index and the worktree are untouched, so the undone changes stay staged.
+    /// Move the branch back to the parent with `git update-ref HEAD <parent> <expected_head>`:
+    /// a compare-and-swap, so it moves only if HEAD is still `expected_head` at that moment.
+    /// The index and the worktree are untouched, so the undone changes stay staged.
+    /// `update-ref` has none of `reset --soft`'s own checks, so they are made here first.
     fn undo_commit(&self, expected_head: &str) -> Result<String, DomainError> {
-        self.open_repo()?;
+        let repo = self.open_repo()?;
         // Checked up front too, so the usual refusal is clean and nothing is read first.
         self.require_head(expected_head)?;
+        // Moving the branch under a merge or a stopped rebase would corrupt what --continue does.
+        if let Some(operation) = operation_of(repo.state()) {
+            return Err(DomainError::Unknown(format!("Finish or abort the {} first.", operation.noun())));
+        }
+        if !run_git_stdout(&self.repo_path, &["ls-files", "--unmerged"])?.is_empty() {
+            return Err(DomainError::Unknown(RESOLVE_CONFLICTS_FIRST.to_string()));
+        }
         let parent = command::git_output(
             &self.repo_path,
             &["rev-parse", "--verify", "--quiet", &format!("{expected_head}~1")],
         )?;
         if !parent.status.success() {
             return Err(DomainError::Unknown(FIRST_COMMIT_CANNOT_BE_UNDONE.to_string()));
+        }
+        // A soft reset to the first parent would stage everything the merge brought in.
+        let second_parent = command::git_output(
+            &self.repo_path,
+            &["rev-parse", "--verify", "--quiet", &format!("{expected_head}^2")],
+        )?;
+        if second_parent.status.success() {
+            return Err(DomainError::Unknown(MERGE_COMMIT_CANNOT_BE_UNDONE.to_string()));
         }
         let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
         let message = self.commit_message(expected_head)?;

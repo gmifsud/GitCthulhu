@@ -2208,6 +2208,71 @@ fn a_commit_message_round_trips_every_paragraph() {
     assert!(matches!(adapter.commit_message("--all"), Err(DomainError::Unknown(_))));
 }
 
+/// `main` gets "main change" and `topic` "topic change" to a.txt, both on top of "first".
+/// Returns the branch HEAD is on (`main` here), checked out at its tip.
+fn diverged_on_a_txt(dir: &std::path::Path) -> String {
+    commit_file(dir, "a.txt", "one\n", "first");
+    let main = gix::open(dir).expect("open").head_name().unwrap().expect("on a branch").shorten().to_string();
+    git_in(dir, &["checkout", "-b", "topic"]);
+    commit_file(dir, "a.txt", "topic\n", "topic change");
+    git_in(dir, &["checkout", &main]);
+    commit_file(dir, "a.txt", "main\n", "main change");
+    main
+}
+
+#[test]
+fn undo_is_refused_during_a_conflicted_merge_and_with_unmerged_entries() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    diverged_on_a_txt(dir);
+    let head = head_at(dir);
+    // Conflicts, so git exits non-zero and leaves the merge in progress.
+    let merged = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["merge", "topic"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run git merge");
+    assert!(!merged.status.success(), "the merge conflicts");
+    let merge_head = fixture.repo.git_dir().join("MERGE_HEAD");
+    assert!(merge_head.exists());
+    let adapter = fixture.adapter();
+
+    assert_eq!(
+        adapter.undo_commit(&head.to_string()),
+        Err(DomainError::Unknown("Finish or abort the merge first.".to_string()))
+    );
+    assert_eq!(head_at(dir), head, "the branch tip is unchanged");
+    assert!(merge_head.exists(), "the merge is still in progress");
+
+    // Without MERGE_HEAD no operation shows, but the index still has unmerged entries.
+    std::fs::remove_file(&merge_head).expect("remove MERGE_HEAD");
+    assert_eq!(
+        adapter.undo_commit(&head.to_string()),
+        Err(DomainError::Unknown("Resolve the conflicts first.".to_string()))
+    );
+    assert_eq!(head_at(dir), head);
+}
+
+#[test]
+fn undo_of_a_merge_commit_is_refused() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    let main = diverged_on_a_txt(dir);
+    // Take topic's side so the merge commits without a conflict.
+    git_in(dir, &["-c", "commit.gpgsign=false", "merge", "--no-ff", "-X", "theirs", "-m", "Merge topic", "topic"]);
+    let merge = head_at(dir);
+    assert_eq!(fixture.current_branch(), main);
+
+    assert_eq!(
+        fixture.adapter().undo_commit(&merge.to_string()),
+        Err(DomainError::Unknown("HEAD is a merge commit: undo it from the terminal".to_string()))
+    );
+    assert_eq!(head_at(dir), merge);
+}
+
 #[test]
 fn undo_of_the_first_commit_is_refused() {
     let fixture = TestRepo::new();

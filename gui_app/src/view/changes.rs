@@ -140,7 +140,7 @@ fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, 
             reading,
         ),
         // Nothing to amend before the first commit.
-        checkbox("Amend", session.amending)
+        checkbox("Amend", session.amending.is_some())
             .on_toggle_maybe(
                 (session.seen_head().is_some() && !session.state.loading).then_some(|_| Message::ToggleAmend),
             )
@@ -148,7 +148,7 @@ fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, 
             .text_size(reading.size),
         labelled_button(
             Icon::Check,
-            if session.amending { "Amend" } else { "Commit" }.to_string(),
+            if session.amending.is_some() { "Amend" } else { "Commit" }.to_string(),
             commit,
             ready,
             true,

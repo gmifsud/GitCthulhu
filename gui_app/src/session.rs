@@ -146,8 +146,9 @@ pub(crate) struct WorktreeSession {
     /// The commit's summary line. The rest of its message is `commit_body`.
     pub(crate) commit_message: String,
     pub(crate) commit_body: text_editor::Content,
-    /// The Amend box is ticked: committing replaces the HEAD commit instead of adding one.
-    pub(crate) amending: bool,
+    /// The Amend box is ticked, holding the HEAD id it was ticked on: committing replaces that
+    /// commit instead of adding one, and is refused if HEAD is no longer it.
+    pub(crate) amending: Option<String>,
     pub(crate) marked_files: Vec<MarkedFile>,
     /// Folder prefixes collapsed in Tree mode, keyed with their disposition.
     pub(crate) collapsed_dirs: HashSet<(FileDisposition, String)>,
@@ -230,7 +231,7 @@ impl WorktreeSession {
             selection: None,
             commit_message: String::new(),
             commit_body: text_editor::Content::new(),
-            amending: false,
+            amending: None,
             marked_files: Vec::new(),
             collapsed_dirs: HashSet::new(),
             collapsed_sections: HashSet::new(),
@@ -522,13 +523,14 @@ impl WorktreeSession {
     }
 
     /// The commit this tab's summary and body describe: a new commit, or, while Amend is
-    /// ticked, a replacement for the HEAD this tab last read.
+    /// ticked, a replacement for the HEAD the draft was prepared for (the one Amend was
+    /// ticked on), never whatever HEAD has become since.
     pub(crate) fn commit_edit(&self) -> WorktreeEdit {
         let message = full_commit_message(&self.commit_message, &self.commit_body.text());
-        if self.amending {
+        if let Some(head) = &self.amending {
             WorktreeEdit::Amend {
                 message,
-                expected_head: self.seen_head().unwrap_or_default().to_string(),
+                expected_head: head.clone(),
             }
         } else {
             WorktreeEdit::Commit(message)
@@ -588,6 +590,7 @@ pub(crate) fn apply_retention(session: &mut WorktreeSession, mode: WorktreeTabRe
         WorktreeTabRetention::PathOnly => {
             clear_selection(session);
             session.clear_commit_message();
+            session.amending = None;
             session.marked_files.clear();
         }
     }
@@ -778,6 +781,16 @@ mod tests {
             apply_retention(&mut session, mode);
             assert_eq!(session.commit_body.text().trim_end(), "details");
         }
+    }
+
+    #[test]
+    fn path_only_unticks_amend_and_the_others_keep_it() {
+        let mut session = dirty_session();
+        session.amending = Some("abc".into());
+        apply_retention(&mut session, WorktreeTabRetention::Partial);
+        assert_eq!(session.amending.as_deref(), Some("abc"));
+        apply_retention(&mut session, WorktreeTabRetention::PathOnly);
+        assert_eq!(session.amending, None);
     }
 
     #[test]
