@@ -3619,10 +3619,14 @@ impl GitApp {
                 session.state.loading = false;
                 match result {
                     Ok(message) => {
-                        // The undone commit's message becomes the draft, ready to commit again.
-                        let (summary, body) = crate::session::split_summary_and_body(&message);
-                        session.commit_message = summary;
-                        session.commit_body = text_editor::Content::with_text(&body);
+                        // The undone commit's message becomes the draft, ready to commit again,
+                        // unless the user has typed one (Amend's prefill rule). The activity
+                        // entry names the undone subject, so keeping the draft loses nothing.
+                        if session.draft_is_empty() {
+                            let (summary, body) = crate::session::split_summary_and_body(&message);
+                            session.commit_message = summary;
+                            session.commit_body = text_editor::Content::with_text(&body);
+                        }
                         session.amending = None;
                         self.begin_refresh_for(&path, true)
                     }
@@ -5863,9 +5867,7 @@ impl GitApp {
             return Task::none();
         };
         session.amending = Some(head.clone());
-        let draft_is_empty =
-            session.commit_message.trim().is_empty() && session.commit_body.text().trim().is_empty();
-        if !draft_is_empty {
+        if !session.draft_is_empty() {
             return Task::none();
         }
         let (summary, body) = listed_amend_draft(session, &head);
@@ -5999,10 +6001,11 @@ impl GitApp {
         let repo = session.adapter.clone();
         let key = session.key();
         let path = key.path.clone();
+        let (subject, _) = listed_amend_draft(session, &expected_head);
         self.close_prompts();
         self.session_mut().state.loading = true;
         self.error = None;
-        self.begin_activity(&path, crate::activity::undo_commit_action(&expected_head));
+        self.begin_activity(&path, crate::activity::undo_commit_action(&expected_head, &subject));
         Task::perform(undo_commit_in_background(repo, expected_head), move |result| {
             Message::UndoCommitFinished(key.clone(), result)
         })
@@ -10798,14 +10801,43 @@ mod tests {
     }
 
     #[test]
-    fn an_undone_message_returns_to_the_draft() {
+    fn an_undone_message_returns_to_an_empty_draft() {
         let mut app = app_at_head("Fix", false);
-        app.session_mut().commit_message = "an older draft".into();
         app.session_mut().state.loading = true;
         let _ = app.update(Message::UndoCommitFinished(app.active_key(), Ok("Fix\n\nWhy".into())));
         assert_eq!(app.session().commit_message, "Fix");
         assert_eq!(app.session().commit_body.text().trim_end(), "Why");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn a_typed_draft_survives_an_undo() {
+        let mut app = app_at_head("Fix", false);
+        app.session_mut().commit_message = "an older draft".into();
+        app.session_mut().commit_body = text_editor::Content::with_text("its body");
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::UndoCommitFinished(app.active_key(), Ok("Fix\n\nWhy".into())));
+        assert_eq!(app.session().commit_message, "an older draft");
+        assert_eq!(app.session().commit_body.text().trim_end(), "its body");
+
+        // A body alone is a draft too.
+        let mut app = app_at_head("Fix", false);
+        app.session_mut().commit_body = text_editor::Content::with_text("only a body");
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::UndoCommitFinished(app.active_key(), Ok("Fix\n\nWhy".into())));
+        assert_eq!(app.session().commit_message, "");
+        assert_eq!(app.session().commit_body.text().trim_end(), "only a body");
+    }
+
+    #[test]
+    fn the_undo_entry_names_the_undone_subject() {
+        let mut app = app_at_head("Fix the parser\n\nWhy", false);
+        let _ = app.update(Message::ContextMenuAction(
+            crate::context_menu::ContextActionKind::UndoCommit { id: HEAD.into() },
+        ));
+        let record = &app.activity.running().expect("logged").record;
+        assert_eq!(record.title, "Undo commit");
+        assert!(record.detail.ends_with("Fix the parser"), "{}", record.detail);
     }
 
     #[test]

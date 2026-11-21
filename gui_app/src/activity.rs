@@ -291,8 +291,15 @@ pub(crate) fn record_force_guard(record: &mut ActivityRecord, guard: core_domain
     record.detail = format!("{} ({words})", record.detail);
 }
 
-pub(crate) fn undo_commit_action(id: &str) -> Action {
-    Action::new("Undo commit", short(id), format!("git update-ref HEAD {0}~1 {0}", short(id)))
+/// The entry names the undone commit's subject (when the history has it loaded), so the message
+/// is on record even when a typed draft keeps it out of the commit box.
+pub(crate) fn undo_commit_action(id: &str, subject: &str) -> Action {
+    let detail = if subject.trim().is_empty() {
+        short(id).to_string()
+    } else {
+        format!("{} {}", short(id), subject.trim())
+    };
+    Action::new("Undo commit", detail, format!("git update-ref HEAD {0}~1 {0}", short(id)))
 }
 
 pub(crate) fn stash_action(action: &crate::jobs::StashAction) -> Action {

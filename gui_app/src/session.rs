@@ -564,6 +564,12 @@ impl WorktreeSession {
         }
     }
 
+    /// Neither the summary nor the body holds any text: a prefill (Amend's, Undo's) may fill
+    /// it without losing anything the user typed.
+    pub(crate) fn draft_is_empty(&self) -> bool {
+        self.commit_message.trim().is_empty() && self.commit_body.text().trim().is_empty()
+    }
+
     /// The HEAD commit as this tab last read it; `None` before the first commit or the first load.
     pub(crate) fn seen_head(&self) -> Option<&str> {
         self.state.current_status.as_ref()?.head_commit_id.as_deref()
