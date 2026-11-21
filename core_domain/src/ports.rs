@@ -50,8 +50,9 @@ pub trait GitRepository {
     fn unpushed_commits(&self) -> Result<Vec<String>, DomainError> {
         Err(DomainError::Unknown("this repository cannot list unpushed commits".to_string()))
     }
-    /// Added and removed lines for each staged, unstaged and untracked file.
-    fn line_counts(&self) -> Result<LineCounts, DomainError> {
+    /// Added and removed lines for each staged, unstaged and untracked file. `untracked` is the
+    /// untracked list the caller already read from `status`, so the worktree is not walked again.
+    fn line_counts(&self, _untracked: &[String]) -> Result<LineCounts, DomainError> {
         Err(DomainError::Unknown("this repository cannot count changed lines".to_string()))
     }
     /// `git worktree list --porcelain`. The first row is the main worktree; prunable rows are omitted.

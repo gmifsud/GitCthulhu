@@ -2383,7 +2383,8 @@ fn line_counts_cover_staged_unstaged_and_untracked() {
     std::fs::write(fixture.workdir().join("blob.bin"), b"ab\0cd").expect("write binary file");
     std::fs::write(fixture.workdir().join("empty.txt"), b"").expect("write empty file");
 
-    let counts = fixture.adapter().line_counts().expect("line counts");
+    let untracked = fixture.adapter().status().expect("status").untracked_files;
+    let counts = fixture.adapter().line_counts(&untracked).expect("line counts");
 
     assert_eq!(counts.staged["a.txt"], Some((2, 0)));
     assert_eq!(counts.unstaged["b.txt"], Some((1, 0)));
@@ -2399,5 +2400,5 @@ fn line_counts_of_a_repository_with_no_changes_are_empty() {
     fixture.commit("initial", &[("a.txt", "a\n")], 0);
     fixture.stage_and_write(&[("a.txt", "a\n")]);
 
-    assert_eq!(fixture.adapter().line_counts().expect("line counts"), core_domain::LineCounts::default());
+    assert_eq!(fixture.adapter().line_counts(&[]).expect("line counts"), core_domain::LineCounts::default());
 }

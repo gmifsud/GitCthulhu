@@ -53,8 +53,11 @@ pub(crate) fn load_repository(repo: &dyn GitRepository) -> Vec<ViewEvent> {
 
 /// [`load_repository`] with the newest `limit` commits.
 pub(crate) fn load_repository_up_to(repo: &dyn GitRepository, limit: usize) -> Vec<ViewEvent> {
+    let status = repo.status();
+    // The status already read names the untracked files; line counts reuse it.
+    let untracked = status.as_ref().map(|status| status.untracked_files.clone()).unwrap_or_default();
     vec![
-        match repo.status() {
+        match status {
             Ok(status) => ViewEvent::StatusUpdated(status),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
@@ -78,7 +81,7 @@ pub(crate) fn load_repository_up_to(repo: &dyn GitRepository, limit: usize) -> V
             Ok(ids) => ViewEvent::UnpushedUpdated(ids),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
-        match repo.line_counts() {
+        match repo.line_counts(&untracked) {
             Ok(counts) => ViewEvent::LineCountsUpdated(counts),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },

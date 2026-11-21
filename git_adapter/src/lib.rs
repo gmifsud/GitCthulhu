@@ -974,14 +974,13 @@ impl GitRepository for GitoxideAdapter {
         Ok(text.lines().map(str::to_string).collect())
     }
 
-    fn line_counts(&self) -> Result<LineCounts, DomainError> {
+    fn line_counts(&self, untracked: &[String]) -> Result<LineCounts, DomainError> {
         let repo = self.open_repo()?;
         let workdir = repo.work_dir().ok_or_else(|| unknown("a bare repository has no working tree"))?;
-        let untracked = self.status()?.untracked_files;
         Ok(LineCounts {
             staged: status::diff_line_counts(&self.repo_path, true)?,
             unstaged: status::diff_line_counts(&self.repo_path, false)?,
-            untracked: status::untracked_line_counts(workdir, &untracked),
+            untracked: status::untracked_line_counts(workdir, untracked),
         })
     }
 

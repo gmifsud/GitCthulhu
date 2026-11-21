@@ -153,7 +153,7 @@ impl GitRepository for FakeGitRepository {
         self.unpushed_result.clone()
     }
 
-    fn line_counts(&self) -> Result<LineCounts, DomainError> {
+    fn line_counts(&self, _untracked: &[String]) -> Result<LineCounts, DomainError> {
         self.line_counts_result.clone()
     }
 
