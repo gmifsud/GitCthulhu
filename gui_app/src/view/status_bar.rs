@@ -1,4 +1,5 @@
 use crate::app::{GitApp, Message};
+use crate::git_error::present;
 use crate::theme::DesignTokens;
 use core_domain::RepoStatus;
 use iced::widget::button::Status;
@@ -85,11 +86,11 @@ fn error_cluster<'a>(
     tokens: DesignTokens,
     reading: Reading,
 ) -> Element<'a, Message> {
-    let summary = error_summary(error);
+    let report = present(error);
     let body = if expanded {
         error.to_string()
     } else {
-        summary
+        format!("{} · {}", report.kind.label(), report.summary)
     };
     let wrapping = if expanded {
         Wrapping::Word
@@ -189,7 +190,7 @@ fn activity_status<'a>(app: &'a GitApp, quiet: f32, tokens: DesignTokens, readin
                     format!("{what} · done in {}", crate::activity::duration_label(record.duration_ms)),
                 ),
                 core_domain::ActivityOutcome::Failed(message) => {
-                    (Icon::Close, tokens.removed, format!("{what} · failed: {}", error_summary(message)))
+                    (Icon::Close, tokens.removed, format!("{what} · failed: {}", present(message).summary))
                 }
                 core_domain::ActivityOutcome::Stopped => (Icon::Stop, tokens.text_muted, format!("{what} · stopped")),
             }
@@ -229,16 +230,6 @@ fn activity_status<'a>(app: &'a GitApp, quiet: f32, tokens: DesignTokens, readin
         }
     })
     .into()
-}
-
-/// First line of a multi-line git error, trimmed for the status strip.
-pub(crate) fn error_summary(error: &str) -> String {
-    error
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or(error)
-        .trim()
-        .to_string()
 }
 
 fn loading_dot(loading: bool, tokens: DesignTokens) -> Element<'static, Message> {
@@ -346,14 +337,6 @@ mod tests {
                 conflicted_files: vec![],
             })),
             "origin/dev ↑1"
-        );
-    }
-
-    #[test]
-    fn error_summary_takes_the_first_non_blank_line() {
-        assert_eq!(
-            error_summary("fatal: refusing to merge unrelated histories\nhint: …"),
-            "fatal: refusing to merge unrelated histories"
         );
     }
 }

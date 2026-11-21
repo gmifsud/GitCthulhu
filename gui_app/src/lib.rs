@@ -10,6 +10,7 @@ mod clone_source;
 mod compare;
 mod context_menu;
 mod history_index;
+mod git_error;
 mod icons;
 mod dates;
 #[cfg(feature = "design-export")]
