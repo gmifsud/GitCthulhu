@@ -885,6 +885,23 @@ impl GitRepository for GitoxideAdapter {
         stash::parse_stash_list(&text)
     }
 
+    fn unpushed_commits(&self) -> Result<Vec<String>, DomainError> {
+        self.open_repo()?;
+        if run_git_stdout(&self.repo_path, &["remote"])?.is_empty() {
+            return Ok(vec![]);
+        }
+        // An unborn HEAD has no commits to be unpushed.
+        let head = command::git_output(&self.repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])?;
+        if !head.status.success() {
+            return Ok(vec![]);
+        }
+        let text = run_git_stdout(
+            &self.repo_path,
+            &["rev-list", "--max-count=1000", "HEAD", "--not", "--remotes"],
+        )?;
+        Ok(text.lines().map(str::to_string).collect())
+    }
+
     fn stash_push(&self, message: &str, include_untracked: bool) -> Result<(), DomainError> {
         self.stash(message, &[], include_untracked)
     }

@@ -45,6 +45,11 @@ pub trait GitRepository {
     fn tags(&self) -> Result<Vec<Tag>, DomainError>;
     /// `git stash list`, in the order git prints it. `stash@{0}` is the newest.
     fn stashes(&self) -> Result<Vec<Stash>, DomainError>;
+    /// Ids of commits reachable from HEAD that no remote-tracking branch contains, newest first,
+    /// at most 1000. Empty when there are no remotes or HEAD is unborn.
+    fn unpushed_commits(&self) -> Result<Vec<String>, DomainError> {
+        Err(DomainError::Unknown("this repository cannot list unpushed commits".to_string()))
+    }
     /// `git worktree list --porcelain`. The first row is the main worktree; prunable rows are omitted.
     fn worktrees(&self) -> Result<Vec<Worktree>, DomainError>;
     /// `git worktree add`. With `create_branch`, makes `branch` (`-b`); `start_point` is the tip

@@ -71,6 +71,10 @@ pub(crate) fn load_repository_up_to(repo: &dyn GitRepository, limit: usize) -> V
             Ok(tags) => ViewEvent::TagsUpdated(tags),
             Err(error) => ViewEvent::ErrorOccurred(error),
         },
+        match repo.unpushed_commits() {
+            Ok(ids) => ViewEvent::UnpushedUpdated(ids),
+            Err(error) => ViewEvent::ErrorOccurred(error),
+        },
     ]
 }
 
@@ -1252,7 +1256,7 @@ mod tests {
     #[test]
     fn load_repository_reports_status_log_and_branches_in_order() {
         let events = load_repository(&populated_repo());
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 6);
         assert!(matches!(&events[0], ViewEvent::StatusUpdated(_)));
         assert!(
             matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2 && commits[0].id == "aaaaaaa1")
@@ -1262,6 +1266,7 @@ mod tests {
         );
         assert!(matches!(&events[3], ViewEvent::StashesUpdated(stashes) if stashes.is_empty()));
         assert!(matches!(&events[4], ViewEvent::TagsUpdated(tags) if tags.is_empty()));
+        assert!(matches!(&events[5], ViewEvent::UnpushedUpdated(ids) if ids.is_empty()));
     }
 
     #[test]
@@ -1287,6 +1292,7 @@ mod tests {
             branches_result: Err(DomainError::RepositoryNotFound),
             stashes_result: Err(DomainError::RepositoryNotFound),
             tags_result: Err(DomainError::RepositoryNotFound),
+            unpushed_result: Err(DomainError::RepositoryNotFound),
             ..FakeGitRepository::ok()
         };
         let events = load_repository(&repo);
@@ -1301,7 +1307,7 @@ mod tests {
         let events = iced::futures::executor::block_on(load_repository_in_background(Arc::new(
             populated_repo(),
         ), COMMIT_PAGE_SIZE));
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 6);
         assert!(matches!(&events[1], ViewEvent::LogUpdated(commits) if commits.len() == 2));
         assert!(matches!(&events[2], ViewEvent::BranchesUpdated(branches) if branches.len() == 2));
         assert!(matches!(&events[3], ViewEvent::StashesUpdated(stashes) if stashes.is_empty()));

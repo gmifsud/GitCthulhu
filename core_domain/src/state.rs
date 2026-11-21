@@ -8,6 +8,7 @@ pub enum ViewEvent {
     BranchesUpdated(Vec<Branch>),
     StashesUpdated(Vec<Stash>),
     TagsUpdated(Vec<Tag>),
+    UnpushedUpdated(Vec<String>),
     SettingsUpdated(AppSettings),
     ErrorOccurred(DomainError),
 }
@@ -20,6 +21,8 @@ pub struct AppState {
     pub branches: Vec<Branch>,
     pub stashes: Vec<Stash>,
     pub tags: Vec<Tag>,
+    /// Ids of commits on no remote yet (see `GitRepository::unpushed_commits`).
+    pub unpushed: std::collections::HashSet<String>,
     pub loading: bool,
     pub settings: AppSettings,
 }
@@ -33,6 +36,7 @@ impl AppState {
             branches: vec![],
             stashes: vec![],
             tags: vec![],
+            unpushed: Default::default(),
             loading: false,
             settings: AppSettings::default(),
         }
@@ -61,6 +65,10 @@ impl AppState {
             }
             ViewEvent::TagsUpdated(tags) => {
                 self.tags = tags;
+                self.loading = false;
+            }
+            ViewEvent::UnpushedUpdated(ids) => {
+                self.unpushed = ids.into_iter().collect();
                 self.loading = false;
             }
             ViewEvent::SettingsUpdated(settings) => {

@@ -49,6 +49,8 @@ pub(crate) struct IndexRow {
     pub(crate) author: String,
     pub(crate) timestamp: i64,
     pub(crate) merge: bool,
+    /// On no remote yet: drawn with an up arrow before the short hash.
+    pub(crate) unpushed: bool,
     pub(crate) graph: GraphRow,
     /// Worktree colours on this row's dot and lines.
     pub(crate) inks: RowInks,
@@ -136,6 +138,7 @@ mod tests {
             author: String::new(),
             timestamp: 0,
             merge: false,
+            unpushed: false,
             graph: GraphRow { lane: 0, incoming: vec![], passing: vec![], outgoing: vec![] },
             inks: RowInks::default(),
             pills: vec![],

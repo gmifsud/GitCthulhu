@@ -18,6 +18,7 @@ pub struct FakeGitRepository {
     pub branches_result: Result<Vec<Branch>, DomainError>,
     pub stashes_result: Result<Vec<Stash>, DomainError>,
     pub tags_result: Result<Vec<Tag>, DomainError>,
+    pub unpushed_result: Result<Vec<String>, DomainError>,
     pub worktrees_result: Result<Vec<Worktree>, DomainError>,
     pub add_worktree_result: Result<(), DomainError>,
     pub remove_worktree_result: Result<(), DomainError>,
@@ -71,6 +72,7 @@ impl FakeGitRepository {
             branches_result: Ok(vec![]),
             stashes_result: Ok(vec![]),
             tags_result: Ok(vec![]),
+            unpushed_result: Ok(vec![]),
             worktrees_result: Ok(vec![]),
             add_worktree_result: Ok(()),
             remove_worktree_result: Ok(()),
@@ -135,6 +137,10 @@ impl GitRepository for FakeGitRepository {
 
     fn tags(&self) -> Result<Vec<Tag>, DomainError> {
         self.tags_result.clone()
+    }
+
+    fn unpushed_commits(&self) -> Result<Vec<String>, DomainError> {
+        self.unpushed_result.clone()
     }
 
     fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {

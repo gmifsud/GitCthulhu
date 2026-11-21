@@ -158,6 +158,7 @@ pub(super) fn history_table<'a>(
             "",
             "",
             false,
+            false,
             Length::Fixed(ROW_HEIGHT),
             columns,
             tokens,
@@ -199,6 +200,7 @@ pub(super) fn history_table<'a>(
             &row.author,
             &age,
             short_hash(&row.commit_id),
+            row.unpushed,
             row.merge,
             Length::Fixed(row.height),
             columns,
@@ -430,6 +432,7 @@ fn build_index(
             author: commit.author.clone(),
             timestamp: commit.timestamp,
             merge: commit.parent_ids.len() > 1,
+            unpushed: session.state.unpushed.contains(&commit.id),
             graph,
             inks: RowInks::default(),
             pills,
@@ -489,6 +492,40 @@ fn plain_cell<'a>(value: &str, width: f32, tokens: DesignTokens, reading: Readin
     .into()
 }
 
+/// The short hash, with an up arrow before it when the commit is on no remote yet. The cell
+/// keeps [`HASH_WIDTH`] either way: the arrow takes room from the hash's own.
+fn hash_cell<'a>(hash: &str, unpushed: bool, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    if !unpushed {
+        return plain_cell(hash, HASH_WIDTH, tokens, reading);
+    }
+    let arrow_width = reading.size;
+    let room = HASH_WIDTH - CELL_PAD * 2.0 - arrow_width;
+    container(
+        row![
+            container(
+                text("\u{2191}")
+                    .font(reading.font)
+                    .size(reading.size)
+                    .wrapping(Wrapping::None)
+                    .style(move |_| text::Style { color: Some(tokens.accent_primary) }),
+            )
+            .width(Length::Fixed(arrow_width)),
+            text(crate::text_measure::ellipsize(hash, reading.font, reading.size, room))
+                .font(reading.font)
+                .size(reading.size)
+                .wrapping(Wrapping::None)
+                .style(move |_| text::Style { color: Some(tokens.text_primary) }),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fixed(HASH_WIDTH))
+    .height(Length::Fill)
+    .padding([0.0, CELL_PAD])
+    .align_y(Alignment::Center)
+    .clip(true)
+    .into()
+}
+
 /// The author with Zed's avatar mark before the name.
 fn author_cell<'a>(author: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let mark = (reading.size - 1.0).max(10.0);
@@ -526,6 +563,7 @@ fn history_row<'a>(
     author: &str,
     when: &str,
     hash: &str,
+    unpushed: bool,
     _muted: bool,
     height: Length,
     columns: Columns,
@@ -540,7 +578,7 @@ fn history_row<'a>(
         line = line.push(divider(tokens)).push(author_cell(author, tokens, reading));
     }
     if columns.hash {
-        line = line.push(divider(tokens)).push(plain_cell(hash, HASH_WIDTH, tokens, reading));
+        line = line.push(divider(tokens)).push(hash_cell(hash, unpushed, tokens, reading));
     }
     line.height(height).align_y(Alignment::Center).width(Length::Fill).into()
 }
@@ -965,6 +1003,35 @@ mod measured_rows_tests {
         pill.kind = RefPillKind::Tag;
         pill.name = "v1.2".into();
         assert_eq!(pill_target(&pill, at), ContextTarget::Tag { name: "v1.2".into(), commit_id: at.into() });
+    }
+
+    #[test]
+    fn rows_of_unpushed_commits_are_marked_when_the_index_is_built() {
+        use core_domain::ViewEvent;
+        let mut app = GitApp::with_repo(std::sync::Arc::new(test_support::FakeGitRepository::ok()));
+        let key = app.active_key();
+        let commit = |id: &str, parent: Option<&str>| Commit {
+            id: id.into(),
+            parent_ids: parent.map(str::to_string).into_iter().collect(),
+            author: "a".into(),
+            message: "m".into(),
+            timestamp: 0,
+        };
+        let commits = vec![commit("abc1234", Some("def5678")), commit("def5678", None)];
+        let _ = app.update(Message::RepositoryLoaded(
+            key,
+            vec![
+                ViewEvent::LogUpdated(commits),
+                ViewEvent::UnpushedUpdated(vec!["abc1234".into()]),
+            ],
+        ));
+        let session = app.session();
+        let index_key = index_key(&app, session, 1_200.0, reading());
+
+        let index = build_index(&app, session, index_key, 1_200.0, reading());
+
+        let marked: Vec<(&str, bool)> = index.rows.iter().map(|row| (row.commit_id.as_str(), row.unpushed)).collect();
+        assert_eq!(marked, vec![("abc1234", true), ("def5678", false)]);
     }
 
     #[test]

@@ -2100,3 +2100,29 @@ fn discover_of_a_plain_folder_is_not_found() {
         Err(DomainError::RepositoryNotFound)
     ));
 }
+
+#[test]
+fn unpushed_lists_commits_on_no_remote_newest_first() {
+    let origin = TestRepo::new();
+    origin.commit("first", &[("a.txt", "one\n")], 0);
+    let dest = cloned_from(&origin);
+    commit_file(dest.path(), "a.txt", "two\n", "second");
+    let second = head_at(dest.path());
+    commit_file(dest.path(), "a.txt", "three\n", "third");
+    let third = head_at(dest.path());
+
+    let unpushed = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"))
+        .unpushed_commits()
+        .expect("unpushed commits");
+
+    assert_eq!(unpushed, vec![third.to_string(), second.to_string()]);
+}
+
+#[test]
+fn unpushed_is_empty_without_remotes_and_in_an_unborn_repository() {
+    let fixture = TestRepo::new();
+    assert_eq!(fixture.adapter().unpushed_commits().expect("unborn"), Vec::<String>::new());
+
+    fixture.commit("first", &[("a.txt", "one\n")], 0);
+    assert_eq!(fixture.adapter().unpushed_commits().expect("no remote"), Vec::<String>::new());
+}
