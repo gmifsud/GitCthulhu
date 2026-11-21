@@ -40,6 +40,9 @@ pub(crate) const SEVERAL_REMOTES_REASON: &str =
 /// Plain push on a diverged branch: git would refuse it.
 pub(crate) const DIVERGED_REASON: &str =
     "The branch and its upstream have diverged: use Force push";
+/// A diverged branch the user did not rewrite: the upstream has commits (a colleague's) the
+/// branch never held, so a force push would drop them.
+pub(crate) const DIVERGED_PULL_REASON: &str = "Diverged: pull or rebase first";
 pub(crate) const HAS_UPSTREAM_REASON: &str = "This branch already has an upstream";
 pub(crate) const NOT_DIVERGED_REASON: &str =
     "Nothing to overwrite: the branch has not diverged from its upstream";
@@ -86,10 +89,18 @@ pub(crate) fn publish_remote(remotes: &[String]) -> Option<&str> {
 
 /// The one decision behind the Push button and the palette's Push, Publish and Force push:
 /// which push fits the branch, or why none does. Busy and loading are the caller's.
+/// A diverged branch is force pushed only when the remote was rewritten under you, that is
+/// when you rewrote commits it holds (`rewritten_locally`); otherwise it must pull first.
 pub(crate) fn push_kind(status: Option<&RepoStatus>, remotes: &[String]) -> Result<PushKind, &'static str> {
     let status = status.ok_or(LOADING_REASON)?;
     match &status.tracking {
-        Some(tracking) if tracking.ahead > 0 && tracking.behind > 0 => Ok(PushKind::ForcePush),
+        Some(tracking) if tracking.ahead > 0 && tracking.behind > 0 => {
+            if tracking.rewritten_locally {
+                Ok(PushKind::ForcePush)
+            } else {
+                Err(DIVERGED_PULL_REASON)
+            }
+        }
         Some(_) => Ok(PushKind::Push),
         None if status.head_commit_id.is_none() => Err(NO_COMMITS_REASON),
         None if remotes.is_empty() => Err(NO_REMOTE_REASON),
@@ -102,8 +113,8 @@ pub(crate) fn push_kind(status: Option<&RepoStatus>, remotes: &[String]) -> Resu
 ///
 /// Counts are arrows plus numbers, never colour alone. A missing status reads as loading
 /// ("…"), never as 0; a branch without an upstream says so instead of showing 0. Push turns
-/// into "Publish to <remote>" without an upstream and "Force push ↑n" once the branch has
-/// diverged. `running` is the title of the git action in progress, which every button waits for.
+/// into "Publish to <remote>" without an upstream and "Force push ↑n" once a branch you
+/// rewrote has diverged. `running` is the title of the git action in progress, which every button waits for.
 pub(crate) fn sync_buttons(status: Option<&RepoStatus>, remotes: &[String], running: Option<&str>) -> [SyncButton; 3] {
     let busy = running.is_some();
     let progress = |title: &str, doing: &str, idle: String| match running {
@@ -207,7 +218,13 @@ mod tests {
             upstream: "origin/main".to_string(),
             ahead,
             behind,
+            rewritten_locally: false,
         }
+    }
+
+    /// Diverged because the branch was amended or rebased here after it was pushed.
+    fn rewritten(ahead: usize, behind: usize) -> TrackingStatus {
+        TrackingStatus { rewritten_locally: true, ..tracked(ahead, behind) }
     }
 
     #[test]
@@ -274,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn push_reads_publish_without_an_upstream_and_force_push_when_diverged() {
+    fn push_reads_publish_without_an_upstream_and_force_push_when_rewritten_and_diverged() {
         struct Case {
             tracking: Option<TrackingStatus>,
             remotes: &'static [&'static str],
@@ -294,7 +311,15 @@ mod tests {
                 reason: Some("Several remotes and none is origin: publish from the terminal"),
             },
             Case { tracking: None, remotes: &[], label: "Push", action: SyncAction::Push, reason: Some("No remote: add one with git remote add") },
-            Case { tracking: Some(tracked(1, 2)), remotes: &["origin"], label: "Force push ↑1", action: SyncAction::ForcePush, reason: None },
+            Case { tracking: Some(rewritten(1, 2)), remotes: &["origin"], label: "Force push ↑1", action: SyncAction::ForcePush, reason: None },
+            // A colleague pushed, you fetched and committed: the lease would pass and drop theirs.
+            Case {
+                tracking: Some(tracked(1, 2)),
+                remotes: &["origin"],
+                label: "Push ↑1",
+                action: SyncAction::Push,
+                reason: Some("Diverged: pull or rebase first"),
+            },
             Case { tracking: Some(tracked(3, 0)), remotes: &["origin"], label: "Push ↑3", action: SyncAction::Push, reason: None },
             Case { tracking: Some(tracked(0, 4)), remotes: &["origin"], label: "Push", action: SyncAction::Push, reason: None },
         ];
@@ -320,7 +345,7 @@ mod tests {
     fn publish_and_force_push_say_what_is_running() {
         let [_, _, push] = sync_buttons(Some(&born(None)), &origin(), Some("Publish"));
         assert_eq!(push.label, "Publishing…");
-        let [_, _, push] = sync_buttons(Some(&born(Some(tracked(1, 1)))), &origin(), Some("Force push"));
+        let [_, _, push] = sync_buttons(Some(&born(Some(rewritten(1, 1)))), &origin(), Some("Force push"));
         assert_eq!(push.label, "Force pushing…");
         assert!(!push.enabled);
         assert_eq!(push.reason, Some(BUSY_REASON));

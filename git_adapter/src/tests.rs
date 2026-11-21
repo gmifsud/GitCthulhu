@@ -2628,6 +2628,36 @@ fn force_push_replaces_a_diverged_remote_branch() {
 }
 
 #[test]
+fn amending_a_pushed_commit_reads_as_rewritten_locally() {
+    let (_origin, dest) = origin_and_clone();
+    commit_file(dest.path(), "a.txt", "two\n", "from the clone");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+    adapter.push().expect("push");
+    let tracking = adapter.status().expect("status").tracking.expect("upstream");
+    assert!(!tracking.rewritten_locally, "level with the upstream: nothing rewritten");
+
+    amend_head(dest.path(), "from the clone, amended");
+
+    let tracking = adapter.status().expect("status").tracking.expect("upstream");
+    assert_eq!((tracking.ahead, tracking.behind), (1, 1), "diverged");
+    assert!(tracking.rewritten_locally, "the upstream tip is in the branch's reflog");
+}
+
+#[test]
+fn a_colleagues_push_fetched_under_a_new_commit_is_not_rewritten_locally() {
+    let (origin, dest) = origin_and_clone();
+    origin.commit("theirs", &[("a.txt", "theirs\n")], 120);
+    git_in(dest.path(), &["fetch"]);
+    commit_file(dest.path(), "b.txt", "mine\n", "mine");
+    let adapter = GitoxideAdapter::new(dest.path().to_str().expect("utf-8 clone"));
+
+    let tracking = adapter.status().expect("status").tracking.expect("upstream");
+
+    assert_eq!((tracking.ahead, tracking.behind), (1, 1), "diverged");
+    assert!(!tracking.rewritten_locally, "the branch never held the colleague's commit");
+}
+
+#[test]
 fn force_push_refuses_when_the_remote_moved_since_the_last_fetch() {
     let (origin, dest) = origin_and_clone();
     let branch = origin.head_branch();

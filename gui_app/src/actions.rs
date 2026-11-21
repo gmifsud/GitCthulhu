@@ -633,11 +633,16 @@ mod tests {
     fn push_publish_and_force_push_agree_with_the_top_bar() {
         use crate::tracking::{push_kind, sync_buttons, SyncAction};
         use core_domain::{RepoStatus, TrackingStatus};
-        let status = |tracking: Option<(usize, usize)>, born: bool| RepoStatus {
+        let status = |tracking: Option<(usize, usize, bool)>, born: bool| RepoStatus {
             staged_files: vec![],
             unstaged_files: vec![],
             untracked_files: vec![],
-            tracking: tracking.map(|(ahead, behind)| TrackingStatus { upstream: "origin/main".into(), ahead, behind }),
+            tracking: tracking.map(|(ahead, behind, rewritten_locally)| TrackingStatus {
+                upstream: "origin/main".into(),
+                ahead,
+                behind,
+                rewritten_locally,
+            }),
             head_commit_id: born.then(|| "abc".to_string()),
             kinds: Default::default(),
             operation: None,
@@ -650,9 +655,10 @@ mod tests {
             (status(None, true), remotes(&["fork", "upstream"])),
             (status(None, true), remotes(&[])),
             (status(None, false), remotes(&["origin"])),
-            (status(Some((1, 2)), true), remotes(&["origin"])),
-            (status(Some((2, 0)), true), remotes(&["origin"])),
-            (status(Some((0, 0)), true), remotes(&["origin"])),
+            (status(Some((1, 2, true)), true), remotes(&["origin"])),
+            (status(Some((1, 2, false)), true), remotes(&["origin"])),
+            (status(Some((2, 0, false)), true), remotes(&["origin"])),
+            (status(Some((0, 0, false)), true), remotes(&["origin"])),
         ];
         for (status, remotes) in cases {
             let [_, _, button] = sync_buttons(Some(&status), &remotes, None);

@@ -262,11 +262,34 @@ pub(crate) fn tracking_status(
         &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
     )?;
     let (ahead, behind) = parse_ahead_behind(&counts)?;
+    // Only a diverged branch can need a force push, so only it pays for the reflog walk.
+    let rewritten_locally = ahead > 0 && behind > 0 && upstream_tip_in_branch_reflog(repo_path);
     Ok(Some(core_domain::TrackingStatus {
         upstream,
         ahead,
         behind,
+        rewritten_locally,
     }))
+}
+
+/// How many of the branch's reflog entries are searched for the upstream tip.
+const REFLOG_WALK_LIMIT: &str = "--max-count=1000";
+
+/// The upstream tip is one of the current branch's reflog entries: the branch held that very
+/// commit (you committed, pulled or pushed it) and was then rewritten here. A colleague's
+/// commit you only fetched is never in it. Membership in one `rev-list --walk-reflogs` is
+/// enough, and it is one process; an ancestry test per entry would be one per entry.
+/// False when anything cannot be read.
+fn upstream_tip_in_branch_reflog(repo_path: &str) -> bool {
+    let read = |args: &[&str]| super::command::run_git_stdout(repo_path, args).ok();
+    let (Some(branch), Some(tip)) = (
+        read(&["symbolic-ref", "-q", "HEAD"]),
+        read(&["rev-parse", "--verify", "-q", "@{upstream}^{commit}"]),
+    ) else {
+        return false;
+    };
+    read(&["rev-list", "--walk-reflogs", REFLOG_WALK_LIMIT, &branch, "--"])
+        .is_some_and(|entries| entries.lines().any(|entry| entry.trim() == tip))
 }
 
 fn upstream_is_absent(message: &str) -> bool {

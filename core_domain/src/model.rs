@@ -101,6 +101,10 @@ pub struct TrackingStatus {
     pub upstream: String,
     pub ahead: usize,
     pub behind: usize,
+    /// The upstream tip is in the branch's own reflog: the branch once held it and was then
+    /// rewritten here (amend, rebase), the case `--force-if-includes` is built for. A diverged
+    /// branch offers Force push only then. False when unknown.
+    pub rewritten_locally: bool,
 }
 
 /// What kept a force push from overwriting work it had not seen.

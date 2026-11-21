@@ -5927,7 +5927,9 @@ impl GitApp {
         let Some(tracking) = session.state.current_status.as_ref().and_then(|status| status.tracking.as_ref()) else {
             return Task::none();
         };
-        if tracking.ahead == 0 || tracking.behind == 0 {
+        // The Push button's own decision: diverged, and rewritten here.
+        let plan = crate::tracking::push_kind(session.state.current_status.as_ref(), &session.state.remotes);
+        if plan != Ok(crate::tracking::PushKind::ForcePush) {
             return Task::none();
         }
         let prompt = HistoryPrompt::ForcePush {
@@ -7041,7 +7043,12 @@ mod tests {
             staged_files: vec![],
             unstaged_files: vec![],
             untracked_files: vec![],
-            tracking: Some(core_domain::TrackingStatus { upstream: "origin/main".into(), ahead: 1, behind: 3 }),
+            tracking: Some(core_domain::TrackingStatus {
+                upstream: "origin/main".into(),
+                ahead: 1,
+                behind: 3,
+                rewritten_locally: false,
+            }),
             head_commit_id: None,
             kinds: Default::default(),
             operation: None,
@@ -10940,11 +10947,17 @@ mod tests {
         assert!(!app.session().state.loading);
     }
 
-    /// A loaded tab on `main`, `ahead` and `behind` its upstream `origin/main`.
+    /// A loaded tab on `main`, `ahead` and `behind` its upstream `origin/main` after an amend
+    /// or rebase here, so Force push is what the branch needs.
     fn app_diverged(ahead: usize, behind: usize) -> GitApp {
         let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
         let mut status = staged_nothing_status();
-        status.tracking = Some(core_domain::TrackingStatus { upstream: "origin/main".into(), ahead, behind });
+        status.tracking = Some(core_domain::TrackingStatus {
+            upstream: "origin/main".into(),
+            ahead,
+            behind,
+            rewritten_locally: true,
+        });
         let session = app.session_mut();
         session.state.apply_event(ViewEvent::StatusUpdated(status));
         session.state.apply_event(ViewEvent::RemotesUpdated(vec!["origin".into()]));
@@ -11022,12 +11035,32 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_diverged_by_a_colleagues_push_is_never_force_pushed() {
+        use crate::actions::ActionId;
+        let mut app = app_diverged(1, 2);
+        if let Some(tracking) = app.session_mut().state.current_status.as_mut().and_then(|s| s.tracking.as_mut()) {
+            tracking.rewritten_locally = false;
+        }
+        let _ = app.update(Message::AskForcePush);
+        assert_eq!(app.history_prompt, None, "no force push dialog");
+        let _ = app.update(Message::RunAction(ActionId::ForcePush));
+        assert_eq!(app.history_prompt, None);
+        assert_eq!(app.error.as_deref(), Some(crate::tracking::DIVERGED_PULL_REASON));
+        assert!(!app.session().state.loading, "nothing pushed");
+    }
+
+    #[test]
     fn force_push_runs_against_the_upstream_the_dialog_named() {
         let mut app = app_diverged(1, 2);
         let _ = app.update(Message::AskForcePush);
         // A refresh while the dialog is open shows another upstream.
         let mut moved = staged_nothing_status();
-        moved.tracking = Some(core_domain::TrackingStatus { upstream: "fork/topic".into(), ahead: 1, behind: 2 });
+        moved.tracking = Some(core_domain::TrackingStatus {
+            upstream: "fork/topic".into(),
+            ahead: 1,
+            behind: 2,
+            rewritten_locally: true,
+        });
         app.session_mut().state.apply_event(ViewEvent::StatusUpdated(moved));
         app.session_mut().state.apply_event(ViewEvent::RemotesUpdated(vec!["fork".into(), "origin".into()]));
         let _ = app.update(Message::ConfirmForcePush);

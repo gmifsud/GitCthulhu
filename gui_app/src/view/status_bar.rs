@@ -330,6 +330,7 @@ mod tests {
                     upstream: "origin/dev".to_string(),
                     ahead: 1,
                     behind: 0,
+                    rewritten_locally: false,
                 }),
                 head_commit_id: None,
                 kinds: Default::default(),
