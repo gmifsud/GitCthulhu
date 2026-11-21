@@ -6575,39 +6575,48 @@ pub(crate) enum KeyFocus {
 
 /// Ask which widget has focus and answer with `to_message`.
 fn when_key_focus(to_message: impl Fn(KeyFocus) -> Message + Send + 'static) -> Task<Message> {
-    use iced::advanced::widget::operation::{Focusable, Outcome};
-    use iced::advanced::widget::{Id, Operation};
+    iced::advanced::widget::operate(FindFocus::new()).map(to_message)
+}
 
-    /// `find_focused`, but answering `None` when nothing is focused instead of staying silent.
-    struct FindFocus(Option<Id>);
-    impl Operation<Option<Id>> for FindFocus {
-        fn focusable(&mut self, state: &mut dyn Focusable, id: Option<&Id>) {
-            if state.is_focused() && id.is_some() {
-                self.0 = id.cloned();
-            }
+/// `find_focused`, but it answers `Nothing` when nothing is focused instead of staying silent,
+/// and it counts a focused widget without an id (the Summary, the changes filter) as a `Field`.
+struct FindFocus {
+    shell: iced::advanced::widget::Id,
+    found: KeyFocus,
+}
+
+impl FindFocus {
+    fn new() -> Self {
+        Self {
+            shell: iced::widget::text_input::Id::new(SHELL_INPUT_ID).into(),
+            found: KeyFocus::Nothing,
         }
-        fn container(
-            &mut self,
-            _id: Option<&Id>,
-            _bounds: iced::Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<Option<Id>>),
-        ) {
-            operate_on_children(self);
-        }
-        fn finish(&self) -> Outcome<Option<Id>> {
-            Outcome::Some(self.0.clone())
+    }
+}
+
+impl iced::advanced::widget::Operation<KeyFocus> for FindFocus {
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        id: Option<&iced::advanced::widget::Id>,
+    ) {
+        if state.is_focused() {
+            self.found = if id == Some(&self.shell) { KeyFocus::Shell } else { KeyFocus::Field };
         }
     }
 
-    let shell = Id::from(iced::widget::text_input::Id::new(SHELL_INPUT_ID));
-    iced::advanced::widget::operate(FindFocus(None))
-        .map(move |focused| {
-            to_message(match focused {
-                None => KeyFocus::Nothing,
-                Some(id) if id == shell => KeyFocus::Shell,
-                Some(_) => KeyFocus::Field,
-            })
-        })
+    fn container(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<KeyFocus>),
+    ) {
+        operate_on_children(self);
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<KeyFocus> {
+        iced::advanced::widget::operation::Outcome::Some(self.found)
+    }
 }
 
 fn vertical_key(step: i32) -> ListKeyName {
@@ -12026,6 +12035,44 @@ mod tests {
         assert_eq!(selected_commit(&app), Some("a"), "a focused text input keeps its arrows");
         let _ = app.update(Message::ShellHistory { step: 1, focus: KeyFocus::Nothing });
         assert_eq!(selected_commit(&app), Some("b"));
+    }
+
+    /// A focusable widget for driving `FindFocus` the way iced's tree walk does.
+    struct FakeFocusable(bool);
+    impl iced::advanced::widget::operation::Focusable for FakeFocusable {
+        fn is_focused(&self) -> bool {
+            self.0
+        }
+        fn focus(&mut self) {
+            self.0 = true;
+        }
+        fn unfocus(&mut self) {
+            self.0 = false;
+        }
+    }
+
+    fn focus_found(widgets: &mut [(FakeFocusable, Option<iced::advanced::widget::Id>)]) -> KeyFocus {
+        use iced::advanced::widget::operation::Outcome;
+        use iced::advanced::widget::Operation;
+        let mut find = FindFocus::new();
+        for (state, id) in widgets.iter_mut() {
+            find.focusable(state, id.as_ref());
+        }
+        match find.finish() {
+            Outcome::Some(focus) => focus,
+            _ => panic!("FindFocus always answers"),
+        }
+    }
+
+    #[test]
+    fn a_focused_input_without_an_id_keeps_its_arrows() {
+        use iced::advanced::widget::Id;
+        let shell = || Some(Id::from(iced::widget::text_input::Id::new(SHELL_INPUT_ID)));
+        // The Summary and the changes filter have no id.
+        assert_eq!(focus_found(&mut [(FakeFocusable(true), None)]), KeyFocus::Field);
+        assert_eq!(focus_found(&mut [(FakeFocusable(false), shell()), (FakeFocusable(true), None)]), KeyFocus::Field);
+        assert_eq!(focus_found(&mut [(FakeFocusable(true), shell()), (FakeFocusable(false), None)]), KeyFocus::Shell);
+        assert_eq!(focus_found(&mut [(FakeFocusable(false), shell()), (FakeFocusable(false), None)]), KeyFocus::Nothing);
     }
 
     #[test]
