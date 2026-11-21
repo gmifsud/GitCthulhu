@@ -1,4 +1,4 @@
-use super::{build_dag, AppSettings, Branch, Commit, DagNode, DomainError, RepoStatus, Stash, Tag};
+use super::{build_dag, AppSettings, Branch, Commit, DagNode, DomainError, LineCounts, RepoStatus, Stash, Tag};
 
 /// Events applied to [`AppState`].
 #[derive(Debug, Clone)]
@@ -11,6 +11,7 @@ pub enum ViewEvent {
     UnpushedUpdated(Vec<String>),
     SettingsUpdated(AppSettings),
     ErrorOccurred(DomainError),
+    LineCountsUpdated(LineCounts),
 }
 
 /// Repository view state. `apply_event` is the only writer.
@@ -23,6 +24,8 @@ pub struct AppState {
     pub tags: Vec<Tag>,
     /// Ids of commits on no remote yet (see `GitRepository::unpushed_commits`).
     pub unpushed: std::collections::HashSet<String>,
+    /// Added and removed lines beside each changed file.
+    pub line_counts: LineCounts,
     pub loading: bool,
     pub settings: AppSettings,
 }
@@ -37,6 +40,7 @@ impl AppState {
             stashes: vec![],
             tags: vec![],
             unpushed: Default::default(),
+            line_counts: LineCounts::default(),
             loading: false,
             settings: AppSettings::default(),
         }
@@ -75,6 +79,10 @@ impl AppState {
                 self.settings = settings;
             }
             ViewEvent::ErrorOccurred(_) => {
+                self.loading = false;
+            }
+            ViewEvent::LineCountsUpdated(counts) => {
+                self.line_counts = counts;
                 self.loading = false;
             }
         }

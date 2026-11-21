@@ -148,6 +148,86 @@ pub(crate) fn unborn_worktree_changes(
     Ok(changes.0)
 }
 
+/// Untracked files read for a line count, at most; the rest show no count.
+const UNTRACKED_COUNT_LIMIT: usize = 500;
+/// Untracked files above this size show no count.
+const UNTRACKED_COUNT_MAX_BYTES: u64 = 1024 * 1024;
+/// A NUL in this many leading bytes marks a file as binary, as git decides it.
+const BINARY_SNIFF_BYTES: usize = 8_000;
+
+/// Parse `git diff --numstat -z`: `added<TAB>removed<TAB>path<NUL>`, binary files as `-<TAB>-`.
+/// A rename or copy has an empty path field, then the old and the new path as two more records;
+/// the count belongs to the new path.
+pub(crate) fn parse_numstat_z(text: &str) -> BTreeMap<String, Option<(u32, u32)>> {
+    let mut counts = BTreeMap::new();
+    let mut records = text.split('\0');
+    while let Some(record) = records.next() {
+        let mut fields = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        let count = added.parse().ok().zip(removed.parse().ok());
+        let path = if path.is_empty() {
+            let _old = records.next();
+            match records.next() {
+                Some(new) if !new.is_empty() => new,
+                _ => continue,
+            }
+        } else {
+            path
+        };
+        counts.insert(path.to_string(), count);
+    }
+    counts
+}
+
+/// Added and removed lines for the staged and unstaged changes, from `git diff --numstat -z`.
+pub(crate) fn diff_line_counts(
+    repo_path: &str,
+    staged: bool,
+) -> Result<BTreeMap<String, Option<(u32, u32)>>, DomainError> {
+    let args: &[&str] = if staged {
+        &["diff", "--cached", "--numstat", "-z"]
+    } else {
+        &["diff", "--numstat", "-z"]
+    };
+    Ok(parse_numstat_z(&super::command::run_git_stdout(repo_path, args)?))
+}
+
+/// Line count of an untracked file: its lines (a last line without a newline counts), or `None`
+/// when it is binary, over [`UNTRACKED_COUNT_MAX_BYTES`] or cannot be read.
+fn untracked_line_count(path: &std::path::Path) -> Option<(u32, u32)> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > UNTRACKED_COUNT_MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+        return None;
+    }
+    let newlines = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    let unterminated = usize::from(bytes.last().is_some_and(|&byte| byte != b'\n'));
+    Some((u32::try_from(newlines + unterminated).ok()?, 0))
+}
+
+/// Line counts for `untracked` (as listed by status), counting the first
+/// [`UNTRACKED_COUNT_LIMIT`] files; later ones have no count.
+pub(crate) fn untracked_line_counts(
+    workdir: &std::path::Path,
+    untracked: &[String],
+) -> BTreeMap<String, Option<(u32, u32)>> {
+    untracked
+        .iter()
+        .enumerate()
+        .map(|(position, path)| {
+            let count = (position < UNTRACKED_COUNT_LIMIT)
+                .then(|| untracked_line_count(&workdir.join(path)))
+                .flatten();
+            (path.clone(), count)
+        })
+        .collect()
+}
+
 /// Ahead/behind for `HEAD`, using the same `@{upstream}` git uses for push and pull.
 ///
 /// A missing upstream, a detached `HEAD`, and an unborn branch are `Ok(None)`.
@@ -277,5 +357,20 @@ mod track_tests {
         assert_eq!(parse_upstream_track("[behind 4]"), Some((0, 4)));
         assert_eq!(parse_upstream_track(""), None);
         assert_eq!(parse_upstream_track("[gone]"), None);
+    }
+}
+
+#[cfg(test)]
+mod numstat_tests {
+    use super::parse_numstat_z;
+
+    #[test]
+    fn numstat_z_reads_counts_binary_and_renames() {
+        let text = "3\t1\ta.txt\0-\t-\timg.png\x002\t0\t\0old.rs\0new.rs\0";
+        let counts = parse_numstat_z(text);
+        assert_eq!(counts["a.txt"], Some((3, 1)));
+        assert_eq!(counts["img.png"], None);
+        assert_eq!(counts["new.rs"], Some((2, 0)));
+        assert!(!counts.contains_key("old.rs"));
     }
 }

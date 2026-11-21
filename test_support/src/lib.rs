@@ -3,8 +3,8 @@
 //! Add as `[dev-dependencies]` only — never in `[dependencies]`.
 
 use core_domain::{
-    Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, Patch, RepoStatus, Stash,
-    Tag, Worktree,
+    Branch, Commit, DomainError, FileDisposition, GitRepository, Hunk, LineCounts, Patch,
+    RepoStatus, Stash, Tag, Worktree,
 };
 
 /// Pre-configured fake that implements [`GitRepository`].
@@ -19,6 +19,7 @@ pub struct FakeGitRepository {
     pub stashes_result: Result<Vec<Stash>, DomainError>,
     pub tags_result: Result<Vec<Tag>, DomainError>,
     pub unpushed_result: Result<Vec<String>, DomainError>,
+    pub line_counts_result: Result<LineCounts, DomainError>,
     pub worktrees_result: Result<Vec<Worktree>, DomainError>,
     pub add_worktree_result: Result<(), DomainError>,
     pub remove_worktree_result: Result<(), DomainError>,
@@ -78,6 +79,7 @@ impl FakeGitRepository {
             stashes_result: Ok(vec![]),
             tags_result: Ok(vec![]),
             unpushed_result: Ok(vec![]),
+            line_counts_result: Ok(LineCounts::default()),
             worktrees_result: Ok(vec![]),
             add_worktree_result: Ok(()),
             remove_worktree_result: Ok(()),
@@ -149,6 +151,10 @@ impl GitRepository for FakeGitRepository {
 
     fn unpushed_commits(&self) -> Result<Vec<String>, DomainError> {
         self.unpushed_result.clone()
+    }
+
+    fn line_counts(&self) -> Result<LineCounts, DomainError> {
+        self.line_counts_result.clone()
     }
 
     fn worktrees(&self) -> Result<Vec<Worktree>, DomainError> {

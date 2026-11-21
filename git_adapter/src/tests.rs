@@ -2369,3 +2369,35 @@ fn amend_with_a_blank_message_does_not_move_head() {
     );
     assert_eq!(head_at(dir), first);
 }
+
+#[test]
+fn line_counts_cover_staged_unstaged_and_untracked() {
+    let fixture = TestRepo::new();
+    fixture.commit("initial", &[("a.txt", "a1\na2\n"), ("b.txt", "b1\nb2\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "a1\na2\n"), ("b.txt", "b1\nb2\n")]);
+    fixture.write_file("a.txt", "a1\na2\na3\na4\n");
+    git_in(fixture.workdir(), &["add", "a.txt"]);
+    fixture.write_file("b.txt", "b1\nb2\nb3\n");
+    fixture.write_file("new.txt", "n1\nn2\nn3\nn4\n");
+    fixture.write_file("no_final_newline.txt", "x\ny");
+    std::fs::write(fixture.workdir().join("blob.bin"), b"ab\0cd").expect("write binary file");
+    std::fs::write(fixture.workdir().join("empty.txt"), b"").expect("write empty file");
+
+    let counts = fixture.adapter().line_counts().expect("line counts");
+
+    assert_eq!(counts.staged["a.txt"], Some((2, 0)));
+    assert_eq!(counts.unstaged["b.txt"], Some((1, 0)));
+    assert_eq!(counts.untracked["new.txt"], Some((4, 0)));
+    assert_eq!(counts.untracked["no_final_newline.txt"], Some((2, 0)));
+    assert_eq!(counts.untracked["blob.bin"], None);
+    assert_eq!(counts.untracked["empty.txt"], Some((0, 0)));
+}
+
+#[test]
+fn line_counts_of_a_repository_with_no_changes_are_empty() {
+    let fixture = TestRepo::new();
+    fixture.commit("initial", &[("a.txt", "a\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "a\n")]);
+
+    assert_eq!(fixture.adapter().line_counts().expect("line counts"), core_domain::LineCounts::default());
+}

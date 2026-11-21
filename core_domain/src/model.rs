@@ -173,6 +173,27 @@ impl ChangeKinds {
     }
 }
 
+/// Added and removed line counts per changed path, for each place a file can be listed.
+/// `None` is a file with no line count: binary, or too large to read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineCounts {
+    pub staged: BTreeMap<String, Option<(u32, u32)>>,
+    pub unstaged: BTreeMap<String, Option<(u32, u32)>>,
+    pub untracked: BTreeMap<String, Option<(u32, u32)>>,
+}
+
+impl LineCounts {
+    /// `(added, removed)` for `path`, or `None` when it has no count.
+    pub fn of(&self, place: FileDisposition, path: &str) -> Option<(u32, u32)> {
+        let counts = match place {
+            FileDisposition::Staged => &self.staged,
+            FileDisposition::Unstaged => &self.unstaged,
+            FileDisposition::Untracked => &self.untracked,
+        };
+        counts.get(path).copied().flatten()
+    }
+}
+
 /// A git operation stopped half-way, waiting for the user (usually on conflicts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoOperation {
@@ -580,5 +601,17 @@ mod tests {
         settings.remember_tabs("/r/a", &["/r/a".to_string(), "/r/wt/x".to_string()], "/r/a");
         assert!(settings.forget_recent("/r/a"));
         assert!(settings.tabs_of("/r/a").is_none());
+    }
+
+    #[test]
+    fn line_counts_are_read_per_place_and_binary_files_have_none() {
+        let mut counts = LineCounts::default();
+        counts.staged.insert("a".into(), Some((2, 1)));
+        counts.unstaged.insert("a".into(), Some((5, 0)));
+        counts.untracked.insert("img.png".into(), None);
+        assert_eq!(counts.of(FileDisposition::Staged, "a"), Some((2, 1)));
+        assert_eq!(counts.of(FileDisposition::Unstaged, "a"), Some((5, 0)));
+        assert_eq!(counts.of(FileDisposition::Untracked, "img.png"), None);
+        assert_eq!(counts.of(FileDisposition::Untracked, "missing"), None);
     }
 }

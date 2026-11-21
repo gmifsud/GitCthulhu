@@ -1,5 +1,5 @@
 use super::{MergePreview, 
-    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, Patch,
+    ActivityRecord, AppSettings, Branch, Commit, ConflictSide, DagNode, DomainError, FileDisposition, Hunk, LineCounts, Patch,
     RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 
@@ -49,6 +49,10 @@ pub trait GitRepository {
     /// at most 1000. Empty when there are no remotes or HEAD is unborn.
     fn unpushed_commits(&self) -> Result<Vec<String>, DomainError> {
         Err(DomainError::Unknown("this repository cannot list unpushed commits".to_string()))
+    }
+    /// Added and removed lines for each staged, unstaged and untracked file.
+    fn line_counts(&self) -> Result<LineCounts, DomainError> {
+        Err(DomainError::Unknown("this repository cannot count changed lines".to_string()))
     }
     /// `git worktree list --porcelain`. The first row is the main worktree; prunable rows are omitted.
     fn worktrees(&self) -> Result<Vec<Worktree>, DomainError>;

@@ -14,7 +14,7 @@ use std::fmt::Display;
 
 use command::{run_git, run_git_paths, run_git_stdin, run_git_stdout, BLANK_COMMIT_MESSAGE};
 use core_domain::{
-    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LogCursor, MergePreview,
+    Branch, CloneRequest, Commit, ConflictSide, DomainError, FileDisposition, GitRepository, Hunk, LineCounts, LogCursor, MergePreview,
     Patch, RepoOperation, RepoStatus, ResetMode, Stash, Tag, Worktree,
 };
 use diff::{parse_patches, patch_from_worktree, render_hunk};
@@ -972,6 +972,17 @@ impl GitRepository for GitoxideAdapter {
             &["rev-list", "--max-count=1000", "HEAD", "--not", "--remotes"],
         )?;
         Ok(text.lines().map(str::to_string).collect())
+    }
+
+    fn line_counts(&self) -> Result<LineCounts, DomainError> {
+        let repo = self.open_repo()?;
+        let workdir = repo.work_dir().ok_or_else(|| unknown("a bare repository has no working tree"))?;
+        let untracked = self.status()?.untracked_files;
+        Ok(LineCounts {
+            staged: status::diff_line_counts(&self.repo_path, true)?,
+            unstaged: status::diff_line_counts(&self.repo_path, false)?,
+            untracked: status::untracked_line_counts(workdir, &untracked),
+        })
     }
 
     fn stash_push(&self, message: &str, include_untracked: bool) -> Result<(), DomainError> {

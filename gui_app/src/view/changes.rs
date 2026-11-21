@@ -367,6 +367,10 @@ fn change_line<'a>(
             ]
             .spacing(5)
             .align_y(Alignment::Center);
+            if let Some((added, removed)) = session.state.line_counts.of(*place, path) {
+                line = line.push(label(&format!("+{added}"), tokens.added, reading));
+                line = line.push(label(&format!("\u{2212}{removed}"), tokens.removed, reading));
+            }
             if !folder.is_empty() {
                 line = line.push(label(folder, tokens.text_muted, reading));
             }
