@@ -5,7 +5,7 @@
 //! Inspector head.
 
 use crate::app::{GitApp, Message};
-use crate::changes::marked_paths;
+use crate::changes::filtered_marked_paths;
 use crate::jobs::WorktreeEdit;
 use crate::selection::{ribbon_commands, RibbonCommand, RibbonItem, Selection};
 use crate::icons::Icon;
@@ -172,7 +172,7 @@ fn command_message(command: RibbonCommand, selection: &Selection, app: &GitApp) 
 }
 
 fn stage_message(app: &GitApp, selection: &Selection, stage: bool) -> Message {
-    let marked = marked_paths(&app.session().marked_files, stage);
+    let marked = filtered_marked_paths(app.session(), stage);
     if !marked.is_empty() {
         return if stage {
             Message::EditWorktree(WorktreeEdit::Stage(marked))

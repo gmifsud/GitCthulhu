@@ -8,7 +8,7 @@ use iced::widget::{pane_grid, text_editor};
 use iced::Task;
 
 use crate::appearance::{font_family, font_size};
-use crate::changes::{marked_paths, matching_change_paths, MarkedFile};
+use crate::changes::{filtered_marked_paths, matching_change_paths, ChangeChip, MarkedFile};
 use crate::context_menu::{gitignore_pattern, ContextTarget};
 use crate::jobs::{
     add_worktree_in_background, append_gitignore_in_background, branch_in_background,
@@ -333,6 +333,8 @@ pub(crate) enum Message {
     },
     SelectAllFiles,
     ClearFileSelection,
+    ChangeFilterChanged(String),
+    ToggleChangeChip(ChangeChip),
     SetFileTree(bool),
     /// Fold or unfold a folder row in the changes tree.
     ToggleChangeDir {
@@ -1856,6 +1858,20 @@ impl GitApp {
                     session.marked_files.clear();
                 }
                 self.update(Message::ShowWorkingTree)
+            }
+            Message::ChangeFilterChanged(text) => {
+                if let Some(session) = self.active_session_mut() {
+                    session.change_filter.text = text;
+                }
+                Task::none()
+            }
+            Message::ToggleChangeChip(chip) => {
+                if let Some(session) = self.active_session_mut() {
+                    if !session.change_filter.chips.remove(&chip) {
+                        session.change_filter.chips.insert(chip);
+                    }
+                }
+                Task::none()
             }
             Message::SetFileTree(as_tree) => {
                 self.files_as_tree = as_tree;
@@ -5190,7 +5206,7 @@ impl GitApp {
         let Some(session) = self.active_session() else {
             return Task::none();
         };
-        let paths = marked_paths(&session.marked_files, stage);
+        let paths = filtered_marked_paths(session, stage);
         if paths.is_empty() {
             Task::none()
         } else if stage {
@@ -6075,7 +6091,7 @@ fn select_files(
     let mut marks = session.marked_files.clone();
     if modifiers.shift() {
         if let (Some(anchor), Some(status)) = (session.selection_anchor.clone(), session.state.current_status.as_ref()) {
-            let order = crate::changes::visible_files(status, as_tree, &session.collapsed_sections, &session.collapsed_dirs);
+            let order = crate::changes::visible_files(status, as_tree, &session.collapsed_sections, &session.collapsed_dirs, &session.change_filter);
             return crate::changes::selection_range(&order, &anchor, &file);
         }
     }
@@ -7152,6 +7168,32 @@ mod tests {
         let _ = app.update(Message::ClearFileSelection);
         assert!(app.session_mut().marked_files.is_empty());
         assert!(matches!(app.session_mut().selection, Some(Selection::Branch { .. })));
+    }
+
+    #[test]
+    fn stage_marked_skips_marks_the_filter_hides() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["a.rs".to_string(), "b.md".to_string()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        });
+        let _ = app.update(Message::SelectAllFiles);
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        assert_eq!(crate::changes::filtered_marked_paths(app.session(), true), vec!["a.rs".to_string()]);
+
+        let _ = app.update(Message::ChangeFilterChanged(String::new()));
+        assert_eq!(
+            crate::changes::filtered_marked_paths(app.session(), true),
+            vec!["a.rs".to_string(), "b.md".to_string()]
+        );
+        let _ = app.update(Message::ToggleChangeChip(crate::changes::ChangeChip::Staged));
+        assert!(crate::changes::filtered_marked_paths(app.session(), true).is_empty());
     }
 
     #[test]

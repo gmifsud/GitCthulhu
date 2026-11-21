@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use crate::app::{GitApp, Message};
-use crate::changes::{change_rows, change_sections, marked_paths, ChangeRow, ChangeSection};
+use crate::changes::{change_rows, change_sections, filtered_files, filtered_marked_paths, ChangeChip, ChangeRow, ChangeSection};
 use crate::icons::Icon;
 use crate::selection::Selection;
 use crate::theme::DesignTokens;
@@ -53,6 +53,7 @@ pub(crate) fn wip_working_tree_block<'a>(
     let status = app.session().state.current_status.as_ref();
     column![
         container(wip_toolbar(app, tokens, reading)).padding(PANEL_PAD),
+        container(filter_row(app, tokens, reading)).padding([0.0, PANEL_PAD[1]]),
         hairline(tokens),
         container(scrollable(wip_file_sections(app, selection, status, tokens, reading)).height(Length::Fill))
             .height(Length::Fill)
@@ -68,8 +69,8 @@ pub(crate) fn wip_working_tree_block<'a>(
 fn wip_toolbar<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let session = app.session();
     let busy = session.state.loading;
-    let stageable = !marked_paths(&session.marked_files, true).is_empty();
-    let unstageable = !marked_paths(&session.marked_files, false).is_empty();
+    let stageable = !filtered_marked_paths(session, true).is_empty();
+    let unstageable = !filtered_marked_paths(session, false).is_empty();
     let chosen = session.marked_files.len();
     let any = session.state.current_status.as_ref().is_some_and(|status| {
         !status.staged_files.is_empty() || !status.unstaged_files.is_empty() || !status.untracked_files.is_empty()
@@ -97,6 +98,48 @@ fn wip_toolbar<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> E
     ]
     .spacing(4)
     .align_y(Alignment::Center)
+    .into()
+}
+
+const FILTER_PLACEHOLDER: &str = "Filter changes";
+
+/// A text box for the path and a toggle chip per kind. Shown chips OR together.
+fn filter_row<'a>(app: &'a GitApp, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
+    let filter = &app.session().change_filter;
+    let mut chips = row![].spacing(4).align_y(Alignment::Center);
+    for chip in ChangeChip::ALL {
+        let on = filter.chips.contains(&chip);
+        chips = chips.push(
+            button(label(chip.label(), if on { tokens.accent_primary } else { tokens.text_secondary }, reading))
+                .padding([1.0, 8.0])
+                .on_press(Message::ToggleChangeChip(chip))
+                .style(move |_theme, status| {
+                    let hot = matches!(status, Status::Hovered | Status::Pressed);
+                    iced::widget::button::Style {
+                        background: Some(Background::Color(if on || hot { tokens.bg_raised } else { tokens.chip })),
+                        text_color: tokens.text_secondary,
+                        border: Border {
+                            color: if on { tokens.accent_primary } else { tokens.chip_border },
+                            width: 1.0,
+                            radius: 999.0.into(),
+                        },
+                        shadow: Shadow::default(),
+                    }
+                }),
+        );
+    }
+    column![
+        text_input(FILTER_PLACEHOLDER, &filter.text)
+            .on_input(Message::ChangeFilterChanged)
+            .font(reading.font)
+            .size(reading.size)
+            .padding(4)
+            .width(Length::Fill)
+            .style(field_style(tokens)),
+        scrollable(chips).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(4).scroller_width(4))),
+    ]
+    .spacing(4)
+    .padding([4.0, 0.0])
     .into()
 }
 
@@ -196,12 +239,20 @@ fn section_block<'a>(
     reading: Reading,
 ) -> Element<'a, Message> {
     let folded = app.session().collapsed_sections.contains(&section.place);
-    let mut files = column![section_header(section.title, section.files.len(), folded, section.place, tokens, reading)]
+    let session = app.session();
+    // Built once per section: the rows and the header count both read it.
+    let shown = filtered_files(section.files, section.place, &status.kinds, &session.change_filter);
+    let count = if session.change_filter.is_active() {
+        format!("({} of {})", shown.len(), section.files.len())
+    } else {
+        count_label(section.files.len())
+    };
+    let mut files = column![section_header(section.title, &count, folded, section.place, tokens, reading)]
         .spacing(0)
         .width(Length::Fill);
     if !folded {
         let collapsed = collapsed_prefixes(app, section.place);
-        let rows = change_rows(section.files, section.place, app.files_as_tree, &collapsed);
+        let rows = change_rows(&shown, section.place, app.files_as_tree, &collapsed);
         let hidden = rows.len().saturating_sub(FILE_ROWS_SHOWN);
         for row_item in rows.iter().take(FILE_ROWS_SHOWN) {
             files = files.push(change_line(row_item, section.place, status, app, selection, tokens, reading));
@@ -273,7 +324,7 @@ fn count_label(count: usize) -> String {
 /// "▾ Changes  26 files".
 fn section_header<'a>(
     title: &'static str,
-    count: usize,
+    count: &str,
     folded: bool,
     place: FileDisposition,
     tokens: DesignTokens,
@@ -283,7 +334,7 @@ fn section_header<'a>(
         row![
             glyph(Icon::fold(!folded), reading.size, tokens.text_muted, &reading),
             label(title, tokens.text_primary, reading),
-            label(&count_label(count), tokens.text_muted, reading),
+            label(count, tokens.text_muted, reading),
         ]
         .spacing(6)
         .align_y(Alignment::Center),

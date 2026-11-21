@@ -9,7 +9,7 @@ use core_domain::{AppSettings, AppState, Branch, FileDisposition, Hunk, Patch, V
 use core_domain::WorktreeTabRetention;
 use iced::widget::text_editor;
 
-use crate::changes::MarkedFile;
+use crate::changes::{ChangeFilter, MarkedFile};
 use crate::jobs::{PatchQuery, SharedRepository, WorktreeEdit};
 use crate::selection::{visible_selection, Selection};
 
@@ -150,6 +150,8 @@ pub(crate) struct WorktreeSession {
     /// commit instead of adding one, and is refused if HEAD is no longer it.
     pub(crate) amending: Option<String>,
     pub(crate) marked_files: Vec<MarkedFile>,
+    /// What the changes list is narrowed to. Kept across refreshes.
+    pub(crate) change_filter: ChangeFilter,
     /// Folder prefixes collapsed in Tree mode, keyed with their disposition.
     pub(crate) collapsed_dirs: HashSet<(FileDisposition, String)>,
     /// Staged / Unstaged / Untracked headers the user has folded shut.
@@ -233,6 +235,7 @@ impl WorktreeSession {
             commit_body: text_editor::Content::new(),
             amending: None,
             marked_files: Vec::new(),
+            change_filter: ChangeFilter::default(),
             collapsed_dirs: HashSet::new(),
             collapsed_sections: HashSet::new(),
             patches: Vec::new(),
@@ -592,6 +595,7 @@ pub(crate) fn apply_retention(session: &mut WorktreeSession, mode: WorktreeTabRe
             session.clear_commit_message();
             session.amending = None;
             session.marked_files.clear();
+            session.change_filter = ChangeFilter::default();
         }
     }
 }
@@ -611,7 +615,7 @@ fn clear_selection(session: &mut WorktreeSession) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::changes::MarkedFile;
+    use crate::changes::{ChangeChip, ChangeFilter, MarkedFile};
     use crate::selection::Selection;
     use core_domain::{FileDisposition, WorktreeTabRetention};
 
@@ -799,6 +803,21 @@ mod tests {
         apply_retention(&mut session, WorktreeTabRetention::PathOnly);
         assert!(session.commit_message.is_empty());
         assert!(session.commit_body.text().trim().is_empty());
+    }
+
+    #[test]
+    fn the_filter_survives_partial_and_full_and_path_only_clears_it() {
+        for (mode, kept) in [
+            (WorktreeTabRetention::Full, true),
+            (WorktreeTabRetention::Partial, true),
+            (WorktreeTabRetention::PathOnly, false),
+        ] {
+            let mut session = dirty_session();
+            session.change_filter.text = "rs".into();
+            session.change_filter.chips.insert(ChangeChip::New);
+            apply_retention(&mut session, mode);
+            assert_eq!(session.change_filter != ChangeFilter::default(), kept, "{mode:?}");
+        }
     }
 
     #[test]
