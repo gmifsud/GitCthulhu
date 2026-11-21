@@ -155,19 +155,19 @@ mod tests {
 
     #[test]
     fn a_candidate_needs_two_parents_and_a_stash_subject() {
-        let stash = parse_candidate("A\0p1 p2\0WIP on main: abc subject\01700000000\n").unwrap();
+        let stash = parse_candidate("A\0p1 p2\0WIP on main: abc subject\x001700000000\n").unwrap();
         assert_eq!(stash.commit_id, "A");
         assert_eq!(stash.message, "WIP on main: abc subject");
         assert_eq!(stash.timestamp, 1_700_000_000);
-        assert!(parse_candidate("A\0p1 p2\0On main: named\01\n").is_some());
-        assert!(parse_candidate("A\0p1\0WIP on main: x\01\n").is_none());
-        assert!(parse_candidate("A\0p1 p2\0Merge branch 'x'\01\n").is_none());
+        assert!(parse_candidate("A\0p1 p2\0On main: named\x001\n").is_some());
+        assert!(parse_candidate("A\0p1\0WIP on main: x\x001\n").is_none());
+        assert!(parse_candidate("A\0p1 p2\0Merge branch 'x'\x001\n").is_none());
         assert!(parse_candidate("garbage").is_none());
     }
 
     #[test]
     fn candidates_are_filtered_and_sorted_newest_first() {
-        let text = "A\0p1 p2\0On main: old\0100\nB\0p1\0amended\0300\nC\0p1 p2\0WIP on main: new\0200\n";
+        let text = "A\0p1 p2\0On main: old\x00100\nB\0p1\0amended\x00300\nC\0p1 p2\0WIP on main: new\x00200\n";
         let ids: Vec<String> = parse_candidates(text).into_iter().map(|stash| stash.commit_id).collect();
         assert_eq!(ids, vec!["C", "A"]);
     }
