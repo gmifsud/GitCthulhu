@@ -501,6 +501,37 @@ fn change_path_actions(
     ]
 }
 
+/// While a changes filter is active, a folder row's Stage, Unstage, Discard, Stash and Untrack
+/// act on the filtered files under the folder, as explicit paths, not on the folder pathspec
+/// (which git would expand to the files the filter hides). Ignore keeps its folder pattern: it
+/// writes a rule and changes no file. `None` means the filter leaves nothing for the action.
+/// With no filter, or on any other row or action, the action is returned unchanged.
+pub(crate) fn scoped_to_filter(
+    kind: ContextActionKind,
+    target: &ContextTarget,
+    status: Option<&core_domain::RepoStatus>,
+    filter: &crate::changes::ChangeFilter,
+) -> Option<ContextActionKind> {
+    let (ContextTarget::ChangePath { path, place, is_dir: true }, Some(status), true) = (target, status, filter.is_active()) else {
+        return Some(kind);
+    };
+    let paths = crate::changes::matching_filtered_paths(status, *place, path, true, filter);
+    let scoped = match kind {
+        ContextActionKind::StageChange { unstage: false, .. } => ContextActionKind::StageFiles(paths.clone()),
+        ContextActionKind::StageChange { unstage: true, .. } => ContextActionKind::UnstageFiles(paths.clone()),
+        ContextActionKind::DiscardChange { place, .. } => ContextActionKind::DiscardFiles(
+            paths.iter().map(|path| crate::changes::MarkedFile { path: path.clone(), place }).collect(),
+        ),
+        ContextActionKind::StashChange { .. } => ContextActionKind::StashFiles(paths.clone()),
+        ContextActionKind::Untrack { ignore, .. } => ContextActionKind::Untrack {
+            ignore: if ignore.is_empty() { ignore } else { paths.iter().map(|path| gitignore_pattern(path, false)).collect() },
+            paths: paths.clone(),
+        },
+        other => return Some(other),
+    };
+    (!paths.is_empty()).then_some(scoped)
+}
+
 /// True when the catalogue row is the session's own path (same folder).
 #[allow(dead_code)]
 pub(crate) fn catalogue_row_is_self(catalogue_path: &str, session_path: &str) -> bool {
@@ -789,6 +820,41 @@ mod tests {
         ));
     }
 
+
+    #[test]
+    fn a_filter_scopes_folder_actions_to_the_files_it_shows() {
+        use crate::changes::ChangeFilter;
+        let status = core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec!["src/a.rs".into(), "src/b.md".into()],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: None,
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        };
+        let folder = ContextTarget::ChangePath { path: "src/".into(), place: FileDisposition::Unstaged, is_dir: true };
+        let only_rs = ChangeFilter { text: "rs".into(), ..ChangeFilter::default() };
+        let scope = |kind| scoped_to_filter(kind, &folder, Some(&status), &only_rs);
+        let one = vec!["src/a.rs".to_string()];
+
+        assert_eq!(scope(ContextActionKind::StageChange { path: "src/".into(), unstage: false }), Some(ContextActionKind::StageFiles(one.clone())));
+        assert_eq!(scope(ContextActionKind::StashChange { path: "src/".into() }), Some(ContextActionKind::StashFiles(one.clone())));
+        assert_eq!(
+            scope(ContextActionKind::Untrack { paths: vec!["src".into()], ignore: vec!["src/".into()] }),
+            Some(ContextActionKind::Untrack { paths: one.clone(), ignore: vec!["src/a.rs".into()] })
+        );
+        // Ignore keeps the folder pattern.
+        let ignore = ContextActionKind::IgnoreChange { path: "src/".into(), is_dir: true };
+        assert_eq!(scope(ignore.clone()), Some(ignore));
+        // No filter: unchanged.
+        let stage = ContextActionKind::StageChange { path: "src/".into(), unstage: false };
+        assert_eq!(scoped_to_filter(stage.clone(), &folder, Some(&status), &ChangeFilter::default()), Some(stage));
+        // The filter leaves nothing under the folder.
+        let none = ChangeFilter { text: "zzz".into(), ..ChangeFilter::default() };
+        assert_eq!(scoped_to_filter(ContextActionKind::StashChange { path: "src/".into() }, &folder, Some(&status), &none), None);
+    }
     #[test]
     fn gitignore_pattern_adds_slash_for_dirs() {
         assert_eq!(gitignore_pattern("scripts", true), "scripts/");

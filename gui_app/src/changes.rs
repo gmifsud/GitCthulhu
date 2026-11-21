@@ -270,6 +270,18 @@ pub(crate) fn matching_change_paths(
     path: &str,
     is_dir: bool,
 ) -> Vec<String> {
+    matching_filtered_paths(status, place, path, is_dir, &ChangeFilter::default())
+}
+
+/// [`matching_change_paths`], less the files `filter` hides. Folder actions use this while a
+/// filter is active, so they reach only the files the folder row counts.
+pub(crate) fn matching_filtered_paths(
+    status: &RepoStatus,
+    place: FileDisposition,
+    path: &str,
+    is_dir: bool,
+    filter: &ChangeFilter,
+) -> Vec<String> {
     let files = match place {
         FileDisposition::Staged => &status.staged_files,
         FileDisposition::Unstaged => &status.unstaged_files,
@@ -289,7 +301,8 @@ pub(crate) fn matching_change_paths(
         .iter()
         .filter(|file| {
             let normalized = file.replace('\\', "/");
-            normalized == prefix || normalized.starts_with(&with_slash)
+            (normalized == prefix || normalized.starts_with(&with_slash))
+                && filter_matches(filter, file, place, status.kinds.of(place, file))
         })
         .cloned()
         .collect()

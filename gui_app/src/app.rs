@@ -1793,6 +1793,21 @@ impl GitApp {
                 let as_tree = self.files_as_tree;
                 if let Some(session) = self.active_session_mut() {
                     let file = MarkedFile { path: path.clone(), place };
+                    // Picking a file the filter hides (from the palette) clears the filter,
+                    // so the file is drawn and no mark is ever hidden.
+                    if session.change_filter.is_active() {
+                        let hidden = session.state.current_status.as_ref().is_some_and(|status| {
+                            !crate::changes::filter_matches(
+                                &session.change_filter,
+                                &path,
+                                place,
+                                status.kinds.of(place, &path),
+                            )
+                        });
+                        if hidden {
+                            session.change_filter = crate::changes::ChangeFilter::default();
+                        }
+                    }
                     session.marked_files = select_files(session, file, modifiers, as_tree);
                 }
                 self.update(Message::Select(Selection::File { path, place }))
@@ -3622,7 +3637,22 @@ impl GitApp {
                 Task::none()
             }
             Message::ContextMenuAction(kind) => {
-                self.context_menu = None;
+                let target = self.context_menu.take().map(|menu| menu.target);
+                let scoped = target.as_ref().and_then(|target| {
+                    let session = self.active_session()?;
+                    Some(crate::context_menu::scoped_to_filter(
+                        kind.clone(),
+                        target,
+                        session.state.current_status.as_ref(),
+                        &session.change_filter,
+                    ))
+                });
+                // None from the scoping: the filter leaves nothing for a folder action.
+                let kind = match scoped {
+                    Some(Some(scoped)) => scoped,
+                    Some(None) => return Task::none(),
+                    None => kind,
+                };
                 match kind {
                     crate::context_menu::ContextActionKind::OpenAsWorktree {
                         branch,
@@ -7218,6 +7248,65 @@ mod tests {
             }
             other => panic!("expected the multi-select menu, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn picking_a_hidden_file_clears_the_filter_and_marks_only_that_file() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(filter_status());
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        let _ = app.update(Message::FocusFile { path: "b.md".into(), place: FileDisposition::Unstaged });
+        assert_eq!(app.session().change_filter, crate::changes::ChangeFilter::default());
+        let paths: Vec<_> = app.session().marked_files.iter().map(|mark| mark.path.as_str()).collect();
+        assert_eq!(paths, ["b.md"]);
+    }
+
+    #[test]
+    fn picking_a_visible_file_keeps_the_filter() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(filter_status());
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        let _ = app.update(Message::FocusFile { path: "a.rs".into(), place: FileDisposition::Unstaged });
+        assert_eq!(app.session().change_filter.text, "rs");
+    }
+
+    fn folder_status() -> core_domain::RepoStatus {
+        core_domain::RepoStatus {
+            unstaged_files: vec!["src/a.rs".to_string(), "src/b.md".to_string()],
+            ..filter_status_empty()
+        }
+    }
+
+    fn filter_status_empty() -> core_domain::RepoStatus {
+        core_domain::RepoStatus { unstaged_files: vec![], ..filter_status() }
+    }
+
+    #[test]
+    fn folder_discard_asks_about_only_the_files_the_filter_shows() {
+        let mut app = GitApp::with_repo(Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(folder_status());
+        let target = crate::context_menu::ContextTarget::ChangePath {
+            path: "src".into(),
+            place: FileDisposition::Unstaged,
+            is_dir: true,
+        };
+        let discard = crate::context_menu::ContextActionKind::DiscardChange {
+            path: "src".into(),
+            place: FileDisposition::Unstaged,
+            is_dir: true,
+        };
+        let _ = app.update(Message::ChangeFilterChanged("rs".to_string()));
+        app.context_menu = Some(crate::context_menu::ContextMenuState { target: target.clone(), x: 0.0, y: 0.0 });
+        let _ = app.update(Message::ContextMenuAction(discard.clone()));
+        let asked: Vec<_> = app.confirm_discard.as_ref().expect("a prompt").iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(asked, ["src/a.rs"]);
+
+        // No filter: the whole folder, as before.
+        app.confirm_discard = None;
+        let _ = app.update(Message::ChangeFilterChanged(String::new()));
+        app.context_menu = Some(crate::context_menu::ContextMenuState { target, x: 0.0, y: 0.0 });
+        let _ = app.update(Message::ContextMenuAction(discard));
+        assert_eq!(app.confirm_discard.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]

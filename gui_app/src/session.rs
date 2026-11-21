@@ -465,6 +465,8 @@ impl WorktreeSession {
             };
             files.iter().any(|path| path == &mark.path)
         });
+        // A refresh can turn a marked file into one the filter hides (Modified to Deleted).
+        self.drop_hidden_marks();
     }
 
     pub(crate) fn shown_selection(&self) -> Selection {
@@ -840,6 +842,35 @@ mod tests {
             apply_retention(&mut session, mode);
             assert_eq!(session.change_filter != ChangeFilter::default(), kept, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn a_refresh_drops_marks_the_filter_now_hides() {
+        use core_domain::{ChangeKind, RepoStatus};
+        let status = |kind| {
+            let mut status = RepoStatus {
+                staged_files: vec![],
+                unstaged_files: vec!["a.rs".into()],
+                untracked_files: vec![],
+                tracking: None,
+                head_commit_id: None,
+                kinds: Default::default(),
+                operation: None,
+                conflicted_files: vec![],
+            };
+            status.kinds.unstaged.insert("a.rs".into(), kind);
+            status
+        };
+        let mut session = WorktreeSession::test_stub();
+        session.change_filter.chips.insert(ChangeChip::Modified);
+        session.state.current_status = Some(status(ChangeKind::Modified));
+        session.marked_files = vec![MarkedFile { path: "a.rs".into(), place: FileDisposition::Unstaged }];
+        session.retain_marks();
+        assert_eq!(session.marked_files.len(), 1);
+
+        session.state.current_status = Some(status(ChangeKind::Deleted));
+        session.retain_marks();
+        assert!(session.marked_files.is_empty());
     }
 
     #[test]
