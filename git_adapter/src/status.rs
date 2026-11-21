@@ -181,17 +181,31 @@ pub(crate) fn parse_numstat_z(text: &str) -> BTreeMap<String, Option<(u32, u32)>
     counts
 }
 
-/// Added and removed lines for the staged and unstaged changes, from `git diff --numstat -z`.
-pub(crate) fn diff_line_counts(
-    repo_path: &str,
-    staged: bool,
-) -> Result<BTreeMap<String, Option<(u32, u32)>>, DomainError> {
-    let args: &[&str] = if staged {
-        &["diff", "--cached", "--numstat", "-z"]
-    } else {
-        &["diff", "--numstat", "-z"]
-    };
-    Ok(parse_numstat_z(&super::command::run_git_stdout(repo_path, args)?))
+/// The empty tree, which the index is compared with while `HEAD` is unborn.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Added and removed lines for the staged changes: the index against `HEAD` (the empty tree
+/// while `HEAD` is unborn). Plumbing, so a background reload never refreshes `.git/index` or
+/// takes `index.lock` the way porcelain `git diff` does when stat data is stale. A failed
+/// read counts nothing rather than failing every count.
+pub(crate) fn staged_line_counts(repo_path: &str, head_is_born: bool) -> BTreeMap<String, Option<(u32, u32)>> {
+    let base = if head_is_born { "HEAD" } else { EMPTY_TREE };
+    numstat_or_empty(
+        repo_path,
+        &["diff-index", "--cached", "--numstat", "-z", "-M", "--no-textconv", "--no-ext-diff", base],
+    )
+}
+
+/// Added and removed lines for the unstaged changes: the worktree against the index, by
+/// plumbing for the same reason as [`staged_line_counts`].
+pub(crate) fn unstaged_line_counts(repo_path: &str) -> BTreeMap<String, Option<(u32, u32)>> {
+    numstat_or_empty(repo_path, &["diff-files", "--numstat", "-z", "--no-textconv", "--no-ext-diff"])
+}
+
+fn numstat_or_empty(repo_path: &str, args: &[&str]) -> BTreeMap<String, Option<(u32, u32)>> {
+    super::command::run_git_stdout(repo_path, args)
+        .map(|text| parse_numstat_z(&text))
+        .unwrap_or_default()
 }
 
 /// Line count of an untracked file: its lines (a last line without a newline counts), or `None`

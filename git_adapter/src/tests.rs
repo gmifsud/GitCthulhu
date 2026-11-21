@@ -2462,10 +2462,11 @@ fn amend_with_a_blank_message_does_not_move_head() {
 #[test]
 fn line_counts_cover_staged_unstaged_and_untracked() {
     let fixture = TestRepo::new();
-    fixture.commit("initial", &[("a.txt", "a1\na2\n"), ("b.txt", "b1\nb2\n")], 0);
-    fixture.stage_and_write(&[("a.txt", "a1\na2\n"), ("b.txt", "b1\nb2\n")]);
+    fixture.commit("initial", &[("a.txt", "a1\na2\n"), ("b.txt", "b1\nb2\n"), ("c.txt", "c1\n")], 0);
+    fixture.stage_and_write(&[("a.txt", "a1\na2\n"), ("b.txt", "b1\nb2\n"), ("c.txt", "c1\n")]);
     fixture.write_file("a.txt", "a1\na2\na3\na4\n");
     git_in(fixture.workdir(), &["add", "a.txt"]);
+    git_in(fixture.workdir(), &["mv", "c.txt", "d.txt"]);
     fixture.write_file("b.txt", "b1\nb2\nb3\n");
     fixture.write_file("new.txt", "n1\nn2\nn3\nn4\n");
     fixture.write_file("no_final_newline.txt", "x\ny");
@@ -2476,11 +2477,45 @@ fn line_counts_cover_staged_unstaged_and_untracked() {
     let counts = fixture.adapter().line_counts(&untracked).expect("line counts");
 
     assert_eq!(counts.staged["a.txt"], Some((2, 0)));
+    assert_eq!(counts.staged["d.txt"], Some((0, 0)), "a staged rename counts under its new path");
+    assert!(!counts.staged.contains_key("c.txt"));
     assert_eq!(counts.unstaged["b.txt"], Some((1, 0)));
     assert_eq!(counts.untracked["new.txt"], Some((4, 0)));
     assert_eq!(counts.untracked["no_final_newline.txt"], Some((2, 0)));
     assert_eq!(counts.untracked["blob.bin"], None);
     assert_eq!(counts.untracked["empty.txt"], Some((0, 0)));
+}
+
+#[test]
+fn line_counts_never_write_the_index_of_a_stat_dirty_worktree() {
+    let fixture = TestRepo::new();
+    fixture.commit("initial", &[("a.txt", "a1\n"), ("b.txt", "b1\n")], 0);
+    // The index is written before the files, so its stat data is stale for both: a
+    // refreshing diff would rewrite `.git/index` (taking `index.lock`) to record new stat data.
+    fixture.stage_and_write(&[("a.txt", "a1\n"), ("b.txt", "b1\n")]);
+    fixture.write_file("b.txt", "b1\nb2\n");
+    let index = fixture.repo.git_dir().join("index");
+    let modified = || std::fs::metadata(&index).and_then(|meta| meta.modified()).expect("index mtime");
+    let (mtime, bytes) = (modified(), std::fs::read(&index).expect("read index"));
+
+    let counts = fixture.adapter().line_counts(&[]).expect("line counts");
+
+    assert_eq!(counts.unstaged["b.txt"], Some((1, 0)), "a real edit still counts");
+    assert_eq!(modified(), mtime, ".git/index was rewritten");
+    let after = std::fs::read(&index).expect("read index");
+    assert_eq!(after.len(), bytes.len(), ".git/index changed length");
+    assert!(after == bytes, ".git/index changed");
+}
+
+#[test]
+fn line_counts_of_an_unborn_branch_compare_the_index_with_the_empty_tree() {
+    let fixture = TestRepo::new();
+    fixture.write_file("a.txt", "a1\na2\n");
+    git_in(fixture.workdir(), &["add", "a.txt"]);
+
+    let counts = fixture.adapter().line_counts(&[]).expect("line counts");
+
+    assert_eq!(counts.staged["a.txt"], Some((2, 0)));
 }
 
 #[test]

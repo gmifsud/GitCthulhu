@@ -1040,8 +1040,8 @@ impl GitRepository for GitoxideAdapter {
         let repo = self.open_repo()?;
         let workdir = repo.work_dir().ok_or_else(|| unknown("a bare repository has no working tree"))?;
         Ok(LineCounts {
-            staged: status::diff_line_counts(&self.repo_path, true)?,
-            unstaged: status::diff_line_counts(&self.repo_path, false)?,
+            staged: status::staged_line_counts(&self.repo_path, repo.head_id().is_ok()),
+            unstaged: status::unstaged_line_counts(&self.repo_path),
             untracked: status::untracked_line_counts(workdir, untracked),
         })
     }
