@@ -2119,10 +2119,24 @@ fn unpushed_lists_commits_on_no_remote_newest_first() {
 }
 
 #[test]
-fn unpushed_is_empty_without_remotes_and_in_an_unborn_repository() {
+fn unpushed_is_empty_in_a_repository_without_remotes() {
     let fixture = TestRepo::new();
-    assert_eq!(fixture.adapter().unpushed_commits().expect("unborn"), Vec::<String>::new());
+    assert_eq!(fixture.adapter().unpushed_commits().expect("unborn, no remote"), Vec::<String>::new());
 
-    fixture.commit("first", &[("a.txt", "one\n")], 0);
-    assert_eq!(fixture.adapter().unpushed_commits().expect("no remote"), Vec::<String>::new());
+    fixture.commit("first", &[("a.txt", "one
+")], 0);
+    assert_eq!(fixture.adapter().unpushed_commits().expect("born, no remote"), Vec::<String>::new());
+}
+
+#[test]
+fn unpushed_is_empty_on_an_unborn_branch_that_has_a_remote() {
+    let fixture = TestRepo::new();
+    let elsewhere = tempfile::tempdir().expect("bare remote");
+    git_in(elsewhere.path(), &["init", "--bare"]);
+    git_in(
+        fixture.workdir(),
+        &["remote", "add", "origin", elsewhere.path().to_str().expect("utf-8 remote")],
+    );
+
+    assert_eq!(fixture.adapter().unpushed_commits().expect("unborn, with remote"), Vec::<String>::new());
 }
