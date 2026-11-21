@@ -2,7 +2,6 @@
 //! Pure: the full text stays in `GitApp::error`.
 
 /// Shown when a view was opened against a HEAD that has since moved.
-#[allow(dead_code)] // first used by the HEAD-moved guard (Task 5)
 pub(crate) const HEAD_MOVED: &str = "HEAD moved while this was open, so nothing was changed.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

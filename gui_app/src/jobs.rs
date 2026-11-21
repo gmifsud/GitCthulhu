@@ -20,7 +20,7 @@ pub(crate) enum PatchQuery {
     },
 }
 
-/// A stage, unstage, or commit requested by the ribbon.
+/// A stage, unstage, commit or amend requested by the ribbon.
 #[derive(Debug, Clone)]
 pub(crate) enum WorktreeEdit {
     Stage(Vec<String>),
@@ -29,6 +29,9 @@ pub(crate) enum WorktreeEdit {
     /// when it is not empty, so they stay out of the next `git add .`.
     Untrack { paths: Vec<String>, ignore: Vec<String> },
     Commit(String),
+    /// Replace the HEAD commit, refused if HEAD is no longer `expected_head` (the one the
+    /// view saw). An empty `expected_head` means HEAD was unknown, and nothing runs.
+    Amend { message: String, expected_head: String },
 }
 
 /// Commits read at first: enough to fill the window at once.
@@ -581,12 +584,25 @@ pub(crate) fn edit_in_background(
                 }
             }
             WorktreeEdit::Commit(message) => repo.commit(message),
+            WorktreeEdit::Amend { message, expected_head } => repo.amend(message, expected_head),
         },
         || {
             Err(DomainError::Unknown(
                 "worktree edit was interrupted".to_string(),
             ))
         },
+    )
+}
+
+/// Undo the HEAD commit, keeping its changes staged, if HEAD is still `expected_head`.
+/// Gives back the undone commit's full message.
+pub(crate) fn undo_commit_in_background(
+    repo: SharedRepository,
+    expected_head: String,
+) -> impl Future<Output = Result<String, DomainError>> {
+    in_background(
+        move || repo.undo_commit(&expected_head),
+        || Err(DomainError::Unknown("undo commit was interrupted".to_string())),
     )
 }
 
@@ -1012,6 +1028,7 @@ pub(crate) fn error_message(error: &DomainError) -> String {
             "Kilo authentication failed. Paste a valid API key under Settings → Agents and Models."
                 .to_string()
         }
+        DomainError::HeadMoved { .. } => crate::git_error::HEAD_MOVED.to_string(),
         DomainError::Unknown(message) => message.clone(),
     }
 }
@@ -1440,6 +1457,30 @@ mod tests {
             declined,
             Err(DomainError::Unknown("hook declined".to_string()))
         );
+    }
+
+    #[test]
+    fn background_undo_returns_the_message_or_the_refusal() {
+        let undoing = FakeGitRepository {
+            undo_commit_result: Ok("Fix\n\nWhy".to_string()),
+            ..FakeGitRepository::ok()
+        };
+        let moved = DomainError::HeadMoved { expected: "abc".into(), actual: "def".into() };
+        let refusing = FakeGitRepository {
+            undo_commit_result: Err(moved.clone()),
+            ..FakeGitRepository::ok()
+        };
+        let undone = iced::futures::executor::block_on(undo_commit_in_background(
+            Arc::new(undoing),
+            "abc".to_string(),
+        ));
+        let refused = iced::futures::executor::block_on(undo_commit_in_background(
+            Arc::new(refusing),
+            "abc".to_string(),
+        ));
+        assert_eq!(undone, Ok("Fix\n\nWhy".to_string()));
+        assert_eq!(refused, Err(moved.clone()));
+        assert_eq!(error_message(&moved), crate::git_error::HEAD_MOVED);
     }
 
     #[test]

@@ -88,6 +88,8 @@ pub(crate) enum ContextActionKind {
     DeleteBranch { name: String },
     CherryPick { id: String },
     ResetTo { id: String },
+    /// Undo this commit, the HEAD one, keeping its changes staged.
+    UndoCommit { id: String },
     CopyText { text: String },
     OpenWorktreeTab { path: String },
     NewWorktree,
@@ -179,6 +181,11 @@ pub(crate) fn context_actions(
                 action("Merge into current…", idle && !on_head, ContextActionKind::MergeCommit { id: id.clone() }),
                 action("Cherry-pick onto current…", idle && !on_head, ContextActionKind::CherryPick { id: id.clone() }),
                 action("Reset current branch to here…", idle && !on_head, ContextActionKind::ResetTo { id: id.clone() }),
+            ]);
+            if on_head {
+                actions.push(action("Undo commit (keep changes)", idle, ContextActionKind::UndoCommit { id: id.clone() }));
+            }
+            actions.extend([
                 action("Copy hash", true, ContextActionKind::CopyText { text: id.clone() }),
                 action(format!("Copy short hash ({short})"), true, ContextActionKind::CopyText { text: short.to_string() }),
                 action("Copy subject", !subject.is_empty(), ContextActionKind::CopyText { text: subject.clone() }),
@@ -597,6 +604,20 @@ mod tests {
             actions[0]
         );
         assert_eq!(actions[0].label, "Open worktree 'feature/x' in a tab");
+    }
+
+    #[test]
+    fn only_the_head_row_offers_to_undo_its_commit() {
+        let id = "abcdef0123456789";
+        let target = ContextTarget::Commit { id: id.into(), subject: String::new() };
+        let on_head = context_actions(&target, &[], &[], Some(id), false);
+        let undo = find(&on_head, "Undo commit (keep changes)");
+        assert!(undo.enabled);
+        assert_eq!(undo.kind, ContextActionKind::UndoCommit { id: id.into() });
+        let busy = context_actions(&target, &[], &[], Some(id), true);
+        assert!(!find(&busy, "Undo commit").enabled);
+        let elsewhere = context_actions(&target, &[], &[], Some("other"), false);
+        assert!(!elsewhere.iter().any(|action| action.label.starts_with("Undo commit")));
     }
 
     #[test]

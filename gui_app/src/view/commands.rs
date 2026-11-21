@@ -47,14 +47,20 @@ pub(super) fn command_place(command: RibbonCommand) -> CommandPlace {
     }
 }
 
+/// A summary, and something to record: staged changes, or, while amending, the HEAD commit
+/// to replace (an amend may only change the message).
 pub(super) fn can_commit(app: &GitApp) -> bool {
-    !app.session().commit_message.trim().is_empty()
-        && app
-            .session()
-            .state
-            .current_status
-            .as_ref()
-            .is_some_and(|status| !status.staged_files.is_empty())
+    let session = app.session();
+    !session.commit_message.trim().is_empty()
+        && if session.amending {
+            session.seen_head().is_some()
+        } else {
+            session
+                .state
+                .current_status
+                .as_ref()
+                .is_some_and(|status| !status.staged_files.is_empty())
+        }
 }
 
 pub(super) fn can_stash(app: &GitApp) -> bool {

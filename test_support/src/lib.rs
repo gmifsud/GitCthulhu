@@ -39,6 +39,9 @@ pub struct FakeGitRepository {
     pub unstage_result: Result<(), DomainError>,
     pub untrack_result: Result<(), DomainError>,
     pub commit_result: Result<(), DomainError>,
+    pub amend_result: Result<(), DomainError>,
+    /// The undone commit's full message.
+    pub undo_commit_result: Result<String, DomainError>,
     pub fetch_result: Result<(), DomainError>,
     pub push_result: Result<(), DomainError>,
     pub pull_result: Result<(), DomainError>,
@@ -93,6 +96,8 @@ impl FakeGitRepository {
             unstage_result: Ok(()),
             untrack_result: Ok(()),
             commit_result: Ok(()),
+            amend_result: Ok(()),
+            undo_commit_result: Ok(String::new()),
             fetch_result: Ok(()),
             push_result: Ok(()),
             pull_result: Ok(()),
@@ -211,6 +216,14 @@ impl GitRepository for FakeGitRepository {
 
     fn commit(&self, _message: &str) -> Result<(), DomainError> {
         self.commit_result.clone()
+    }
+
+    fn amend(&self, _message: &str, _expected_head: &str) -> Result<(), DomainError> {
+        self.amend_result.clone()
+    }
+
+    fn undo_commit(&self, _expected_head: &str) -> Result<String, DomainError> {
+        self.undo_commit_result.clone()
     }
 
     fn fetch(&self) -> Result<(), DomainError> {

@@ -146,6 +146,8 @@ pub(crate) struct WorktreeSession {
     /// The commit's summary line. The rest of its message is `commit_body`.
     pub(crate) commit_message: String,
     pub(crate) commit_body: text_editor::Content,
+    /// The Amend box is ticked: committing replaces the HEAD commit instead of adding one.
+    pub(crate) amending: bool,
     pub(crate) marked_files: Vec<MarkedFile>,
     /// Folder prefixes collapsed in Tree mode, keyed with their disposition.
     pub(crate) collapsed_dirs: HashSet<(FileDisposition, String)>,
@@ -228,6 +230,7 @@ impl WorktreeSession {
             selection: None,
             commit_message: String::new(),
             commit_body: text_editor::Content::new(),
+            amending: false,
             marked_files: Vec::new(),
             collapsed_dirs: HashSet::new(),
             collapsed_sections: HashSet::new(),
@@ -518,9 +521,31 @@ impl WorktreeSession {
         }
     }
 
-    /// The commit this tab's summary and body describe.
+    /// The commit this tab's summary and body describe: a new commit, or, while Amend is
+    /// ticked, a replacement for the HEAD this tab last read.
     pub(crate) fn commit_edit(&self) -> WorktreeEdit {
-        WorktreeEdit::Commit(full_commit_message(&self.commit_message, &self.commit_body.text()))
+        let message = full_commit_message(&self.commit_message, &self.commit_body.text());
+        if self.amending {
+            WorktreeEdit::Amend {
+                message,
+                expected_head: self.seen_head().unwrap_or_default().to_string(),
+            }
+        } else {
+            WorktreeEdit::Commit(message)
+        }
+    }
+
+    /// The HEAD commit as this tab last read it; `None` before the first commit or the first load.
+    pub(crate) fn seen_head(&self) -> Option<&str> {
+        self.state.current_status.as_ref()?.head_commit_id.as_deref()
+    }
+
+    /// `head` is on a remote already, so rewriting it means the next push must force.
+    pub(crate) fn head_is_on_a_remote(&self, head: &str) -> bool {
+        // "The repository has a remote" is read from the remote-tracking branches until the
+        // remotes themselves are loaded (ruling R9).
+        let has_a_remote = self.state.branches.iter().any(|branch| branch.is_remote);
+        has_a_remote && !self.state.unpushed.contains(head)
     }
 
     /// Empty the summary and the body.

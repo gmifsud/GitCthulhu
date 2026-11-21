@@ -227,6 +227,9 @@ pub enum DomainError {
     RepositoryNotFound,
     AccessDenied,
     AuthenticationFailed,
+    /// An operation prepared against one HEAD found another: nothing was changed.
+    /// `actual` is empty when HEAD is unborn.
+    HeadMoved { expected: String, actual: String },
     Unknown(String),
 }
 

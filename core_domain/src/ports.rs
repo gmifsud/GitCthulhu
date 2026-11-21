@@ -89,6 +89,21 @@ pub trait GitRepository {
     /// content differs from both HEAD and the file, so no staged work is lost.
     fn untrack_paths(&self, paths: &[String]) -> Result<(), DomainError>;
     fn commit(&self, message: &str) -> Result<(), DomainError>;
+    /// `git commit --amend -m <message>`: replace the HEAD commit with one that has this
+    /// message and the staged changes. Refused with [`DomainError::HeadMoved`], changing
+    /// nothing, when HEAD is not `expected_head`.
+    fn amend(&self, message: &str, expected_head: &str) -> Result<(), DomainError> {
+        let _ = (message, expected_head);
+        Err(DomainError::Unknown("this repository cannot amend a commit".to_string()))
+    }
+    /// `git reset --soft HEAD~1`: take the HEAD commit off the branch and keep its changes
+    /// staged. Returns the undone commit's full message. Refused with
+    /// [`DomainError::HeadMoved`], changing nothing, when HEAD is not `expected_head`, and
+    /// refused for a commit with no parent.
+    fn undo_commit(&self, expected_head: &str) -> Result<String, DomainError> {
+        let _ = expected_head;
+        Err(DomainError::Unknown("this repository cannot undo a commit".to_string()))
+    }
     /// `git fetch` of the default remote, using the repository's own credential helper and SSH config.
     fn fetch(&self) -> Result<(), DomainError>;
     /// `git push` of the current branch to its upstream, with no refspec.

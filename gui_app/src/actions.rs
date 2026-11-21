@@ -20,6 +20,8 @@ pub(crate) enum ActionId {
     UnstageMarked,
     Stash,
     Commit,
+    AmendLastCommit,
+    UndoLastCommit,
     ToggleTerminal,
     CycleLayout,
     CycleHunkMode,
@@ -172,6 +174,8 @@ pub(crate) const ACTIONS: &[ActionSpec] = &[
         "Changes",
         ctrl(ChordKey::Enter),
     ),
+    spec(ActionId::AmendLastCommit, "Amend last commit", "Changes", None),
+    spec(ActionId::UndoLastCommit, "Undo last commit", "Changes", None),
     spec(
         ActionId::QuickOpen,
         "Go to branch, file, commit…",
@@ -272,6 +276,8 @@ pub(crate) struct ActionContext {
     pub inspecting_other: bool,
     /// The palette is open: Ctrl+Enter belongs to it.
     pub palette_open: bool,
+    /// The Amend box is ticked: committing replaces HEAD, so nothing need be staged.
+    pub amending: bool,
 }
 
 /// `Ok` when `id` can run, else the reason in words. The reasons for Fetch, Pull and Push
@@ -290,6 +296,8 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
             | ActionId::UnstageMarked
             | ActionId::Stash
             | ActionId::Commit
+            | ActionId::AmendLastCommit
+            | ActionId::UndoLastCommit
     );
     if touches_git {
         if cx.busy {
@@ -310,8 +318,12 @@ pub(crate) fn availability(id: ActionId, cx: &ActionContext) -> Result<(), &'sta
         ActionId::Commit if cx.inspecting_other => {
             Err("Showing another worktree: open its tab to commit")
         }
-        ActionId::Commit if !cx.has_staged => Err("Nothing is staged"),
+        ActionId::Commit if !cx.has_staged && !cx.amending => Err("Nothing is staged"),
         ActionId::Commit if !cx.has_summary => Err("Write a commit summary first"),
+        ActionId::AmendLastCommit | ActionId::UndoLastCommit if !cx.head_born => {
+            Err("No commits yet")
+        }
+        ActionId::AmendLastCommit if cx.amending => Err("Amend is already ticked"),
         _ => Ok(()),
     }
 }
@@ -422,6 +434,50 @@ mod tests {
         assert_eq!(
             availability(ActionId::Fetch, &busy),
             Err("Another git action is running")
+        );
+    }
+
+    #[test]
+    fn undo_and_amend_are_unavailable_before_the_first_commit() {
+        let cx = ActionContext {
+            has_session: true,
+            head_born: false,
+            ..Default::default()
+        };
+        assert_eq!(availability(ActionId::UndoLastCommit, &cx), Err("No commits yet"));
+        assert_eq!(availability(ActionId::AmendLastCommit, &cx), Err("No commits yet"));
+        let born = ActionContext {
+            head_born: true,
+            ..cx
+        };
+        assert_eq!(availability(ActionId::UndoLastCommit, &born), Ok(()));
+        assert_eq!(availability(ActionId::AmendLastCommit, &born), Ok(()));
+        let busy = ActionContext { busy: true, ..born };
+        assert_eq!(availability(ActionId::UndoLastCommit, &busy), Err(BUSY_REASON));
+        assert_eq!(availability(ActionId::AmendLastCommit, &busy), Err(BUSY_REASON));
+    }
+
+    #[test]
+    fn neither_rewrite_has_a_default_chord() {
+        for id in [ActionId::AmendLastCommit, ActionId::UndoLastCommit] {
+            let spec = ACTIONS.iter().find(|spec| spec.id == id).expect("listed");
+            assert_eq!(spec.chord, None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn while_amending_a_commit_needs_nothing_staged() {
+        let amending = ActionContext {
+            has_session: true,
+            head_born: true,
+            has_summary: true,
+            amending: true,
+            ..Default::default()
+        };
+        assert_eq!(availability(ActionId::Commit, &amending), Ok(()));
+        assert_eq!(
+            availability(ActionId::AmendLastCommit, &amending),
+            Err("Amend is already ticked")
         );
     }
 

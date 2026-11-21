@@ -246,7 +246,16 @@ pub(crate) fn edit_action(edit: &crate::jobs::WorktreeEdit) -> Action {
             message.lines().next().unwrap_or_default().trim(),
             "git commit",
         ),
+        WorktreeEdit::Amend { message, .. } => Action::new(
+            "Amend",
+            message.lines().next().unwrap_or_default().trim(),
+            "git commit --amend",
+        ),
     }
+}
+
+pub(crate) fn undo_commit_action(id: &str) -> Action {
+    Action::new("Undo commit", short(id), "git reset --soft HEAD~1")
 }
 
 pub(crate) fn stash_action(action: &crate::jobs::StashAction) -> Action {

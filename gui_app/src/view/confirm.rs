@@ -103,8 +103,35 @@ pub(super) fn history_prompt<'a>(
             tokens,
             reading,
         ),
+        HistoryPrompt::UndoPushed { id } => dialog(
+            "Undo this commit?",
+            crate::selection::short_hash(id),
+            UNDO_PUSHED_WARNING,
+            true,
+            "Undo commit",
+            Message::ConfirmUndoCommit,
+            Message::CancelHistory,
+            tokens,
+            reading,
+        ),
+        HistoryPrompt::AmendPushed { id } => dialog(
+            "Amend this commit?",
+            crate::selection::short_hash(id),
+            AMEND_PUSHED_WARNING,
+            true,
+            "Amend",
+            Message::ConfirmAmend,
+            Message::CancelHistory,
+            tokens,
+            reading,
+        ),
     }
 }
+
+pub(crate) const UNDO_PUSHED_WARNING: &str =
+    "This commit is already on a remote. Undoing it rewrites history, so the next push will need a force push.";
+pub(crate) const AMEND_PUSHED_WARNING: &str =
+    "This commit is already on a remote. Amending rewrites it, so the next push will need a force push.";
 
 fn reset_dialog<'a>(id: &str, tokens: DesignTokens, reading: Reading) -> Element<'a, Message> {
     let card = column![

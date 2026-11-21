@@ -11,7 +11,7 @@ use crate::selection::Selection;
 use crate::theme::DesignTokens;
 use core_domain::FileDisposition;
 use iced::widget::button::Status;
-use iced::widget::{button, column, container, horizontal_space, mouse_area, row, scrollable, text, text_editor, text_input, Space};
+use iced::widget::{button, checkbox, column, container, horizontal_space, mouse_area, row, scrollable, text, text_editor, text_input, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow};
 
 use super::chrome::{editor_style, field_style, glyph, hairline, icon_button, labelled_button, one_line, one_line_height, Reading};
@@ -139,7 +139,22 @@ fn commit_box<'a>(app: &'a GitApp, selection: &Selection, tokens: DesignTokens, 
             tokens,
             reading,
         ),
-        labelled_button(Icon::Check, "Commit".to_string(), commit, ready, true, tokens, reading),
+        // Nothing to amend before the first commit.
+        checkbox("Amend", session.amending)
+            .on_toggle_maybe(
+                (session.seen_head().is_some() && !session.state.loading).then_some(|_| Message::ToggleAmend),
+            )
+            .font(reading.font)
+            .text_size(reading.size),
+        labelled_button(
+            Icon::Check,
+            if session.amending { "Amend" } else { "Commit" }.to_string(),
+            commit,
+            ready,
+            true,
+            tokens,
+            reading,
+        ),
     ]
     .spacing(6)
     .align_y(Alignment::Center);

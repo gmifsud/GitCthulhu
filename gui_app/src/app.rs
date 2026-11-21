@@ -20,7 +20,8 @@ use crate::jobs::{
     probe_worktree_in_background, pull_in_background,
     push_in_background, remove_worktree_in_background, save_settings_in_background,
     compare_in_background, shell_stream, stage_hunk_in_background, stash_in_background,
-    stop_shell, suggest_commit_in_background, worktrees_in_background, BranchAction,
+    stop_shell, suggest_commit_in_background, undo_commit_in_background, worktrees_in_background,
+    BranchAction,
     HistoryAction, SharedRepository, ShellEvent, StashAction, WorktreeEdit,
 };
 use crate::compare::{CompareLookups, CompareSide, CompareState, LookupSource};
@@ -592,6 +593,16 @@ pub(crate) enum Message {
     ConfirmMerge,
     ConfirmRebase,
     HistoryFinished(SessionKey, Result<(), DomainError>),
+    /// The Amend box beside Commit was ticked or unticked.
+    ToggleAmend,
+    /// Amend a HEAD that is already on a remote, after the user said yes.
+    ConfirmAmend,
+    /// Undo the HEAD commit this tab shows, keeping its changes staged.
+    AskUndoCommit,
+    /// Undo a HEAD that is already on a remote, after the user said yes.
+    ConfirmUndoCommit,
+    /// The undone commit's full message, or why nothing was undone.
+    UndoCommitFinished(SessionKey, Result<String, DomainError>),
     /// Focus the tab at this index.
     SelectWorktreeTab(usize),
     /// A WIP row or Explorer worktree row was pressed: inspect it, or on a double-click
@@ -878,6 +889,13 @@ impl core_domain::ActivityStore for NoActivityStore {
 /// Every message that ends a git action is listed here.
 fn finished_outcome(message: &Message) -> Option<(crate::activity::Lane, core_domain::ActivityOutcome)> {
     use crate::activity::Lane;
+    if let Message::UndoCommitFinished(path, result) = message {
+        let outcome = match result {
+            Ok(_) => core_domain::ActivityOutcome::Succeeded,
+            Err(error) => core_domain::ActivityOutcome::Failed(error_message(error)),
+        };
+        return Some((Lane::Worktree(path.path.clone()), outcome));
+    }
     let (lane, result) = match message {
         Message::CheckoutFinished(path, result)
         | Message::FetchFinished(path, result)
@@ -933,7 +951,7 @@ pub(crate) enum WorktreePrompt {
     },
 }
 
-/// A cherry-pick, reset, merge, or rebase waiting for confirmation.
+/// A cherry-pick, reset, merge, rebase, or rewrite of a pushed HEAD waiting for confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HistoryPrompt {
     CherryPick { id: String },
@@ -941,6 +959,10 @@ pub(crate) enum HistoryPrompt {
     /// `name` is empty until the user picks a branch; `no_ff` records a merge commit always.
     Merge { name: String, no_ff: bool },
     Rebase { name: String },
+    /// Undo a HEAD commit that is already on a remote. `id` is the HEAD the view saw.
+    UndoPushed { id: String },
+    /// Amend a HEAD commit that is already on a remote. `id` is the HEAD the view saw.
+    AmendPushed { id: String },
 }
 
 /// A stash waiting for its message. `paths` empty stashes every tracked change.
@@ -2079,27 +2101,20 @@ impl GitApp {
             }
             Message::FocusCommitBody => iced::widget::focus_next(),
             Message::EditWorktree(edit) => {
-                let Some(session) = self.active_session() else {
-                    return Task::none();
-                };
-                if session.state.loading {
-                    return Task::none();
-                }
-                if let WorktreeEdit::Commit(message) = &edit {
-                    if message.trim().is_empty() {
+                if let WorktreeEdit::Amend { message, expected_head } = &edit {
+                    let asks_first = self.active_session().is_some_and(|session| {
+                        !session.state.loading
+                            && !message.trim().is_empty()
+                            && !expected_head.is_empty()
+                            && session.head_is_on_a_remote(expected_head)
+                    });
+                    if asks_first {
+                        self.close_prompts();
+                        self.history_prompt = Some(HistoryPrompt::AmendPushed { id: expected_head.clone() });
                         return Task::none();
                     }
                 }
-                let repo = session.adapter.clone();
-                let key = session.key();
-                let path = key.path.clone();
-                self.session_mut().state.loading = true;
-                self.error = None;
-                self.begin_activity(&path, crate::activity::edit_action(&edit));
-                let report = edit.clone();
-                Task::perform(edit_in_background(repo, edit), move |result| {
-                    Message::WorktreeEditFinished(key.clone(), report.clone(), result)
-                })
+                self.run_worktree_edit(edit)
             }
             Message::WorktreeEditFinished(path, edit, result) => {
                 let Some(session) = self.session_mut_for(&path) else {
@@ -2108,14 +2123,21 @@ impl GitApp {
                 session.state.loading = false;
                 match result {
                     Ok(()) => {
-                        if matches!(edit, WorktreeEdit::Commit(_)) {
+                        if matches!(edit, WorktreeEdit::Commit(_) | WorktreeEdit::Amend { .. }) {
                             session.clear_commit_message();
+                            session.amending = false;
                         }
                         Task::done(Message::RefreshSession(path))
                     }
                     Err(error) => {
                         self.error = Some(error_message(&error));
-                        Task::none()
+                        // Show the HEAD that is there now, keeping the error on screen. The
+                        // draft stays for another try.
+                        if matches!(error, DomainError::HeadMoved { .. }) {
+                            self.begin_refresh_for(&path, false)
+                        } else {
+                            Task::none()
+                        }
                     }
                 }
             }
@@ -3340,6 +3362,43 @@ impl GitApp {
             Message::ConfirmReset(mode) => self.confirm_reset(mode),
             Message::ConfirmMerge => self.confirm_merge(),
             Message::ConfirmRebase => self.confirm_rebase(),
+            Message::ToggleAmend => {
+                self.toggle_amend();
+                Task::none()
+            }
+            Message::ConfirmAmend => self.confirm_amend(),
+            Message::AskUndoCommit => {
+                let Some(head) = self.active_session().and_then(|s| s.seen_head()).map(str::to_string) else {
+                    return Task::none();
+                };
+                self.ask_undo_commit(head)
+            }
+            Message::ConfirmUndoCommit => {
+                let Some(HistoryPrompt::UndoPushed { id }) = self.history_prompt.clone() else {
+                    return Task::none();
+                };
+                self.run_undo_commit(id)
+            }
+            Message::UndoCommitFinished(path, result) => {
+                let Some(session) = self.session_mut_for(&path) else {
+                    return Task::none();
+                };
+                session.state.loading = false;
+                match result {
+                    Ok(message) => {
+                        // The undone commit's message becomes the draft, ready to commit again.
+                        let (summary, body) = crate::session::split_summary_and_body(&message);
+                        session.commit_message = summary;
+                        session.commit_body = text_editor::Content::with_text(&body);
+                        session.amending = false;
+                        self.begin_refresh_for(&path, true)
+                    }
+                    Err(error) => {
+                        self.error = Some(error_message(&error));
+                        self.begin_refresh_for(&path, false)
+                    }
+                }
+            }
             Message::HistoryFinished(path, result) => {
                 let Some(session) = self.session_mut_for(&path) else {
                     return Task::none();
@@ -5321,6 +5380,112 @@ impl GitApp {
         })
     }
 
+    /// Stage, unstage, untrack, commit or amend in the active tab. A blank message, or an
+    /// amend with no HEAD to check against, runs nothing.
+    fn run_worktree_edit(&mut self, edit: WorktreeEdit) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        let refused = match &edit {
+            WorktreeEdit::Commit(message) => message.trim().is_empty(),
+            WorktreeEdit::Amend { message, expected_head } => {
+                message.trim().is_empty() || expected_head.is_empty()
+            }
+            WorktreeEdit::Stage(_) | WorktreeEdit::Unstage(_) | WorktreeEdit::Untrack { .. } => false,
+        };
+        if refused {
+            return Task::none();
+        }
+        let repo = session.adapter.clone();
+        let key = session.key();
+        let path = key.path.clone();
+        self.session_mut().state.loading = true;
+        self.error = None;
+        self.begin_activity(&path, crate::activity::edit_action(&edit));
+        let report = edit.clone();
+        Task::perform(edit_in_background(repo, edit), move |result| {
+            Message::WorktreeEditFinished(key.clone(), report.clone(), result)
+        })
+    }
+
+    /// Tick or untick Amend. Ticking fills an empty draft from the HEAD commit, so its
+    /// message is edited rather than retyped. Before the first commit there is nothing to amend.
+    fn toggle_amend(&mut self) {
+        let Some(session) = self.active_session_mut() else {
+            return;
+        };
+        if session.amending {
+            session.amending = false;
+            return;
+        }
+        let Some(head) = session.seen_head().map(str::to_string) else {
+            return;
+        };
+        session.amending = true;
+        let draft_is_empty =
+            session.commit_message.trim().is_empty() && session.commit_body.text().trim().is_empty();
+        if !draft_is_empty {
+            return;
+        }
+        if let Some(commit) = session.state.commits.iter().find(|commit| commit.id == head) {
+            let (summary, body) = crate::session::split_summary_and_body(&commit.message);
+            session.commit_message = summary;
+            session.commit_body = text_editor::Content::with_text(&body);
+        }
+    }
+
+    /// The user said yes to amending a pushed HEAD. The amend is checked against the HEAD
+    /// the prompt was opened for, not whatever the tab shows now.
+    fn confirm_amend(&mut self) -> Task<Message> {
+        let Some(HistoryPrompt::AmendPushed { id }) = self.history_prompt.clone() else {
+            return Task::none();
+        };
+        self.history_prompt = None;
+        let Some(WorktreeEdit::Amend { message, .. }) = self.active_session().map(WorktreeSession::commit_edit) else {
+            return Task::none();
+        };
+        self.run_worktree_edit(WorktreeEdit::Amend { message, expected_head: id })
+    }
+
+    /// Undo the HEAD commit the view showed as `seen`: at once when it is on no remote,
+    /// after a confirmation when it is. Either way `seen` is the HEAD the adapter expects.
+    fn ask_undo_commit(&mut self, seen: String) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading || seen.is_empty() {
+            return Task::none();
+        }
+        if session.head_is_on_a_remote(&seen) {
+            self.close_prompts();
+            self.history_prompt = Some(HistoryPrompt::UndoPushed { id: seen });
+            return Task::none();
+        }
+        self.run_undo_commit(seen)
+    }
+
+    fn run_undo_commit(&mut self, expected_head: String) -> Task<Message> {
+        let Some(session) = self.active_session() else {
+            return Task::none();
+        };
+        if session.state.loading {
+            return Task::none();
+        }
+        let repo = session.adapter.clone();
+        let key = session.key();
+        let path = key.path.clone();
+        self.close_prompts();
+        self.session_mut().state.loading = true;
+        self.error = None;
+        self.begin_activity(&path, crate::activity::undo_commit_action(&expected_head));
+        Task::perform(undo_commit_in_background(repo, expected_head), move |result| {
+            Message::UndoCommitFinished(key.clone(), result)
+        })
+    }
+
     fn ask_discard_change(
         &mut self,
         path: String,
@@ -5491,6 +5656,7 @@ impl GitApp {
                 select(self, Selection::Commit { id });
                 self.update(Message::AskReset)
             }
+            Kind::UndoCommit { id } => self.ask_undo_commit(id),
             Kind::CopyText { text } => iced::clipboard::write(text),
             Kind::OpenWorktreeTab { path } => self.update(Message::OpenWorktree(path)),
             Kind::NewWorktree => self.update(Message::AskCreateWorktree),
@@ -5966,6 +6132,7 @@ impl GitApp {
             has_marked: !session.marked_files.is_empty(),
             inspecting_other: self.inspected_path().is_some(),
             palette_open: self.palette.is_some(),
+            amending: session.amending,
             has_changes: status.is_some_and(|status| {
                 !status.staged_files.is_empty() || !status.unstaged_files.is_empty()
             }),
@@ -5997,6 +6164,8 @@ impl GitApp {
                     .map(|session| session.commit_edit())
                     .unwrap_or_else(|| WorktreeEdit::Commit(String::new())),
             ),
+            ActionId::AmendLastCommit => Message::ToggleAmend,
+            ActionId::UndoLastCommit => Message::AskUndoCommit,
             ActionId::ToggleTerminal => Message::ToggleTerminal,
             ActionId::CycleLayout => Message::CycleLayout,
             ActionId::CycleHunkMode => Message::CycleHunkMode,
@@ -9369,6 +9538,186 @@ mod tests {
         assert!(app.shortcuts_open);
         let _ = app.update(Message::Escape);
         assert!(!app.shortcuts_open);
+    }
+
+    const HEAD: &str = "abc";
+
+    /// A loaded tab whose HEAD is `HEAD`, with `message`, and nothing staged. `pushed` puts a
+    /// remote-tracking branch in the repository and leaves HEAD off the unpushed list.
+    fn app_at_head(message: &str, pushed: bool) -> GitApp {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let session = app.session_mut();
+        session.state.apply_event(ViewEvent::StatusUpdated(staged_nothing_status()));
+        session.state.apply_event(ViewEvent::LogUpdated(vec![Commit {
+            id: HEAD.into(),
+            parent_ids: vec!["parent".into()],
+            author: "a".into(),
+            message: message.into(),
+            timestamp: 0,
+        }]));
+        session.state.apply_event(ViewEvent::BranchesUpdated(vec![Branch {
+            name: "origin/main".into(),
+            is_remote: true,
+            is_head: false,
+            tip: "parent".into(),
+            ahead: 0,
+            behind: 0,
+        }]));
+        let unpushed = if pushed { vec![] } else { vec![HEAD.to_string()] };
+        session.state.apply_event(ViewEvent::UnpushedUpdated(unpushed));
+        session.state.loading = false;
+        app
+    }
+
+    #[test]
+    fn ticking_amend_fills_an_empty_draft_from_the_head_commit() {
+        let mut app = app_at_head("Fix\n\nWhy", false);
+        let _ = app.update(Message::ToggleAmend);
+        assert!(app.session().amending);
+        assert_eq!(app.session().commit_message, "Fix");
+        assert_eq!(app.session().commit_body.text().trim_end(), "Why");
+        assert!(matches!(
+            app.session().commit_edit(),
+            WorktreeEdit::Amend { message, expected_head } if message == "Fix\n\nWhy" && expected_head == HEAD
+        ));
+
+        // A draft already written is the user's: ticking again keeps it.
+        let _ = app.update(Message::ToggleAmend);
+        assert!(!app.session().amending);
+        app.session_mut().commit_message = "Mine".into();
+        app.session_mut().commit_body = text_editor::Content::new();
+        let _ = app.update(Message::ToggleAmend);
+        assert!(app.session().amending);
+        assert_eq!(app.session().commit_message, "Mine");
+    }
+
+    #[test]
+    fn amend_runs_with_nothing_staged_and_a_pushed_head_asks_first() {
+        use crate::actions::ActionId;
+        let mut app = app_at_head("Fix", false);
+        let _ = app.update(Message::ToggleAmend);
+        let _ = app.update(Message::RunAction(ActionId::Commit));
+        assert!(app.session().state.loading, "Ctrl+Enter amends with nothing staged");
+        assert_eq!(app.history_prompt, None);
+
+        let mut app = app_at_head("Fix", true);
+        let _ = app.update(Message::ToggleAmend);
+        let _ = app.update(Message::EditWorktree(app.session().commit_edit()));
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::AmendPushed { id: HEAD.into() }));
+        assert!(!app.session().state.loading, "nothing runs until the user says yes");
+        let _ = app.update(Message::ConfirmAmend);
+        assert_eq!(app.history_prompt, None);
+        assert!(app.session().state.loading);
+    }
+
+    #[test]
+    fn a_successful_amend_clears_the_draft_and_unticks_amend() {
+        let mut app = app_at_head("Fix", false);
+        let _ = app.update(Message::ToggleAmend);
+        assert_eq!(app.session().commit_message, "Fix");
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::WorktreeEditFinished(
+            app.active_key(),
+            WorktreeEdit::Amend { message: "Fix".into(), expected_head: HEAD.into() },
+            Ok(()),
+        ));
+        assert!(!app.session().amending);
+        assert_eq!(app.session().commit_message, "");
+        assert!(app.session().commit_body.text().trim().is_empty());
+    }
+
+    #[test]
+    fn undo_of_an_unpushed_commit_runs_at_once_and_a_pushed_one_asks_first() {
+        let mut app = app_at_head("Fix", false);
+        let _ = app.update(Message::AskUndoCommit);
+        assert!(app.session().state.loading);
+        assert_eq!(app.history_prompt, None);
+
+        let mut app = app_at_head("Fix", true);
+        let _ = app.update(Message::AskUndoCommit);
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::UndoPushed { id: HEAD.into() }));
+        assert!(!app.session().state.loading, "nothing runs until the user says yes");
+        let _ = app.update(Message::ConfirmUndoCommit);
+        assert_eq!(app.history_prompt, None);
+        assert!(app.session().state.loading);
+    }
+
+    #[test]
+    fn the_head_row_menu_undoes_that_commit() {
+        let mut app = app_at_head("Fix", true);
+        let _ = app.update(Message::ContextMenuAction(
+            crate::context_menu::ContextActionKind::UndoCommit { id: HEAD.into() },
+        ));
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::UndoPushed { id: HEAD.into() }));
+    }
+
+    #[test]
+    fn an_undone_message_returns_to_the_draft() {
+        let mut app = app_at_head("Fix", false);
+        app.session_mut().commit_message = "an older draft".into();
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::UndoCommitFinished(app.active_key(), Ok("Fix\n\nWhy".into())));
+        assert_eq!(app.session().commit_message, "Fix");
+        assert_eq!(app.session().commit_body.text().trim_end(), "Why");
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn head_moved_is_reported_in_plain_words() {
+        let moved = || DomainError::HeadMoved { expected: HEAD.into(), actual: "def".into() };
+        let mut app = app_at_head("Fix", false);
+        app.session_mut().commit_message = "keep me".into();
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::UndoCommitFinished(app.active_key(), Err(moved())));
+        assert_eq!(app.error.as_deref(), Some(crate::git_error::HEAD_MOVED));
+        assert!(app.session().state.loading, "a reload shows the HEAD that is there now");
+        assert_eq!(app.session().commit_message, "keep me", "the draft is untouched");
+
+        let mut app = app_at_head("Fix", false);
+        let _ = app.update(Message::ToggleAmend);
+        app.session_mut().state.loading = true;
+        let _ = app.update(Message::WorktreeEditFinished(
+            app.active_key(),
+            WorktreeEdit::Amend { message: "Fix".into(), expected_head: HEAD.into() },
+            Err(moved()),
+        ));
+        assert_eq!(app.error.as_deref(), Some(crate::git_error::HEAD_MOVED));
+        assert!(app.session().state.loading, "a reload shows the HEAD that is there now");
+        assert!(app.session().amending, "still amending, so the user can try again");
+        assert_eq!(app.session().commit_message, "Fix");
+    }
+
+    #[test]
+    fn a_prompt_keeps_the_head_it_was_opened_against() {
+        // The user commits in the terminal while the prompt is open; a refresh shows the new
+        // HEAD. Confirming still sends the HEAD the prompt was opened against, so the adapter
+        // refuses instead of undoing the new commit.
+        let mut app = app_at_head("Fix", true);
+        let _ = app.update(Message::AskUndoCommit);
+        let mut moved = staged_nothing_status();
+        moved.head_commit_id = Some("def".into());
+        app.session_mut().state.apply_event(ViewEvent::StatusUpdated(moved));
+        assert_eq!(app.history_prompt, Some(HistoryPrompt::UndoPushed { id: HEAD.into() }));
+    }
+
+    #[test]
+    fn before_the_first_commit_undo_and_amend_do_nothing() {
+        use crate::actions::ActionId;
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let mut unborn = staged_nothing_status();
+        unborn.head_commit_id = None;
+        app.session_mut().state.apply_event(ViewEvent::StatusUpdated(unborn));
+        app.session_mut().state.loading = false;
+
+        let _ = app.update(Message::AskUndoCommit);
+        let _ = app.update(Message::ToggleAmend);
+        assert!(!app.session().state.loading);
+        assert!(!app.session().amending);
+        assert_eq!(app.history_prompt, None);
+
+        let _ = app.update(Message::RunAction(ActionId::UndoLastCommit));
+        assert_eq!(app.error.as_deref(), Some("No commits yet"));
+        assert!(!app.session().state.loading);
     }
 
     fn app_ready_to_commit() -> GitApp {

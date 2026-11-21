@@ -2140,3 +2140,133 @@ fn unpushed_is_empty_on_an_unborn_branch_that_has_a_remote() {
 
     assert_eq!(fixture.adapter().unpushed_commits().expect("unborn, with remote"), Vec::<String>::new());
 }
+
+/// The full message of HEAD, as git stores it.
+fn head_message(dir: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["log", "-1", "--format=%B"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run git log");
+    assert!(output.status.success(), "git log failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn undo_moves_head_back_keeps_the_change_staged_and_returns_the_message() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "first");
+    let first = head_at(dir);
+    commit_file(dir, "a.txt", "two\n", "second\n\nbody");
+    let second = head_at(dir);
+    let adapter = fixture.adapter();
+
+    let message = adapter.undo_commit(&second.to_string()).expect("undo");
+
+    assert_eq!(message, "second\n\nbody");
+    assert_eq!(head_at(dir), first);
+    let status = adapter.status().expect("status");
+    assert_eq!(status.staged_files, vec!["a.txt".to_string()]);
+    assert!(status.unstaged_files.is_empty());
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).expect("read a.txt"), "two\n");
+}
+
+#[test]
+fn undo_of_the_first_commit_is_refused() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "first");
+    let first = head_at(dir);
+
+    let result = fixture.adapter().undo_commit(&first.to_string());
+
+    assert!(
+        matches!(&result, Err(DomainError::Unknown(text)) if text.contains("first commit")),
+        "{result:?}"
+    );
+    assert_eq!(head_at(dir), first);
+}
+
+#[test]
+fn undo_and_amend_refuse_when_head_is_not_the_one_expected() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "first");
+    let first = head_at(dir);
+    commit_file(dir, "a.txt", "two\n", "second");
+    let second = head_at(dir);
+    // A staged change an amend would take, had it run.
+    std::fs::write(dir.join("b.txt"), "new\n").expect("write b.txt");
+    git_in(dir, &["add", "b.txt"]);
+    let adapter = fixture.adapter();
+    let moved = Err(DomainError::HeadMoved {
+        expected: first.to_string(),
+        actual: second.to_string(),
+    });
+
+    assert_eq!(adapter.undo_commit(&first.to_string()), moved);
+    assert_eq!(adapter.amend("rewritten", &first.to_string()), moved.map(|_: String| ()));
+
+    assert_eq!(head_at(dir), second);
+    assert_eq!(head_message(dir), "second");
+    assert_eq!(adapter.status().expect("status").staged_files, vec!["b.txt".to_string()]);
+}
+
+#[test]
+fn undo_and_amend_before_the_first_commit_refuse_without_panicking() {
+    let fixture = TestRepo::new();
+    let adapter = fixture.adapter();
+    let moved = Err(DomainError::HeadMoved {
+        expected: "abc".to_string(),
+        actual: String::new(),
+    });
+
+    assert_eq!(adapter.undo_commit("abc"), moved);
+    assert_eq!(adapter.amend("first", "abc"), moved.map(|_: String| ()));
+}
+
+#[test]
+fn amend_rewrites_the_message_and_takes_staged_changes() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "first");
+    let first = head_at(dir);
+    commit_file(dir, "a.txt", "two\n", "second");
+    let second = head_at(dir);
+    std::fs::write(dir.join("b.txt"), "new\n").expect("write b.txt");
+    git_in(dir, &["add", "b.txt"]);
+    let adapter = fixture.adapter();
+
+    adapter
+        .amend("rewritten\n\nwith a body", &second.to_string())
+        .expect("amend");
+
+    let amended = head_at(dir);
+    assert_ne!(amended, second);
+    let log = adapter.log(Some(1)).expect("log");
+    assert_eq!(log[0].id, amended.to_string());
+    assert_eq!(log[0].parent_ids, vec![first.to_string()]);
+    assert_eq!(head_message(dir), "rewritten\n\nwith a body");
+    let status = adapter.status().expect("status");
+    assert!(status.staged_files.is_empty(), "b.txt went into the amended commit");
+    assert!(status.untracked_files.is_empty());
+}
+
+#[test]
+fn amend_with_a_blank_message_does_not_move_head() {
+    let fixture = TestRepo::new();
+    let dir = fixture.workdir();
+    commit_file(dir, "a.txt", "one\n", "first");
+    let first = head_at(dir);
+
+    let result = fixture.adapter().amend(" \n\t", &first.to_string());
+
+    assert_eq!(
+        result,
+        Err(DomainError::Unknown(BLANK_COMMIT_MESSAGE.to_string()))
+    );
+    assert_eq!(head_at(dir), first);
+}

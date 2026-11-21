@@ -23,6 +23,10 @@ use gix::refs::TargetRef;
 use status::{record_change, staged_changes, tracking_status, unborn_worktree_changes};
 use worktree::{parse_worktree_porcelain, require_worktree_path};
 
+/// Why the root commit cannot be undone.
+pub(crate) const FIRST_COMMIT_CANNOT_BE_UNDONE: &str =
+    "The first commit can't be undone; there is nothing before it.";
+
 pub(crate) fn unknown(error: impl Display) -> DomainError {
     DomainError::Unknown(error.to_string())
 }
@@ -754,6 +758,30 @@ impl GitRepository for GitoxideAdapter {
         run_git(&self.repo_path, &["commit", "-m", message])
     }
 
+    /// `git commit --amend -m`, once HEAD is the commit the caller saw.
+    fn amend(&self, message: &str, expected_head: &str) -> Result<(), DomainError> {
+        self.open_repo()?;
+        self.require_head(expected_head)?;
+        if message.trim().is_empty() {
+            return Err(DomainError::Unknown(BLANK_COMMIT_MESSAGE.to_string()));
+        }
+        run_git(&self.repo_path, &["commit", "--amend", "-m", message])
+    }
+
+    /// `git reset --soft HEAD~1`, once HEAD is the commit the caller saw. The index and the
+    /// worktree are untouched, so the undone commit's changes stay staged.
+    fn undo_commit(&self, expected_head: &str) -> Result<String, DomainError> {
+        self.open_repo()?;
+        self.require_head(expected_head)?;
+        let parent = command::git_output(&self.repo_path, &["rev-parse", "--verify", "--quiet", "HEAD~1"])?;
+        if !parent.status.success() {
+            return Err(DomainError::Unknown(FIRST_COMMIT_CANNOT_BE_UNDONE.to_string()));
+        }
+        let message = run_git_stdout(&self.repo_path, &["log", "-1", "--format=%B"])?;
+        run_git(&self.repo_path, &["reset", "--soft", "HEAD~1"])?;
+        Ok(message)
+    }
+
     /// Fetch the default remote with `git fetch`.
     ///
     /// Credential helpers, SSH config, and the agent stay the user's. A prompt is refused
@@ -1379,6 +1407,26 @@ impl GitoxideAdapter {
             run_git(&self.repo_path, &args)
         } else {
             run_git_paths(&self.repo_path, &args, paths)
+        }
+    }
+
+    /// `Ok` when `git rev-parse HEAD` is `expected`; otherwise [`DomainError::HeadMoved`],
+    /// with an empty `actual` when HEAD is unborn. A history rewrite checks this first, so an
+    /// operation prepared against one HEAD never runs against another.
+    fn require_head(&self, expected: &str) -> Result<(), DomainError> {
+        let head = command::git_output(&self.repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])?;
+        let actual = if head.status.success() {
+            String::from_utf8_lossy(&head.stdout).trim().to_string()
+        } else {
+            String::new()
+        };
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(DomainError::HeadMoved {
+                expected: expected.to_string(),
+                actual,
+            })
         }
     }
 }
