@@ -558,7 +558,10 @@ fn stash_and_checkout(repo: &dyn GitRepository, name: &str) -> Result<(), Domain
     let message = format!("Switching to {name}");
     let before = repo.stashes()?;
     repo.stash_push(&message, true)?;
-    let after = repo.stashes()?;
+    // The push may have made the stash, so a failed read says where the changes may be.
+    let after = repo.stashes().map_err(|read| {
+        DomainError::Unknown(format!("Your changes may be in the stash '{message}'. {}", error_message(&read)))
+    })?;
     // `git stash push` succeeds without making a stash when nothing needs saving; popping then
     // would restore an older, unrelated stash.
     let made = after.len() > before.len()
@@ -570,11 +573,12 @@ fn stash_and_checkout(repo: &dyn GitRepository, name: &str) -> Result<(), Domain
         Ok(()) => Ok(()),
         Err(error) => {
             let reason = error_message(&error);
-            // The stash just made is the newest one.
+            // The stash just made is the newest one. Where the changes are comes first: the
+            // collapsed status strip shows only the first line.
             Err(DomainError::Unknown(match repo.stash_pop(0) {
-                Ok(()) => format!("{reason}\nYour changes are back."),
+                Ok(()) => format!("Your changes are back.\n{reason}"),
                 Err(pop) => format!(
-                    "{reason}\nYour changes are saved in the stash '{message}'.\n{}",
+                    "Your changes are saved in the stash '{message}'.\n{reason}\n{}",
                     error_message(&pop)
                 ),
             }))
@@ -1491,9 +1495,18 @@ mod tests {
         assert_eq!(
             refused,
             Err(DomainError::Unknown(
-                "error: pathspec 'feature' did not match\nYour changes are back.".to_string()
+                "Your changes are back.\nerror: pathspec 'feature' did not match".to_string()
             ))
         );
+        assert_eq!(summary_of(refused), "Your changes are back.");
+    }
+
+    /// The one line the collapsed status strip shows for a failed job.
+    fn summary_of(result: Result<(), DomainError>) -> String {
+        let Err(DomainError::Unknown(message)) = result else {
+            panic!("expected git's message, got {result:?}");
+        };
+        crate::git_error::present(&message).summary
     }
 
     fn a_stash(commit_id: &str) -> core_domain::Stash {
@@ -1502,7 +1515,7 @@ mod tests {
 
     /// A repository where pushing a stash adds one.
     fn stashing_repo(base: FakeGitRepository) -> FakeGitRepository {
-        FakeGitRepository { stashes_after_push: Some(vec![a_stash("new")]), ..base }
+        FakeGitRepository { stashes_after_push: Some(Ok(vec![a_stash("new")])), ..base }
     }
 
     fn pops(repo: &FakeGitRepository) -> usize {
@@ -1519,9 +1532,23 @@ mod tests {
         assert_eq!(
             stuck,
             Err(DomainError::Unknown(
-                "boom\nYour changes are saved in the stash 'Switching to feature'.\npop failed".to_string()
+                "Your changes are saved in the stash 'Switching to feature'.\nboom\npop failed".to_string()
             ))
         );
+        assert_eq!(summary_of(stuck), "Your changes are saved in the stash 'Switching to feature'.");
+    }
+
+    #[test]
+    fn stash_and_switch_names_the_stash_when_the_list_cannot_be_read_after_stashing() {
+        let unsure = stash_and_switch(FakeGitRepository {
+            stashes_after_push: Some(Err(DomainError::Unknown("no list".to_string()))),
+            ..FakeGitRepository::ok()
+        });
+        assert_eq!(
+            unsure,
+            Err(DomainError::Unknown("Your changes may be in the stash 'Switching to feature'. no list".to_string()))
+        );
+        assert_eq!(summary_of(unsure), "Your changes may be in the stash 'Switching to feature'. no list");
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub struct FakeGitRepository {
     pub branches_result: Result<Vec<Branch>, DomainError>,
     pub stashes_result: Result<Vec<Stash>, DomainError>,
     /// What `stashes` returns once `stash_push` has run; `None` leaves the list unchanged.
-    pub stashes_after_push: Option<Vec<Stash>>,
+    pub stashes_after_push: Option<Result<Vec<Stash>, DomainError>>,
     pub stash_pushed: std::sync::atomic::AtomicBool,
     /// How many times `stash_pop` was called.
     pub stash_pop_calls: std::sync::atomic::AtomicUsize,
@@ -167,7 +167,7 @@ impl GitRepository for FakeGitRepository {
     fn stashes(&self) -> Result<Vec<Stash>, DomainError> {
         use std::sync::atomic::Ordering;
         match &self.stashes_after_push {
-            Some(after) if self.stash_pushed.load(Ordering::SeqCst) => Ok(after.clone()),
+            Some(after) if self.stash_pushed.load(Ordering::SeqCst) => after.clone(),
             _ => self.stashes_result.clone(),
         }
     }
