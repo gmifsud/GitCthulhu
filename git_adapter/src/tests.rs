@@ -1438,6 +1438,27 @@ fn ordinary_dangling_commits_are_not_stashes() {
 }
 
 #[test]
+fn among_several_unreachable_commits_only_the_dropped_stash_is_listed() {
+    let fixture = TestRepo::new();
+    commit_file(fixture.workdir(), "a.txt", "one\n", "first");
+    commit_file(fixture.workdir(), "a.txt", "two\n", "second");
+    for reworded in ["second, reworded", "second, reworded again"] {
+        git_in(
+            fixture.workdir(),
+            &["-c", "commit.gpgsign=false", "commit", "--amend", "-m", reworded],
+        );
+    }
+    fixture.write_file("a.txt", "three\n");
+    let adapter = fixture.adapter();
+    adapter.stash_push("only me", false).expect("stash");
+    adapter.stash_drop(0).expect("drop");
+
+    let lost = adapter.lost_stashes().expect("search");
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].message.contains("only me"), "{}", lost[0].message);
+}
+
+#[test]
 fn a_stash_that_is_still_listed_is_not_lost() {
     let fixture = TestRepo::new();
     fixture.commit("first", &[("a.txt", "one\n")], 0);

@@ -91,6 +91,34 @@ pub(crate) fn run_git_stdin(
     }
 }
 
+/// Run git with `stdin` fed to it and return trimmed stdout. The input is written on its own
+/// thread while stdout is drained, so a long reply cannot fill the pipe and stall both sides.
+pub(crate) fn run_git_stdin_stdout(repo_path: &str, args: &[&str], stdin: Vec<u8>) -> Result<String, DomainError> {
+    use std::io::Write;
+    let run_error = |error: std::io::Error| DomainError::Unknown(format!("could not run {GIT_EXECUTABLE}: {error}"));
+    let mut child = git_program(repo_path, args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(run_error)?;
+    let mut pipe = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(pipe) = pipe.as_mut() {
+            // A git that exits early closes the pipe; its exit status says why.
+            let _ = pipe.write_all(&stdin);
+        }
+        // Dropping the pipe sends end-of-input.
+    });
+    let output = child.wait_with_output().map_err(run_error)?;
+    let _ = writer.join();
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(DomainError::Unknown(git_failure_text(&output)))
+    }
+}
+
 /// `git commit` with a clean index writes its reason to stdout and leaves stderr empty.
 fn git_failure_text(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

@@ -1253,19 +1253,17 @@ impl GitRepository for GitoxideAdapter {
         .map(|line| line.trim().to_string())
         .collect();
         let fsck = run_git_stdout(&self.repo_path, &stash::FSCK_ARGS)?;
-        let mut lost = Vec::new();
-        for id in stash::unreachable_commit_ids(&fsck) {
-            if listed.contains(id) {
-                continue;
-            }
-            let log = run_git_stdout(
-                &self.repo_path,
-                &["log", "-1", "--no-show-signature", stash::CANDIDATE_FORMAT, id],
-            )?;
-            lost.extend(stash::parse_candidate(id, &log));
+        let mut ids = String::new();
+        for id in stash::unreachable_commit_ids(&fsck).into_iter().filter(|id| !listed.contains(*id)) {
+            ids.push_str(id);
+            ids.push('\n');
         }
-        lost.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.commit_id.cmp(&b.commit_id)));
-        Ok(lost)
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One git call for every candidate: a repository with years of rebases has thousands.
+        let log = command::run_git_stdin_stdout(&self.repo_path, &stash::CANDIDATE_ARGS, ids.into_bytes())?;
+        Ok(stash::parse_candidates(&log))
     }
 
     fn apply_stash_commit(&self, commit_id: &str) -> Result<(), DomainError> {
