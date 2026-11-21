@@ -171,6 +171,8 @@ pub(crate) struct GitApp {
     pub(crate) branch_list_open: bool,
     pub(crate) branch_popup_filter: String,
     pub(crate) files_as_tree: bool,
+    /// The keyboard shortcuts sheet is showing.
+    pub(crate) shortcuts_open: bool,
     /// Diff drawn side by side (true) or as one unified column.
     pub(crate) diff_split: bool,
     /// Keyboard modifiers held now.
@@ -347,6 +349,10 @@ pub(crate) enum Message {
     SetHunkMode(HunkMode),
     /// Beside ↔ Wide (Focus is explicit via [`Message::SetHunkMode`]).
     CycleHunkMode,
+    /// Run one catalogue action, or say why it cannot run now.
+    RunAction(crate::actions::ActionId),
+    /// Open or close the keyboard shortcuts sheet.
+    ToggleShortcuts,
     /// Escape: dismiss prompts, errors, overlays, then clear diff focus.
     Escape,
     StageMarked,
@@ -1035,6 +1041,7 @@ impl GitApp {
             branch_list_open: false,
             branch_popup_filter: String::new(),
             files_as_tree: true,
+            shortcuts_open: false,
             diff_split: true,
             modifiers: iced::keyboard::Modifiers::default(),
             window_width: 0.0,
@@ -1881,6 +1888,20 @@ impl GitApp {
                 self.apply_hunk_mode(next);
                 Task::none()
             }
+            Message::RunAction(id) => match crate::actions::availability(id, &self.action_context()) {
+                Ok(()) => {
+                    let message = self.message_for(id);
+                    self.update(message)
+                }
+                Err(reason) => {
+                    self.error = Some(reason.to_string());
+                    Task::none()
+                }
+            },
+            Message::ToggleShortcuts => {
+                self.shortcuts_open = !self.shortcuts_open;
+                Task::none()
+            }
             Message::Escape => self.handle_escape(),
             Message::HistoryQueryChanged(query) => {
                 self.history_query = query;
@@ -1945,6 +1966,12 @@ impl GitApp {
                 let Some(item) = ranked.get(position).and_then(|&index| items.get(index)) else {
                     return Task::none();
                 };
+                // An unavailable command stays put: its row already says why.
+                if let crate::palette::PaletteTarget::Command(id) = &item.target {
+                    if crate::actions::availability(*id, &self.action_context()).is_err() {
+                        return Task::none();
+                    }
+                }
                 let next = palette_message(item.target.clone());
                 self.palette = None;
                 self.update(next)
@@ -5639,6 +5666,10 @@ impl GitApp {
     }
 
     fn handle_escape(&mut self) -> Task<Message> {
+        if self.shortcuts_open {
+            self.shortcuts_open = false;
+            return Task::none();
+        }
         if self.palette.take().is_some() {
             return Task::none();
         }
@@ -5715,6 +5746,7 @@ impl GitApp {
 }
 
 /// Global shortcuts. Text inputs still receive keys; iced delivers both.
+/// Escape and the vertical arrows are special; every other chord comes from the catalogue.
 fn shortcut_message(
     key: iced::keyboard::Key,
     modifiers: iced::keyboard::Modifiers,
@@ -5722,36 +5754,13 @@ fn shortcut_message(
     use iced::keyboard::key::Named;
     use iced::keyboard::Key;
 
-    let ctrl = modifiers.control() || modifiers.logo();
     match key {
         Key::Named(Named::Escape) => Some(Message::Escape),
-        Key::Named(Named::F5) => Some(Message::Fetch),
         Key::Named(Named::ArrowDown) => Some(Message::PaletteMove(1)),
         Key::Named(Named::ArrowUp) => Some(Message::PaletteMove(-1)),
-        Key::Character(_) if typing_shortcut(&key, modifiers).is_some() => {
-            typing_shortcut(&key, modifiers)
-        }
-        Key::Character(c)
-            if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("l") =>
-        {
-            Some(Message::CycleLayout)
-        }
-        Key::Character(c)
-            if ctrl && modifiers.shift() && c.as_str().eq_ignore_ascii_case("h") =>
-        {
-            Some(Message::CycleHunkMode)
-        }
-        Key::Character(c)
-            if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("r") =>
-        {
-            Some(Message::RefreshRepository)
-        }
-        Key::Character(c)
-            if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("s") =>
-        {
-            Some(Message::StageMarked)
-        }
-        _ => None,
+        _ => typing_shortcut(&key, modifiers).or_else(|| {
+            crate::actions::action_for(&key, modifiers).map(Message::RunAction)
+        }),
     }
 }
 
@@ -5861,7 +5870,9 @@ fn branch_or_remote(name: &str, is_local: bool) -> Selection {
     }
 }
 
-/// Shortcuts honoured even while a text input has focus: Escape, Ctrl+P, Ctrl+K.
+/// Shortcuts honoured even while a text input has focus: Escape, Ctrl+C, and the catalogue
+/// actions that [`crate::actions::works_while_typing`] names (palette, history search,
+/// terminal, shortcuts sheet, commit).
 fn typing_shortcut(
     key: &iced::keyboard::Key,
     modifiers: iced::keyboard::Modifiers,
@@ -5872,17 +5883,12 @@ fn typing_shortcut(
     let ctrl = modifiers.control() || modifiers.logo();
     match key {
         Key::Named(Named::Escape) => Some(Message::Escape),
-        Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("p") => {
-            Some(Message::TogglePalette(String::new()))
-        }
-        Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("k") => {
-            Some(Message::FocusHistorySearch)
-        }
         Key::Character(c) if ctrl && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("c") => {
             Some(Message::CtrlCPressed)
         }
-        Key::Character(c) if ctrl && c.as_str() == "`" => Some(Message::ToggleTerminal),
-        _ => None,
+        _ => crate::actions::action_for(key, modifiers)
+            .filter(|&id| crate::actions::works_while_typing(id))
+            .map(Message::RunAction),
     }
 }
 
@@ -5915,15 +5921,77 @@ fn palette_message(target: crate::palette::PaletteTarget) -> Message {
         // Same rule as a single click: inspect, never activate.
         PaletteTarget::Worktree { path } => Message::InspectWorktree(path),
         PaletteTarget::Repository { path } => Message::OpenRepository(path),
+        PaletteTarget::Command(id) => Message::RunAction(id),
     }
 }
 
 impl GitApp {
+    /// What the window knows that decides which actions can run now.
+    pub(crate) fn action_context(&self) -> crate::actions::ActionContext {
+        let Some(session) = self.active_session() else {
+            return crate::actions::ActionContext::default();
+        };
+        let status = session.state.current_status.as_ref();
+        let running_here = self.activity.running().is_some_and(|entry| {
+            matches!(
+                &entry.running,
+                Some((crate::activity::Lane::Worktree(path), _)) if *path == session.path
+            )
+        });
+        crate::actions::ActionContext {
+            has_session: true,
+            loading: status.is_none(),
+            busy: running_here || session.state.loading,
+            head_born: status.is_some_and(|status| status.head_commit_id.is_some()),
+            has_upstream: status.is_some_and(|status| status.tracking.is_some()),
+            has_staged: status.is_some_and(|status| !status.staged_files.is_empty()),
+            has_marked: !session.marked_files.is_empty(),
+            has_changes: status.is_some_and(|status| {
+                !status.staged_files.is_empty() || !status.unstaged_files.is_empty()
+            }),
+        }
+    }
+
+    /// The existing message each catalogue action stands for.
+    pub(crate) fn message_for(&self, id: crate::actions::ActionId) -> Message {
+        use crate::actions::ActionId;
+        match id {
+            ActionId::Fetch => Message::Fetch,
+            ActionId::Pull => Message::Pull,
+            ActionId::Push => Message::Push,
+            ActionId::Refresh => Message::RefreshRepository,
+            ActionId::StageMarked => Message::StageMarked,
+            ActionId::UnstageMarked => Message::UnstageMarked,
+            ActionId::Stash => Message::StashPush,
+            ActionId::Commit => Message::EditWorktree(WorktreeEdit::Commit(
+                self.active_session()
+                    .map(|session| session.commit_message.clone())
+                    .unwrap_or_default(),
+            )),
+            ActionId::ToggleTerminal => Message::ToggleTerminal,
+            ActionId::CycleLayout => Message::CycleLayout,
+            ActionId::CycleHunkMode => Message::CycleHunkMode,
+            ActionId::QuickOpen => Message::TogglePalette(String::new()),
+            ActionId::CommandPalette => Message::TogglePalette(crate::palette::COMMAND_SCOPE.into()),
+            ActionId::FocusHistorySearch => Message::FocusHistorySearch,
+            ActionId::ShowShortcuts => Message::ToggleShortcuts,
+            ActionId::ToggleDiffSplit => Message::ToggleDiffSplit,
+            ActionId::ToggleFileTree => Message::SetFileTree(!self.files_as_tree),
+            ActionId::OpenSettings => Message::OpenSettings,
+        }
+    }
+
     /// Palette index for the active session and its ranking for the current query.
     pub(crate) fn palette_results(&self) -> (Vec<crate::palette::PaletteItem>, Vec<usize>) {
         let (Some(palette), Some(session)) = (self.palette.as_ref(), self.active_session()) else {
             return (Vec::new(), Vec::new());
         };
+        // Command rows exist only under the ">" scope, so plain quick-open never builds them.
+        let commands = palette
+            .query
+            .trim_start()
+            .starts_with(crate::palette::COMMAND_SCOPE)
+            .then(|| self.action_context());
         let items = crate::palette::palette_items(&crate::palette::PaletteSource {
             branches: &session.state.branches,
             tags: &session.state.tags,
@@ -5933,6 +6001,7 @@ impl GitApp {
             status: session.state.current_status.as_ref(),
             recent_repositories: &self.settings.recent_repositories,
             current_path: &session.path,
+            commands: commands.as_ref(),
         });
         let ranked = crate::palette::rank(&items, &palette.query);
         (items, ranked)
@@ -9134,16 +9203,106 @@ mod tests {
         assert!(app.session().state.loading);
     }
 
+    fn staged_nothing_status() -> core_domain::RepoStatus {
+        core_domain::RepoStatus {
+            staged_files: vec![],
+            unstaged_files: vec![],
+            untracked_files: vec![],
+            tracking: None,
+            head_commit_id: Some("abc".into()),
+            kinds: Default::default(),
+            operation: None,
+            conflicted_files: vec![],
+        }
+    }
+
+    #[test]
+    fn the_command_scope_lists_actions_and_refuses_an_unavailable_one() {
+        use crate::actions::ActionId;
+        use crate::palette::PaletteTarget;
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        // A status is present with nothing staged, and nothing is loading or running.
+        app.session_mut().state.current_status = Some(staged_nothing_status());
+        app.session_mut().state.loading = false;
+        let _ = app.update(Message::TogglePalette(">commit".into()));
+        let (items, ranked) = app.palette_results();
+        let first = &items[ranked[0]];
+        assert_eq!(first.target, PaletteTarget::Command(ActionId::Commit));
+        assert_eq!(first.detail, "Ctrl+Enter · Nothing is staged");
+        let _ = app.update(Message::PaletteActivate(0));
+        assert!(app.palette.is_some(), "an unavailable command keeps the palette open");
+    }
+
+    #[test]
+    fn an_available_command_closes_the_palette_and_runs() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(staged_nothing_status());
+        app.session_mut().state.loading = false;
+        let _ = app.update(Message::TogglePalette(">layout".into()));
+        let before = app.layout;
+        let _ = app.update(Message::PaletteActivate(0));
+        assert!(app.palette.is_none());
+        assert_ne!(app.layout, before, "Cycle layout ran");
+    }
+
+    #[test]
+    fn plain_quick_open_lists_no_commands() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::TogglePalette(String::new()));
+        let (items, _) = app.palette_results();
+        assert!(items
+            .iter()
+            .all(|item| item.kind != crate::palette::PaletteKind::Command));
+    }
+
+    #[test]
+    fn running_an_unavailable_action_shows_the_reason() {
+        use crate::actions::ActionId;
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        app.session_mut().state.current_status = Some(staged_nothing_status());
+        app.session_mut().state.loading = false;
+        let _ = app.update(Message::RunAction(ActionId::Pull));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("No upstream: this branch does not track a remote branch")
+        );
+        assert!(!app.session().state.loading, "Pull did not start");
+    }
+
+    #[test]
+    fn the_shortcuts_sheet_opens_and_escape_closes_it() {
+        let mut app = GitApp::with_repo(std::sync::Arc::new(FakeGitRepository::ok()));
+        let _ = app.update(Message::ToggleShortcuts);
+        assert!(app.shortcuts_open);
+        let _ = app.update(Message::Escape);
+        assert!(!app.shortcuts_open);
+    }
+
+    #[test]
+    fn ctrl_enter_commits_even_while_a_field_has_focus() {
+        use crate::actions::ActionId;
+        use iced::keyboard::{key::Named, Key, Modifiers};
+        assert!(matches!(
+            typing_shortcut(&Key::Named(Named::Enter), Modifiers::CTRL),
+            Some(Message::RunAction(ActionId::Commit))
+        ));
+        assert!(typing_shortcut(&Key::Named(Named::Enter), Modifiers::empty()).is_none());
+        assert!(
+            typing_shortcut(&Key::Character("s".into()), Modifiers::CTRL).is_none(),
+            "Ctrl+S stays out of text fields"
+        );
+    }
+
     #[test]
     fn ctrl_p_and_ctrl_k_work_while_typing() {
         use iced::keyboard::{Key, Modifiers};
         assert!(matches!(
             typing_shortcut(&Key::Character("p".into()), Modifiers::CTRL),
-            Some(Message::TogglePalette(_))
+            Some(Message::RunAction(crate::actions::ActionId::QuickOpen))
         ));
         assert!(matches!(
             typing_shortcut(&Key::Character("K".into()), Modifiers::CTRL),
-            Some(Message::FocusHistorySearch)
+            Some(Message::RunAction(crate::actions::ActionId::FocusHistorySearch))
         ));
         assert!(typing_shortcut(&Key::Character("p".into()), Modifiers::empty()).is_none());
     }

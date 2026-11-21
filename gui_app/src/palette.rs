@@ -3,6 +3,7 @@
 //! Pure: builds an index from what a session already loaded and ranks it against a
 //! query. No adapter calls, so ranking is deterministic and tested without a window.
 
+use crate::actions::{availability, ActionContext, ActionId, ACTIONS};
 use core_domain::{Branch, Commit, FileDisposition, RepoStatus, Stash, Tag, Worktree};
 
 /// Most rows the palette draws. Ranking still considers every item.
@@ -19,6 +20,7 @@ pub(crate) enum PaletteKind {
     File,
     Commit,
     Repository,
+    Command,
 }
 
 impl PaletteKind {
@@ -32,6 +34,7 @@ impl PaletteKind {
             Self::File => "file",
             Self::Commit => "commit",
             Self::Repository => "repo",
+            Self::Command => "command",
         }
     }
 }
@@ -67,6 +70,7 @@ pub(crate) enum PaletteTarget {
     Repository {
         path: String,
     },
+    Command(ActionId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +84,7 @@ pub(crate) struct PaletteItem {
 }
 
 /// Scope prefixes. `b:` local and remote branches, `r:` recent repositories, and so on.
-const SCOPES: [(&str, &[PaletteKind]); 7] = [
+const SCOPES: [(&str, &[PaletteKind]); 8] = [
     ("b:", &[PaletteKind::Branch, PaletteKind::Remote]),
     ("t:", &[PaletteKind::Tag]),
     ("s:", &[PaletteKind::Stash]),
@@ -88,14 +92,18 @@ const SCOPES: [(&str, &[PaletteKind]); 7] = [
     ("c:", &[PaletteKind::Commit]),
     ("f:", &[PaletteKind::File]),
     ("r:", &[PaletteKind::Repository]),
+    (COMMAND_SCOPE, &[PaletteKind::Command]),
 ];
 
 /// Footer hint listing the scope prefixes.
 pub(crate) const SCOPE_HINT: &str =
-    "b: branches · t: tags · s: stashes · w: worktrees · c: commits · f: files · r: repositories";
+    "b: branches · t: tags · s: stashes · w: worktrees · c: commits · f: files · r: repositories · >: commands";
 
 /// Prefix that opens the palette on the recent-repository list.
 pub(crate) const REPOSITORY_SCOPE: &str = "r:";
+
+/// Prefix that lists the catalogue actions instead of repository things.
+pub(crate) const COMMAND_SCOPE: &str = ">";
 
 /// Everything a session has loaded, plus the recent repositories.
 pub(crate) struct PaletteSource<'a> {
@@ -108,6 +116,8 @@ pub(crate) struct PaletteSource<'a> {
     pub recent_repositories: &'a [String],
     /// Path of the session on screen; left out of the repository list.
     pub current_path: &'a str,
+    /// `Some` lists the catalogue actions (the `>` scope), each judged against this context.
+    pub commands: Option<&'a ActionContext>,
 }
 
 pub(crate) fn palette_items(source: &PaletteSource<'_>) -> Vec<PaletteItem> {
@@ -230,6 +240,23 @@ pub(crate) fn palette_items(source: &PaletteSource<'_>) -> Vec<PaletteItem> {
             detail: path.clone(),
             target: PaletteTarget::Repository { path: path.clone() },
         });
+    }
+    if let Some(context) = source.commands {
+        for spec in ACTIONS {
+            let chord = spec.chord.map(|chord| chord.label());
+            let detail = match (chord, availability(spec.id, context)) {
+                (Some(chord), Err(reason)) => format!("{chord} · {reason}"),
+                (Some(chord), Ok(())) => chord,
+                (None, Err(reason)) => reason.to_string(),
+                (None, Ok(())) => String::new(),
+            };
+            items.push(PaletteItem {
+                kind: PaletteKind::Command,
+                label: spec.label.to_string(),
+                detail,
+                target: PaletteTarget::Command(spec.id),
+            });
+        }
     }
     items
 }
@@ -410,6 +437,7 @@ mod tests {
             commits: &commits,
             status: None,
             recent_repositories: &recent,
+            commands: None,
             current_path: r"D:\Repos\ISL\ISL-Backend",
         })
     }

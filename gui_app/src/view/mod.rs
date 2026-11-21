@@ -22,6 +22,7 @@ mod palette;
 mod patch;
 mod refs;
 mod settings;
+mod shortcuts;
 mod status_bar;
 mod tabs;
 mod terminal;
@@ -120,6 +121,8 @@ impl GitApp {
         let layer: Element<'_, Message> = if let Some(dialog) = self.dialog(tokens, reading) {
             // `opaque` keeps clicks and hovers from reaching the screen underneath.
             opaque(dialog)
+        } else if let Some(overlay) = shortcuts::shortcuts_overlay(self, tokens, reading) {
+            opaque(overlay)
         } else if let Some(overlay) = palette_overlay(self, tokens, reading) {
             overlay
         } else if let Some(overlay) =

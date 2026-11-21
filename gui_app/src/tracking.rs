@@ -27,6 +27,13 @@ fn describe(tracking: &TrackingStatus) -> String {
     }
 }
 
+/// Why a git action cannot start. The top bar's disabled buttons and the command palette
+/// say the same words.
+pub(crate) const BUSY_REASON: &str = "Another git action is running";
+pub(crate) const LOADING_REASON: &str = "Waiting for the repository to load";
+pub(crate) const NO_UPSTREAM_REASON: &str =
+    "No upstream: this branch does not track a remote branch";
+
 /// One button of the header's sync group: its label, whether it can be pressed, and why not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SyncButton {
@@ -48,11 +55,11 @@ pub(crate) fn sync_buttons(status: Option<&RepoStatus>, running: Option<&str>) -
         _ => idle,
     };
     let (pull, push, upstream_reason) = match status {
-        None => ("Pull ↓…".to_string(), "Push ↑…".to_string(), Some("Waiting for the repository to load")),
+        None => ("Pull ↓…".to_string(), "Push ↑…".to_string(), Some(LOADING_REASON)),
         Some(RepoStatus { tracking: None, .. }) => (
             "Pull".to_string(),
             "Push".to_string(),
-            Some("No upstream: this branch does not track a remote branch"),
+            Some(NO_UPSTREAM_REASON),
         ),
         // A count only when there is something to move: "Pull ↓0" read as noise. The branch
         // line says "Up to date with …" when both are zero.
@@ -62,7 +69,7 @@ pub(crate) fn sync_buttons(status: Option<&RepoStatus>, running: Option<&str>) -
             None,
         ),
     };
-    let busy_reason = busy.then_some("Another git action is running");
+    let busy_reason = busy.then_some(BUSY_REASON);
     [
         SyncButton {
             label: progress("Fetch", "Fetching", "Fetch".to_string()),
@@ -99,7 +106,7 @@ pub(crate) fn stash_button(status: Option<&RepoStatus>, running: Option<&str>) -
         },
         enabled: !busy && files > 0,
         reason: if busy {
-            Some("Another git action is running")
+            Some(BUSY_REASON)
         } else if files == 0 {
             Some("No tracked changes to stash")
         } else {

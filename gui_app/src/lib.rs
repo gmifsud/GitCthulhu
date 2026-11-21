@@ -1,6 +1,7 @@
 //! gui_app — iced interface.
 //! Adapters are wired by the `app` crate. This crate does not name them.
 
+mod actions;
 mod activity;
 mod app;
 mod appearance;

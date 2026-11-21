@@ -2,7 +2,8 @@
 //! stashes, changed files, loaded commits, and recent repositories.
 
 use crate::app::{GitApp, Message, PALETTE_INPUT_ID};
-use crate::palette::SCOPE_HINT;
+use crate::actions::availability;
+use crate::palette::{PaletteTarget, COMMAND_SCOPE, SCOPE_HINT};
 use crate::theme::DesignTokens;
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
@@ -16,7 +17,7 @@ const LIST_HEIGHT: f32 = 380.0;
 const BADGE_WIDTH: f32 = 64.0;
 /// iced 0.13 can wrap `Wrapping::None` text in a narrow cell; rows clamp to one line.
 const ROW_HEIGHT: f32 = 22.0;
-const PLACEHOLDER: &str = "Go to branch, tag, stash, worktree, file, commit, repository…";
+const PLACEHOLDER: &str = "Go to branch, tag, stash, worktree, file, commit, repository… or > for commands";
 
 pub(super) fn palette_overlay<'a>(
     app: &'a GitApp,
@@ -26,6 +27,12 @@ pub(super) fn palette_overlay<'a>(
     let palette = app.palette.as_ref()?;
     let (items, ranked) = app.palette_results();
     let small = (reading.size - 2.0).max(10.0);
+    // Only the `>` scope has rows that can be unavailable; they read in muted ink.
+    let command_context = palette
+        .query
+        .trim_start()
+        .starts_with(COMMAND_SCOPE)
+        .then(|| app.action_context());
 
     let field = text_input(PLACEHOLDER, &palette.query)
         .id(PALETTE_INPUT_ID)
@@ -40,6 +47,12 @@ pub(super) fn palette_overlay<'a>(
     for (position, &index) in ranked.iter().enumerate() {
         let item = &items[index];
         let selected = position == palette.selected;
+        let label_colour = match (&item.target, &command_context) {
+            (PaletteTarget::Command(id), Some(context)) if availability(*id, context).is_err() => {
+                tokens.text_muted
+            }
+            _ => tokens.text_primary,
+        };
         let line = row![
             container(
                 text(item.kind.badge())
@@ -56,7 +69,7 @@ pub(super) fn palette_overlay<'a>(
                     .size(reading.size)
                     .wrapping(Wrapping::None)
                     .style(move |_| text::Style {
-                        color: Some(tokens.text_primary),
+                        color: Some(label_colour),
                     }),
             )
             .width(Length::FillPortion(3))
